@@ -6,14 +6,14 @@ addr,name,kind,comment
 # --- Startup / main --------------------------------------------------------------------------
 3009:0025,start,func,Real entry point (after EXEPACK). Sets DS=124Ah and runs init and the main menu loop.
 3009:0E28,detect_cpu_class,func,"push sp/pop ax 8088 test, then idiv loop for 0x124 PIT ticks (~1 s). Returns AX 0=8088/slow 1=medium 2=fast; fast clears cs:0E26/0E27."
-3009:0E26,cpu_slow_flag_a,data,b; 0xFF unless detect_cpu_class says fast. Copied to 124A:2AC7 at startup.
-3009:0E27,cpu_slow_flag_b,data,b; 0xFF unless detect_cpu_class says fast. Copied to 124A:2ABE at startup.
+3009:0E26,cpu_slow_flag_a,data,b; 0xFF unless detect_cpu_class says fast. Copied to mirror_off (124A:2AC7) at race start: slow CPUs start with the rear-view mirror off.
+3009:0E27,cpu_slow_flag_b,data,b; 0xFF unless detect_cpu_class says fast. Copied to windows_off (124A:2ABE) at race start: slow CPUs start with downtown building windows off.
 #
 3009:005B,game_outer_loop,label,Outer loop: menus / garage / race setup. Re-entered from 3009:008A 00B2 0618.
 3009:0135,frame_loop,label,Per-frame loop head (back-edge 3009:061B). See re/notes/02-frame-loop.md.
-3009:8F00,video_set_mode_ega_0e,func,INT 10h mode 0Eh (EGA 640x200x16). Double-buffer pages at A000 and A400.
+3009:8F00,video_set_mode_ega_0e,func,INT 10h mode 0Eh (EGA 640x200x16) for menus and screens; pages A000/A400. The race uses mode 0Dh (video_set_mode_ega_0d).
 3009:8DA9,video_page_seg_a,data,w; A000h
-3009:8DAB,video_page_seg_b,data,w; A400h
+3009:8DAB,video_page_seg_b,data,"w; A400h in mode 0Eh, A200h in mode 0Dh (race)."
 #
 # --- Frame timing ----------------------------------------------------------------------------
 3009:051B,frame_measure_rate,label,"Inside the main frame loop: xchg pit_ticks with 0 -> elapsed (min 1); frame_rate = round(291/elapsed), min 4."
@@ -50,7 +50,7 @@ addr,name,kind,comment
 3009:92BC,snd_seq_count,data,w
 3009:92BE,snd_seq_ptr,data,w
 3009:92C0,snd_seq_idle,data,
-3009:5891,engine_speed,data,w; drives the engine-note pitch (compared against 0x14/0x35). Speed or RPM - TBD.
+3009:5891,engine_speed,data,w; player engine rpm in units of 100 rpm (= 2D61). Written by 60D7 (6131); 60/0 by garage rev sequence.
 #
 # --- Library segment 3FFC (far) -------------------------------------------------------------
 3FFC:0183,kbd_install,func,Saves INT 09h into cs:0000 and installs kbd_isr (far; called from start).
@@ -59,3 +59,364 @@ addr,name,kind,comment
 3FFC:0000,old_int09,data,d
 3FFC:0004,kbd_state,data,11 words of key state written by kbd_isr.
 3FFC:0164,kbd_clear_state,func,Zeroes kbd_state and cs:003C.
+#
+# === 3D renderer (see re/notes/03-renderer-and-visibility.md) =================================
+# --- Video pages (race view = EGA mode 0Dh 320x200) -------------------------------------------
+# See re/notes/03-renderer-and-visibility.md.
+3009:8F25,video_set_mode_ega_0d,func,"INT 10h mode 0Dh (EGA 320x200x16, 40 bytes/row) for the race view (called at 0155). Pages A000/A200; cs:926A=1."
+3009:0005,draw_page,data,w; current back page 0/1 (toggled by page_flip_select).
+3009:0009,page_crtc_start,data,"2 w; CRTC start address shown while drawing page 0/1 (2000h, 0)."
+3009:000D,page_draw_seg,data,"2 w; draw segment per page (A000, A200)."
+3009:0011,backbuf_seg,data,w; current back-buffer segment that all race drawing targets.
+3009:0013,vram_store_seg,data,w; A400 off-screen VRAM holding the three horizon panoramas (latch-copy source).
+3009:24FE,page_flip_select,func,Toggles draw_page; backbuf_seg = page_draw_seg[page]; returns BX = CRTC start of the page just drawn.
+3009:24D0,crtc_set_start_vsync,func,Waits for vertical retrace; writes CRTC regs 0Ch/0Dh = BX; waits for the next retrace (frame cadence tied to display refresh).
+3009:24F0,wait_vretrace,func,Waits for the end then the start of vertical retrace (port 3DAh bit 3).
+3009:497F,row_offset_table,data,w[]; row*40 byte offsets into a mode 0Dh page.
+# --- 3D math ---------------------------------------------------------------------------------
+3009:4E3C,sincos_deg,func,"AX = angle in degrees (wraps negatives once) -> [BX] = sin, [BX+2] = cos, Q15 from cos_table_q15."
+3009:4EC8,atan_deg,func,AX = ratio Q8 -> AX = angle 0..90 degrees (binary search of tan_table_q8).
+3009:4F65,approx_dist_points,func,Approx 2D distance between [SI] and [DI] (x/y words); deltas saved at 3A92/3A94.
+3009:4F7B,approx_dist_2d,func,"Approx sqrt(AX^2+BX^2): max*cos(t)+min*sin(t), t = 45*min/max degrees."
+3009:3CE7,polar_to_delta,func,"SI->[heading,pitch], DX=distance: [DI]=d*sin(p), [DI+2]=h=d*cos(p) (unsigned mul!), [3261]=floor(h*cos(hd)/32768), [3263]=floor(h*sin(hd)/32768)."
+3009:3F2D,camera_matrix_from_angles,func,"SI -> yaw/pitch/roll (negated) -> cam_matrix 32B1 (3x3 Q15, saturating)."
+3009:3DF9,build_object_matrix,func,"SI -> 3 angles of a rotating object -> 3x3 Q15 at 330B (likely, same scheme as 3F2D)."
+3009:25CB,mat_mul_object_camera,func,Object matrix x cam_matrix -> obj_cam_matrix 331D (likely).
+3009:3D51,vec_mul_mat3,func,"[DI] = [SI] (3 w) times 3x3 Q15 matrix [BX] as row vector: sum of imul, <<1, high word."
+3009:3D2F,xform_points_to_camera,func,AX points at [BX]: subtract camera (points_rel_camera) then rotate by cam_matrix into 2286.
+3009:3D8C,points_rel_camera,func,"[DI] = (y-cam.y, -(z-cam.z), x-cam.x) per point; camera space is X right, Y down, Z depth."
+3009:3917,world_to_camera_point,func,"[SI] world point -> 344E camera space (rel to 2C71, rotated by cam_matrix)."
+3009:39B9,build_axis_table,func,Builds the 24 k*axis vectors at DS:3184 from 3 rotated axes (k=1 2 3 5 7 8 9 11).
+3009:3A64,unpack_vertices,func,Packed vertex decoder (3 words per vertex: shift<<8 | signed selector into vertex_axis_table).
+3009:3879,xform_packed_block,func,BX = packed vertex block ({w x y z} origin + [3446] packed vertices): transform + project.
+3009:393F,xform_plain_rotated,func,BX = plain {x y z} list CX=count: rotated by obj_yaw (billboards) then projected.
+3009:A685,project_vertices,func,"sx = (X<<8)/Z + view_cx, sy = (Y<<8)/Z + view_cy; Z<1 -> flag 2; idiv overflow (INT 0 -> 7FFF) -> 32-bit coords, flag 1."
+4160:086B,project_points_simple,func,"Far: SI points at [BX] -> [DI] screen x,y using focal_len; no near/overflow handling."
+3009:25A0,project_points_simple_near,func,Near-call copy of project_points_simple.
+3009:2565,int00_div_overflow,func,INT 0 handler: returns AX = 7FFF; if [ret] is F6/F7 (286 fault semantics) skips the 2-byte div.
+3009:253D,install_int00,func,Saves INT 0 (312A) and installs int00_div_overflow.
+3009:255B,restore_int00,func,Restores the saved INT 0 vector.
+# --- Camera and viewports ----------------------------------------------------------------------
+3009:1D89,camera_from_car,func,cam = car pos (2D35) + eye height 10 + 2CCF; chase offset 2C7D (helicopter view) via polar_to_delta; cam_bt_index2.
+3009:3778,set_viewport,func,SI = 7-word viewport descriptor copied to the variables listed at viewport_var_ptrs.
+3009:3734,view_layout_dash,func,"Dash layout: viewport_desc_ptr = 3579, fullscreen_view = 0, [1A] = 2 (repaint static screen), clears gauge caches."
+3009:3762,view_layout_full,func,"Full-screen layout: viewport_desc_ptr = 356B, fullscreen_view = FF."
+3009:372A,toggle_fullscreen_view,func,Toggles fullscreen_view and applies the layout.
+3009:0666,draw_mirror_view,func,"Rear-view mirror: yaw+180 (or +-95 in side views), pitch negated, matrix column 0 negated, mirror_pass = FF, reduced cell window."
+3009:0E93,draw_view_border,func,Line under the 3D viewport (DS:2B02 y=119 or DS:2B0B y=199) via draw_line.
+124A:001B,model_unit_axes,data,9 w; (400 0 0)(0 -400 0)(0 0 400) in camera-input order; rotated into 316F each frame (3009:02EE).
+124A:2AC5,viewport_desc_ptr,data,w; main viewport descriptor (3579 dash view or 356B full screen).
+124A:355A,fullscreen_view,data,b; FF = full-screen 3D view (dash off).
+124A:355B,viewport_var_ptrs,data,7 w; target addresses for set_viewport (315E 315A 3160 315C 316B 3169 316D).
+124A:356B,viewport_full,data,"7 w; x 0-319, y 0-199, centre (160,100), height 200."
+124A:3579,viewport_dash,data,"7 w; x 0-319, y 0-119, centre (160,60), height 120."
+124A:3587,viewport_mirror_r,data,7 w; mirror while looking right: x 80-127 y 96-119.
+124A:3595,viewport_mirror_l,data,7 w; mirror while looking left: x 200-272 y 84-119.
+124A:35A3,viewport_mirror,data,7 w; rear-view mirror: x 192-319 y 0-35 centre (256 18).
+124A:315A,view_top,data,w; viewport top row.
+124A:315C,view_bottom,data,w; viewport bottom row.
+124A:315E,view_left,data,w; viewport left x.
+124A:3160,view_right,data,w; viewport right x.
+124A:3167,focal_len,data,w; 256. project_vertices hardcodes the same scale as <<8.
+124A:3169,view_cx,data,w; projection centre x.
+124A:316B,view_cy,data,w; projection centre y.
+124A:316D,view_height,data,w; 200/120/36 from the viewport descriptor (200 = full screen; tested by the frame loop).
+124A:316F,view_axes,data,3x3 w; rotated world axes scaled to 1024 (vertex unpacking).
+124A:3184,vertex_axis_table,data,24 x 3 w; k*axis vectors (k=1 2 3 5 7 8 9 11) for the 3 rotated model axes; built by 3009:39B9.
+124A:32B1,cam_matrix,data,3x3 w Q15 camera rotation (row-major).
+124A:331D,obj_cam_matrix,data,3x3 w; object rotation x camera (rotated models; likely).
+124A:2C71,cam,data,camera struct (car layout): +0 x +2 y +4 z +6 yaw +8 pitch +A roll +19 cell ptr +22 bt row +24 bt col +26 cell x +28 cell y.
+124A:2C77,cam_yaw,data,w; degrees = car heading + view_yaw_offset.
+124A:2C79,cam_pitch,data,w; degrees (from 2BEB).
+124A:2C7B,cam_roll,data,w; degrees.
+124A:2C7D,chase_distance,data,w; helicopter/chase camera distance (0 = in car; the mirror needs 0).
+124A:2C93,cam_bt_row,data,w; camera big-tile row.
+124A:2C95,cam_bt_col,data,w; camera big-tile column.
+124A:2C97,cam_cell_x,data,w; camera cell x 0..15.
+124A:2C99,cam_cell_y,data,w; camera cell y 0..15.
+124A:2CC1,cam_cell_org_x,data,w; camera x & F800h.
+124A:2CC3,cam_cell_org_y,data,w; camera y & F800h.
+124A:2B87,view_yaw_offset,data,"w; 0 front, +85 (55h) right, -85 left."
+124A:843A,cam_bt_index2,data,w; (cam_bt_row*map_cols + cam_bt_col)*2.
+124A:38DE,cos_table_q15,data,91 w; cos(0..90 deg) Q15.
+124A:3994,tan_table_q8,data,91 w; tan(0..90 deg) Q8 (89 deg = 7FFFh).
+3009:30C6,draw_world_cells,func,"Visits <=6 cells (2 ahead, 1 side row chosen by in-cell offset, own cell last) by heading sector; mirror_pass skips the far ones."
+3009:3589,cell_lookup,func,"SI = car/camera struct: cell origin (2CC1/2CC3), in-cell offset (2CBF/2CBD), +26/+28 cell idx, +19 cell entry ptr."
+3009:31EE,draw_cell,func,"CX,DX = origin offset, BX,AX = cell offset: wraps big tiles, reads the cell entry, runs the static list, then sorted objects and vehicles."
+3009:3686,draw_own_cell,label,Camera's own cell: own_cell_pass = FF around draw_cell.
+3009:35F0,cell_m1_m1,label,"draw_cell helpers 35F0..371B: (CX,DX,BX,AX) = cell offsets; 36D4/36F0 use x origin 0FD0h instead of 1000h."
+3009:463E,collect_sortables,func,Copies cell list2 (absolute positions) plus the cell's vehicles into DS:35C5.
+3009:32F8,collect_vehicles,func,"List draw_vehlist: slots 0-2 (player, opponent, chase car) exact cell, others (cell&33h) match; writes the drawn cell back; own cell: collision test -> hit_vehicle_slot."
+3009:34D6,collect_pedestrians,func,Pedestrian list draw_pedlist by (cell&33h); own cell in main view: collision test -> hit_pedestrian_slot.
+3009:4562,cull_sortables,func,Static sortables: keep -400h <= Z < 1400h and |X| < Z+600h; key Z-600h. Vehicles continue at 44D0.
+3009:44D0,cull_vehicles,label,Vehicles: keep -80h <= Z < 1400h and |X| < Z+80h; key Z-80h (400h if <0); then sort.
+3009:4686,sort_sortables,func,Bubble sort of sortables by depth.
+3009:4603,draw_sortables,func,Calls each sorted record's draw routine with obj_pos set and obj_depth = its key; resets the 16-entry sort index DS:3805 from DS:37C5.
+3009:2A6D,draw_compound_list,label,"Draws a compound structure list {code,dx,dy,dz}...FFFF (DS:A3E7) then sets compound_drawn."
+3009:2C41,draw_compound_list2,label,Same for the compounds at 2C25 (A053) and 2C33 (A275).
+3009:2672,draw_model_desc,label,"BX = model descriptor {b colour, w nverts, w poly, w verts, w extra list}: project and fill."
+3009:26B0,draw_road_quad,label,4-vertex flat quad in colour 8 (far/simple road piece).
+3009:26C9,draw_quad_block,func,BX = packed block of a 4-vertex quad AL = colour: origin <- obj_pos then fill poly 6864.
+124A:0018,mirror_pass,data,b; FF while drawing the mirror (and in the 2AD4 mode): reduced cell window and inverted winding test. Menus reuse it.
+124A:0019,buildings_off,data,b; B key toggle: nonzero = building lists not drawn.
+124A:2ABE,windows_off,data,b; W key toggle (copy of cpu_slow_flag_b at race start): nonzero = downtown window faces (2E3C) not drawn.
+124A:2AC7,mirror_off,data,b; copy of cpu_slow_flag_a at race start; 0 = rear-view mirror drawn. Toggled at 0BA7.
+124A:2AC0,compound_drawn,data,w; FFFF after a multi-cell structure (2AA7/2C25/2C33) was drawn this frame.
+124A:2CBB,cell_base_z,data,w; elevation byte*224 of the cell being processed.
+124A:2CC5,draw_cell_org_y,data,w; world y origin of the cell being drawn.
+124A:2CC7,draw_cell_org_x,data,w; world x origin of the cell being drawn.
+124A:2CC9,draw_cell_index,data,w; x*16+y of the cell being drawn.
+124A:3142,draw_cell_type,data,w; cell type of the cell being drawn.
+124A:314C,draw_cell_x,data,w; cell x of the cell being drawn.
+124A:314E,draw_cell_y,data,w; cell y of the cell being drawn.
+124A:3556,draw_cell_bt,data,w; big-tile index*2 of the cell being drawn.
+124A:3148,draw_vehlist,data,w; bt_vehicle_lists entry for the big tile of the cell being drawn.
+124A:314A,draw_pedlist,data,w; bt_pedestrian_lists entry for the big tile of the cell being drawn.
+124A:35C3,facing_y_axis,data,"b; 0 = facing +-x, 1 = facing +-y (road models read it)."
+124A:35C4,own_cell_pass,data,b; FF while drawing the camera's own cell (collision tests run).
+124A:35C5,sortable_list,data,{w code w x w y w z}... list2 objects + vehicles of the cell being drawn (3009:463E).
+124A:340A,sort_keys,data,w[]; depth keys of sortable_list.
+124A:3805,sort_index,data,w[16]; record offsets in draw order.
+124A:37C5,sort_index_init,data,w[]; identity list copied to sort_index after each cell.
+124A:3220,obj_pos,data,3 w; absolute x y z of the object being drawn (set before calling its routine).
+124A:2B7A,hit_vehicle_slot,data,w; byte offset in EF5A list of the vehicle hit in the render pass (0 = none).
+124A:2B7C,hit_pedestrian_slot,data,w; byte offset in EF8C list (-1 = none).
+124A:2B8B,player_half_x,data,w; player box half-extent x for the heading octant (from 2BC9).
+124A:2B8D,player_half_y,data,w; player box half-extent y for the heading octant (from 2BD9).
+124A:2BC9,player_half_x_tab,data,"8 w by heading octant (24,18,12,18,...)."
+124A:2BD9,player_half_y_tab,data,"8 w by heading octant (12,18,24,18,...)."
+124A:312E,remote_car_drawn,data,w; FFFF when vehicle slot 4 (other car) was drawn; read at D8B7.
+3009:259E,obj_depth,data,"w (code seg); depth key of the sortable being drawn (Z-600h for list2 objects, Z-80h for vehicles); >= 800h selects the far LOD (set at 3009:4611)."
+# --- Model drawing, clipping, fill ---------------------------------------------------------------
+3009:3B78,faces5_visibility,func,Face table of 5-byte {poly va vb colour}: visible iff (V[vb]-V[va]).V[va] > 0.
+3009:3BF5,faces6_visibility,func,Face table of 6-byte {poly v0 v1 v2 colour}: normal from 3 vertices.
+3009:3B0E,faces5_draw,func,Draws visible 5-byte faces (colour at +4).
+3009:3B43,faces6_draw,func,Draws visible 6-byte faces (colour at +5).
+3009:B5B3,fill_poly_list,func,SI = {w n (n+1)*w idx*4}..FFFF AL=colour; vertex array 266E/1A86.
+3009:B5BC,fill_poly_list_bx,label,fill_poly_list without loading BX (jump table 9C72 entry 0).
+3009:B4B2,poly_gather_clip,func,Gathers projected vertices; if any flagged (proj_any_clipped) runs clip_near_plane and the 32-bit guard-band clips.
+3009:A7C0,clip_near_plane,func,Clips the polygon to Z = 1 in camera space (Q15 parameter) and projects the new vertices.
+3009:A8D4,clip32_left,func,Guard band: 32-bit x >= -4000h.
+3009:A9F8,clip32_top,func,Guard band: 32-bit y >= -4000h.
+3009:AB1F,clip32_right,func,Guard band: 32-bit x <= 4000h.
+3009:AC45,clip32_bottom,func,Guard band: 32-bit y <= 4000h.
+3009:40E3,clip_viewport,func,Sutherland-Hodgman against left/top/right/bottom (CX = vertices; 0 = rejected).
+3009:40F7,clip_left,func,Clip to view_left.
+3009:41E5,clip_top,func,Clip to view_top.
+3009:42D4,clip_right,func,Clip to view_right.
+3009:43C2,clip_bottom,func,Clip to view_bottom.
+3009:9CD8,poly_winding_test,func,2D winding test when E0D4 set; sign inverted when mirror_pass (likely).
+3009:9F3B,fill_spans,func,"EGA set/reset span fill (GC0 colour, GC1 0F, GC8 mask), 40-byte rows; high nibble != low -> dither pass."
+3009:9FA6,fill_spans_solid,func,Solid span loop (left table DS:002E right table DS:01BE).
+3009:9FFF,fill_spans_dither,func,Overlay of the high-nibble colour on a 55h/AAh checkerboard.
+3009:5170,draw_line,func,"Line [SI]=x0,y0,x1,y1,b colour; self-modifying Bresenham (patches 52E4-5375, jumps via DS:38D8)."
+3009:405E,draw_line_list,func,[3269] = {b 6n b n}{b i0*4 b i1*4}*n; colour [3337].
+124A:3446,obj_vertex_count,data,w; packed-vertex count for 3009:3879 (vertices = count+1).
+124A:337D,obj_face_count,data,b; face count for 3B78/3B0E/3BF5/3B43.
+124A:337E,obj_face_table,data,w; ptr to face table (5-byte {poly va vb colour} or 6-byte {poly v0 v1 v2 colour}).
+124A:333D,obj_face_visible,data,b[]; per-face visible flags written by 3B78/3BF5.
+124A:3337,poly_colour,data,"b; low nibble = colour, high nibble = dither colour."
+124A:1A86,proj_verts,data,"128 x 8 bytes {sx, sy, flags 0/1/2, cam vertex ptr}; 32-bit x,y at +400h."
+124A:266E,cam_verts,data,6-byte camera-space vertices of the current model.
+3009:9C7A,proj_any_clipped,data,b; FF if any vertex of the model is behind Z=1 or overflowed.
+# --- Sky, ground and horizon ---------------------------------------------------------------------
+3009:5A35,draw_sky_ground_horizon,func,"Ground colour from bt_ground_colour (6 on the highway), horizon_line, fill_sky_ground, blit_horizon."
+3009:5A2E,draw_sky_ground,func,horizon_line + fill_sky_ground (mirror; no panorama).
+3009:59B3,horizon_line,func,"Projects (0, 25000*sin(pitch)+cam z, 25000): CX = horizon row clamped to the viewport; horizon_rows_hidden."
+3009:5A5B,fill_sky_ground,func,"Set/reset fill: sky_colour from view_top to the horizon row, ground_colour down to view_bottom."
+3009:6724,horizon_select,func,SI = horizon slot offset for the camera's big tile.
+3009:6734,blit_horizon,func,"24 rows x 40 bytes from vram_store_seg at SI + heading + row*400 (8 px per degree), bottom on the horizon row."
+3009:6773,vram_copy_rows,func,EGA write mode 1 latch copy of BP rows x 40 bytes (source stride 400).
+3009:685E,bt_index_5cols,func,BX = (cam row*5 + col)*2 with a hard-coded 5 columns.
+3009:6793,load_horizon_planes,func,"Copies a loaded HORIZONn.BIN (4 planes x 24 rows x 400 bytes) into vram_store_seg at DI, plane by plane."
+3009:57DF,sky_colour,data,b; 0Bh.
+3009:57E0,ground_colour,data,b; set per frame by draw_sky_ground_horizon.
+3009:57AC,horizon_row_ofs,data,w[24]; row*400.
+124A:8556,bt_ground_colour,data,25 b; ground colour per big tile (7 land / 9 water); read by 3009:5A35.
+124A:3C8E,bt_horizon,data,25 b; 0/2/4 -> horizon_offsets; indexed row*5+col with hard-coded 5 (3009:685E).
+124A:3CA7,horizon_offsets,data,3 w; 0000/2580/4B00 = HORIZON0/1/2 slot in the horizon buffer (loaded by 3009:FE8F).
+124A:40E0,horizon_rows_hidden,data,w; panorama rows hidden below the viewport bottom.
+3009:B9F6,model_select_lod,func,AX = id -> SI = model header from 245A:6FF8 (far header + colour patch when obj_depth >= 0x800).
+3009:B765,draw_model,func,Model header at SI: octant test (9CAF) -> skip list + face order; transform/project; per-face primitive via cs:9C72.
+#
+# --- Simulation: vehicles, police, traffic, highway mode (see re/notes/04-simulation-state.md) ----
+3009:0EAA,player_step,func,"Per-frame player physics: 1EC8 engine+drivetrain, 1738 move, 21A2 speeding check. If DS:17!=0 copies 2F09 over 2D35 instead."
+3009:0EF5,opponent_step,func,"Opponent car DS:2F09: 2P = serial packet or dead reckoning (speed/frame_rate, min 1); 1P = computer driver along waypoints FA22/F7C0."
+3009:12D2,police_step,func,"Police chase: spawns DS:3065 from the slot-3 patrol entity, pursues player (DS:2BA1), pulls over within 100 units, gives up at >=0xC00."
+3009:15D6,police_chase_reset,func,Clears chase/siren/ticket state (F7C2 2B8F 2C59 2C5F 2C57 2C65 cs:DADD).
+3009:121C,police_return_patrol,func,Puts the slot-3 patrol entity back at the chase car position (cell of slot 2) with speed 0.
+3009:124E,police_can_start_chase,func,CF=0 -> start chase. Always CF=0 in F00C/F01E tiles; in F0B0/F0E6 tiles depends on patrol car side vs heading octant 2B89.
+3009:1738,vehicle_move,func,"SI=vehicle struct. Player: collision handling 161A + steering/skid 4160:037F. Then 3CE7(heading,pitch,[si+20]) and x/y add with big-tile carry; cell update; z and pitch."
+3009:161A,player_contact_response,func,"Handles render-pass hits: DS:2B7A (vehicle: speed -= speed>>profile[4]) and DS:2B7C (pedestrian: knock over, heading +-15, +100 to DS:2AD9). Sets offence bits."
+3009:1888,vehicle_set_list_cell,func,Writes cell index (cx*16+cy) of vehicle SI into slot [2B7E] of its big-tile EF5A list.
+3009:18E0,collide_cell_boxes,func,BX=box list: tests the car's in-cell position against {xmin ymin xmax ymax} boxes; sets [2B20] side.
+3009:1976,collision_box_event,func,"Dispatch on the address of the collision box hit: water (race ends), finish lines, highway on-ramps (DS:2AD4/8156), toll speed clamp, bridge-deck camera, rough surface; default 1BAB = wall crash."
+3009:1D3B,car_contact_check,func,"Contact between SI and DI car (+-0x28 x, +-0x14 y, same big tile as camera) -> 1976 default crash path."
+3009:1EC8,player_drivetrain,func,60D7 engine rpm then 4160:0939 autoshift then 4160:0045 drivetrain/speed.
+3009:1EBF,ai_drivetrain,func,4160:0939 autoshift then 4160:04A7 AI speed model.
+3009:1EE9,vehicle_face_target,func,[si+6] = atan2 heading from vehicle (SI) to target point (DI).
+3009:1F01,gear_select,func,"AX = requested gear (manual). Too low for current speed -> neutral + grind + transmission damage, 2D51=1."
+3009:1F5C,toggle_automatic,func,Toggles DS:2D50 (player automatic gearbox flag).
+3009:1F65,race_setup_cars,func,"Copies player/opponent templates into 2D35/2F09, start position from DS:2D69[course-1], route list F7C0/FA22."
+3009:206E,ai_route_load_targets,func,"Loads the 8-byte initial target from [FA22] into FA2C, next raw waypoint to FA24, builds FA34 via D150."
+3009:21A2,speeding_check,func,"speed - [2C4F] >= cs:219A[[3B61]] -> police alert 2C57=1, offence bit 0."
+3009:21C8,crash_damage,func,"Collision damage (needs FC4F!=0): speed<560 -> 2C5B+=1 (and 2C5D+=2 once 2C5B>=4); speed>=560 -> 2C5B=7, 2C5D+=6. Sets HUD damage message timer 3DEE = frame_rate*2."
+3009:53B1,heading_to_point,func,"Heading in degrees from (CX,DX) to (AX,BX); 0=+x 90=+y."
+3009:60D7,engine_rpm_update,func,"rpm = rev_acc / gear_div (cs:5877), clamped to idle (cs:5887) and redline (cs:586F, rev_acc-=4). Player: engine_speed = rpm."
+3009:5E4C,hud_speed_value,func,"DS:3AA1 = ((speed>>2) + (speed>>3))>>1 (~speed*3/16, likely mph); bar length from it."
+3009:BB72,pedestrians_step,func,"EF8C list of camera big tile: walk square routes (speed +1/frame to 28), distance = speed/frame_rate, cell wraps mod 4; knocked-over ones reset when player is far."
+3009:BCFB,traffic_step,func,"EF5A list of camera big tile from slot 3: accelerate per frame by profile stage, step = speed/frame_rate, follow route targets, intersection turns, move with cell carry."
+3009:BDAC,traffic_accelerate,func,"speed += profile[6+2*stage] (per frame); cap profile[0E+2*stage], stage++ up to 3. Returns DX = speed/frame_rate."
+3009:BDDE,traffic_move,func,Moves entity by DX along +8 heading/+A pitch; wraps x/y 0..7FF and the list cell nibbles +-1 mod 16; shifts path targets by -+0x800.
+3009:BE86,traffic_follow_path,func,"If within step of target: target=next, new next from route via D150; heading = atan2 to target."
+3009:BF10,traffic_intersection,func,Sets +1C moving flag; city tiles: byte map [[D2AE+bt*2]+cell] dispatched by heading quadrant through DS:EF52.
+3009:BBF2,ped_speed_step,func,Pedestrian speed +1/frame up to profile[0]; returns DX = speed/frame_rate.
+3009:BC22,ped_move,func,Pedestrian move with cell wrap mod 4.
+3009:BCAD,ped_follow_route,func,Pedestrian waypoint following (accumulators +18/+1A vs route point).
+3009:BBA7,ped_reset_if_far,func,Restores a knocked-over pedestrian (EAEA->+10 profile) when >=2 cells (mod 4) from the player.
+3009:C0B8,heading_quadrant,func,AX deg -> 0 (315..45) 1 (45..135) 2 (135..225) 3 (225..315).
+3009:D150,ai_path_plan,func,Lane/turn planner: from target SI and raw waypoint DI builds next target at BX (8-direction switch via DS:FA4B).
+3009:D8B7,opponent_throttle,func,"1P opponent: brake if heading change ahead, speed>140 and dist [2B64] < 2.5*(speed-140); else full throttle."
+3009:11FF,opponent_finished,func,Sets DS:FA45=FF and stores the finish time in cs:C9D4..C9D7.
+3009:775E,highway_frame,func,"Highway mode (DS:2AD4!=0): build 32 road slices, advance/place 11 highway cars, spawn, exit countdown."
+3009:7743,highway_exit,func,"DS:2AD4=0, 8411/8412=0, 2ABF=FF: back to city mode."
+3009:7F09,highway_draw_cars,func,Draws the active highway cars (render only).
+4021:0004,hw_polar_to_delta,func,"AX=heading, DX=distance: [3261]=-d*sin, [3263]=d*cos (highway frame)."
+4021:002D,hw_predict_contact,func,Player vs highway car SI: ahead within 8 deg -> (v_player-v_car)/frame_rate vs gap; else side overlap test.
+4021:0143,hw_player_collide,func,"Player vs 11 highway cars: on contact speed capped to lane speed DS:83E6[[814E]-1], rev_acc halved, crash damage."
+4021:01B7,hw_opponent_enter,func,"Computer opponent enters highway DS:81EC: init record 81CE.., speed from 2F17, DS:842B=FF."
+4021:024C,hw_opponent_step,func,Highway opponent per frame: 0314 (other highway) or 0664 lane AI + 08D6 (player's highway); step = [81DC]/frame_rate.
+4021:0AB4,hw_opponent_exit,func,"Opponent leaves highway: DS:842B=0, 2F09 placed from DS:7572[id], next waypoint list."
+4021:0AF5,hw_remote_place,func,2P: place remote car (DS:7406..) into highway slot 10 if near on the same highway.
+4021:0B7D,hw_build_packet,func,2P highway packet: len 0x16 + FFFF + id/seg/pos/slice/dx/dy/heading/speed/flag.
+4021:0C43,hw_store_packet,func,Copies received highway payload to DS:7406.
+4021:0C49,hw_remote_step,func,"2P remote on highway without packet: dead reckoning, step = [7414]/frame_rate."
+4021:0ED1,highway_enter,func,"Enter highway mode: player at (40A0,4000,7) heading 90, road id DS:8156, DS:2AD4=FF, exit delay 8412 = max(frame_rate-3,1)."
+4021:1007,hw_spawn_car,func,Spawns a highway car (random lane/type) into a free DS:82F4 slot.
+4021:1190,hw_car_advance,func,"BL = slot: advance (11C4: step = speed/frame_rate along slices), project for drawing."
+4160:0004,vehicle_set_pitch,func,BX = slope code from 4160:0515: [si+8] = DS:2B36[code][heading quadrant] (+-7 deg).
+4160:0045,player_drivetrain_step,func,"Throttle (rev_acc += rate/fr w/ remainder), slope, brake/coast, engine coupling (speed += gap/4 per frame), [si+20] = (speed-2*slip)/frame_rate."
+4160:037F,player_steer_skid,func,Travel heading 2C45: skid when |steer|>=2 and speed >= grip DS:2BF1[model][|steer|] + bonus 4160:0373[model+4*level].
+4160:04A7,ai_speed_step,func,"AI speed: throttle += accel_tbl[gear]/fr (remainder +2E), coast -160/s; cap in top gear; [si+20] = speed/frame_rate."
+4160:0515,ground_shape_height,func,BX=shape class SI=pos: returns AX = in-cell height (0..E0) and BX = slope code; via DS:2B22.
+4160:0794,car_cell_info,func,From the car's cell word: [2CBB]=elev*224 and [2B14]/[2B16] = cell hdr lo/hi.
+4160:0939,auto_shift,func,"Automatic gearbox (+1B): down below spd_tbl[gear-1] w/o throttle, up above spd_tbl[gear] w/ throttle; sets +1C."
+4160:09E5,player_wreck_check,func,Damage 2C5D/2C4F >= 0x20/0x40 and stopped -> wrecked (2C6A); returns AL=FF 10 s later.
+4160:0C00,opponent_finish_estimate,func,Same big tile: ticks = race_ticks + (dist/[2F29])*291/frame_rate.
+422F:0176,serial_recv_packet,func,Returns newest received packet (checksum verified) at DS=2F98:SI; ZF=1 if none.
+422F:01C8,serial_send_packet,func,Sends packet at 2F98:015B (first word = length) with checksum.
+124A:2D35,player_car,data,"0x32-byte vehicle struct (x,y,z,heading,pitch,roll,?,speed,gear,maxgear,throttle,brake,accel_tbl,gear_spd_tbl,cell_ptr,auto,shift,?,target,step,bt_x,bt_y,cell_x,cell_y,rev_acc,rpm,rem,?). Entity header word at 2D33."
+124A:2D43,player_speed,data,w; units/s (world units). HUD ~ speed*3/16 (likely mph).
+124A:2D45,player_gear,data,w; 0 neutral .. max_gear; max_gear+1 = reverse.
+124A:2D47,player_max_gear,data,b
+124A:2D48,player_throttle,data,b; 1 while accelerate held (cleared each frame at 0293).
+124A:2D49,player_brake,data,b; 1 while brake held (cleared each frame at 028E).
+124A:2D50,player_automatic,data,b; 1 = automatic gearbox.
+124A:2D55,player_step_dist,data,w; distance moved this frame = speed/frame_rate.
+124A:2D5F,player_rev_acc,data,w; engine accumulator (throttle integrates into it).
+124A:2D61,player_rpm,data,w; rpm/100 = engine_speed.
+124A:2D67,vehicle_struct_size,data,w; 0x32.
+124A:2D19,car_template_ptrs,data,8 w; player models 0-3 then opponent models 0-3 (0x32 struct + accel/speed tables).
+124A:2D69,course_start_ptrs,data,"4 w; -> {player x,y,z, opponent x,y,z, heading, bt_x, bt_y} start record per course."
+124A:2F09,opponent_car,data,0x32 vehicle struct: computer opponent (1P) or remote car (2P). Entity header 2F07.
+124A:3065,police_car,data,0x32 vehicle struct of the chasing police car. Entity header 3063.
+124A:2B84,steer,data,"w; steering input deg/frame (-8..8 at start, limits 2AEB/2AEA). Heading += steer per frame when speed!=0."
+124A:2ACD,steer_center_target,data,w; steering drifts 1/frame toward this.
+124A:2AEA,steer_limit_right,data,b; 8 at race start; reduced by damage.
+124A:2AEB,steer_limit_left,data,b; -8 at race start; reduced by damage.
+124A:2AD5,reverse_flag,data,b
+124A:2AD7,coast_mode_flag,data,b; shown on dashboard; speed -1/+3 per frame toward DS:2BEF (=0). Meaning TBD.
+124A:2C45,travel_heading,data,"w; movement direction (=facing unless skidding); followed by 2C47 pitch, 2C49 roll."
+124A:2C4B,skid_flag,data,w
+124A:2C4D,wheel_slip,data,w; subtracted (x2) from per-frame distance.
+124A:2C51,sim_not_player,data,w; 0 while the player is being simulated.
+124A:2C61,slope_accel,data,w; -20*sign(pitch) units/s^2 (flipped in reverse).
+124A:2C6D,rough_surface_flag,data,b
+124A:2B7E,vehicle_slot,data,"w; 0 player, 1 opponent, 2 police: slot in the big-tile EF5A list."
+124A:2B6A,bt_cross_x_flag,data,w; -1 when the moved vehicle crossed a big tile in x.
+124A:2B6C,bt_cross_y_flag,data,w; -1 when it crossed in y.
+124A:2B70,opponent_bt_index,data,w; bt_x*5+bt_y of 2F09.
+124A:2B6E,police_bt_index,data,w
+124A:2B89,heading_octant,data,w; round(heading/45)&7.
+124A:2B76,crash_frames,data,w; set to 8 on vehicle contact; decremented per frame.
+124A:2B00,remote_no_packet,data,b; FF when no packet arrived this frame.
+124A:2B01,remote_frames_since_packet,data,b; capped at 0x7F.
+124A:2B60,remote_heading_last,data,w
+124A:2B62,remote_heading_prev,data,w
+124A:842B,opponent_on_highway,data,"b; 0 city, FF on highway, other = needs highway init."
+124A:2AD4,highway_mode,data,"b; 0 city, 1/2/3 on-ramp touched, FF in highway mode."
+124A:8156,highway_id,data,w; 0..8.
+124A:82F4,highway_cars,data,"11 x 0x16 records (slot 10 = opponent): seg,pos,x,y,lat_x,lat_y,heading,speed,slice,lane,type,half_w,half_l."
+124A:8420,highway_car_active,data,11 b
+124A:81CE,hw_opponent,data,"0x16-byte highway record of the opponent, then 81E4 next heading, 81E6 max speed, 81E8 seg count, 81EA seg list, 81EC id."
+124A:83E6,hw_lane_speed,data,4 w; 252 308 364 420.
+124A:83EE,hw_lane_offset,data,4 w; 32 96 160 224.
+124A:F7B8,course_route_ptrs,data,"4 w; [course-1] -> 3 w by level -> route list {w waypoint_list, w highway_id|FFFF}."
+124A:F7C0,opponent_route_ptr,data,w; current position in the route list.
+124A:FA22,opponent_waypoint_ptr,data,"w; -> next {x,y} in the waypoint list (8-byte header first, FFFF end)."
+124A:FA24,opponent_raw_waypoint,data,2 w
+124A:FA2C,opponent_target,data,"8 B {x,y,heading,type}; current target point."
+124A:FA34,opponent_next_target,data,8 B; next target point.
+124A:FA45,opponent_finished_flag,data,b; FF when the opponent finished.
+124A:2B64,ai_target_dist,data,w; distance opponent/police to its current target.
+124A:2B66,police_player_dist,data,w
+124A:2BA1,police_chase_target,data,w; = 2D35.
+124A:2B91,police_target,data,8 B current + 8 B next (2B99) target points.
+124A:F7C2,police_chase_active,data,w
+124A:2C57,police_alert,data,w; an offence was detected.
+124A:2C59,player_pulled_over,data,w
+124A:2C5F,ticket_active,data,w
+124A:EF4C,patrol_active,data,w; moving flag of the slot-3 patrol car in the camera tile.
+124A:FC4F,game_level,data,"b; 0..2 menu choice (likely difficulty): 0 = no police, +255 grip bonus; 2 = harsher."
+124A:EF5A,bt_vehicle_lists,data,"25 w; per big tile -> {w entity_ptr, w cell} list, FFFF end. Slots 0-3: player, opponent, chase car, patrol car."
+124A:EF8C,bt_pedestrian_lists,data,25 w; per big tile -> pedestrian list (cells match on &0x33).
+124A:E798,traffic_profile_a,data,"0x16 B: half_len, half_wid, contact_shift, accel[4]/frame, cap[4] (50,100,150,224)."
+124A:E7AE,traffic_profile_police,data,Patrol car profile (half 28x12).
+124A:EAE8,ped_profile_walk,data,w max speed 28; EAEA = knocked-over marker.
+3009:586F,redline_by_model,data,4 w; 55 72 55 65 (x100 rpm).
+3009:5877,gear_rpm_divisor,data,8 w; 0 1 2 3 4 6 6 6 by gear.
+3009:5887,idle_by_model,data,4 w; 11 9 8 7.
+3009:219A,speeding_thresholds,data,4 w; 468 624 680 736 indexed by DS:3B61.
+#
+# --- World data: map, cell types, models, courses (see re/notes/05-world-data.md) ---------------
+124A:856F,map_bt_rows,data,w; number of big-tile rows (5). Row index runs along world X (north).
+124A:8571,map_bt_cols,data,w; number of big-tile columns (5). Column index runs along world Y (east).
+124A:8524,map_bt_ptrs,data,25 w; near ptr to each big tile's 16x16 cell array; index row*cols+col (code uses [bx-7ADC]).
+124A:8573,map_tiles,data,12 x 0x200 bytes; unique big-tile arrays (8573..9B73). Cell offset cx*32+cy*2: b type + b elevation (z=e*224).
+124A:9D73,cell_type_defs,data,256 w; ptr to cell-type record {w hdr(lo=ground shape 0..9 hi=collision class); list1 {code dx dy dz}* FFFF; list2 {..}* FFFF}.
+124A:3D22,bt_street_set,data,25 b; street-set id 1..3 matched against cell_street_codes&3 (3009:71BF/6871).
+124A:DD12,cell_street_codes,data,256 b; shared 16x16 layer (idx cx*16+cy): bits0-1 street set; bits2-6 one-hot name (diag_street_names).
+124A:3D3B,diag_street_names,data,"5 w; ptrs to ""columbus"" ""market"" ""embarcadero"" ""cervantes"" ""marina""."
+124A:3D84,compass_strings,data,"8 w; ptrs to "" n"" ""ne"" "" e"" ""se"" "" s"" ""sw"" "" w"" ""nw"" (index round(heading/45)&7 at 3009:01E3)."
+124A:40E2,on_diag_street,data,b; 1 when the player is on a matching DD12 cell (3009:71BF); skips heading snap in 3009:09BD.
+124A:D2AE,bt_dash_cells_a,data,25 w; per big tile ptr to 16x16 byte array of 2-bit fields used by the dash sign code 3009:65E9 (meaning TBD).
+124A:DAE0,bt_dash_cells_b,data,25 w; per big tile ptr to a second 16x16 byte array (3009:65F1; TBD).
+2243:0682,bt_street_name_tables,data,25 w (segment 2243); per big tile ptr to street-name data (strings in seg 2243).
+124A:C0A6,coll_box_lists,data,w ptrs indexed by collision class (cell hdr hi byte) -> {w xmin ymin xmax ymax}*..FFFF.
+124A:C606,coll_box_water,data,box (0 0 2048 2048) of class 3F (cell type 1). Hit -> race ends (3009:198A).
+124A:C5AC,coll_box_finish_c1,data,course 1 finish box (class 3A cell type 75; 3009:1ADB).
+124A:C28A,coll_box_finish_c2,data,course 2 finish box (class 0F cell type 74; 3009:1B0D).
+124A:C5B6,coll_box_finish_c3,data,course 3 finish box (class 3B cell type 208; 3009:1B3F).
+124A:2B22,ground_shape_jt,data,10 w; jump table (4160 offsets) of ground-shape classes for 4160:0515.
+124A:2B14,car_ground_shape,data,w; ground-shape class of the car's cell (cell hdr lo; 4160:0794).
+124A:2B16,car_coll_class,data,w; collision class of the car's cell (cell hdr hi; 4160:0794).
+124A:324A,draw_cell_def,data,w; ptr to the cell-type record of the cell being drawn (3009:32AC).
+124A:3226,obj_yaw,data,w; object yaw (pitch 3228 roll 322A) for model draws / billboards.
+124A:2CD5,course,data,w; 1..4 (4 = loop 1->2->3).
+124A:38D7,finish_banner_flag,data,b; set by finish-banner routines 4788/4798/47A8; enables posts 3009:481D.
+245A:6FF8,model_table,data,59 x {w near_hdr w unused w far_hdr w far_colour}; data-driven 3D models (B9F6).
+3009:B63F,fill_poly_list_alt,func,Same list format as B5B3; draws differently (TBD). Model primitive kind 2.
+3009:B6E1,draw_prim_lines,func,Model primitive kind 4/6: {n idx0 idx1..} lines.
+3009:38A0,draw_poly_colour_list,func,BX = {w poly b colour}..FFFF no culling.
+3009:2EAF,draw_box_building,func,BX = block [337E] = faces: origin = obj_pos - 0x300; 8 vertices 5 faces.
+3009:2E3C,draw_building_windows,func,BX = per-face window lists; skipped when [2ABE] != 0 (cpu_slow_flag_b).
+3009:B9BA,draw_model_yaw,func,AX = data model id; rotation from [3226] (pitch/roll forced 0).
+3009:B9D6,draw_model_rot,func,AX = data model id; yaw/pitch/roll [3226..322A] (vehicles).
+3009:B9E6,draw_model_flat,func,AX = data model id; no rotation (camera matrix only).
+3009:9CAF,model_octant_test,func,Sign of (V[i]-V[0]).V[0] for reference vertices 1..3.
+3009:28D3,draw_player_car_chase,func,Chase view: draws data model 1 (player Corvette) at the car position.
+3009:FE8F,load_horizons,func,Reads HORIZON0/1/2.BIN (0x9600 bytes each) and unpacks them to offsets 0/2580/4B00.
+3009:71BF,diag_street_check,func,Sets on_diag_street from bt_street_set / cell_street_codes / in-cell position.
+3009:4788,banner_finish_c1,func,Draws finish banner (block 6015) only when course==1 and sets [38D7]. 4798/47A8 = courses 2/3.
+3009:47B8,banner_start_c1,func,Draws start banner (block 5F19) only when course==1. 47C8/47D8 = courses 2/3.
+3009:36D4,cell_off_n2_w,label,draw_cell call with CX=0x0FD0 (not 0x1000): +2 north cells are drawn 0x30 units too close (also 36F0).

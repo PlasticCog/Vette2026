@@ -2,7 +2,10 @@
 #include "assets/rle.h"
 #include "core/game_dir.h"
 #include "core/path_utf8.h"
+#include "host/machine.h"
+#include "platform/audio.h"
 #include "platform/framebuffer.h"
+#include "platform/keymap.h"
 #include "platform/presenter.h"
 
 #include <SDL3/SDL.h>
@@ -11,12 +14,14 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace vette {
 namespace {
@@ -24,23 +29,23 @@ namespace {
 constexpr const char* kAppName = "VETTE! 2026";
 
 constexpr const char* kUsage =
-    "Usage: vette2026 [--game <dir>] [--dump-frame <file.bmp>]\n"
+    "Usage: vette2026 [--game <dir>] [--cpu-hz <n>] [--dump-frame <file.bmp>]\n"
     "  --game <dir>         folder with the DOS VETTE! files (default: search for Game/)\n"
-    "  --dump-frame <file>  write the title screen to a 640x200 BMP and exit, without a window\n";
-
-// Timer rate. VETTE.EXE reprograms PIT channel 0 with divisor 0x1000 (~291.27 Hz); every IRQ0 bumps
-// the tick counter its variable-timestep frame loop reads. See re/notes/01-startup-and-timing.md.
-constexpr std::uint64_t kPitClockHz = 1193182;
-constexpr std::uint64_t kPitDivisor = 0x1000;
+    "  --cpu-hz <n>         emulated CPU clock in Hz (default 12000000: a 12 MHz 286)\n"
+    "  --dump-frame <file>  write the title screen to a 640x200 BMP and exit, without a window\n"
+    "\n"
+    "F11 or Alt+Enter toggles fullscreen. Every other key, Esc included, goes to the game.\n";
 
 constexpr std::uint64_t kNsPerSecond = 1'000'000'000;
-// Longest wall-clock step fed to the simulation, so it doesn't race to catch up after a stall
+// Longest wall-clock step fed to the emulator, so it doesn't race to catch up after a stall
 // (debugger break, window drag).
 constexpr std::uint64_t kMaxStepNs = kNsPerSecond / 4;
+constexpr int kAudioRate = 48000;
 
 struct Options {
     std::optional<std::filesystem::path> game_dir;
     std::optional<std::string> dump_frame;  // UTF-8 path
+    std::optional<std::uint64_t> cpu_hz;
     bool help = false;
 };
 
@@ -56,8 +61,14 @@ std::optional<Options> parse_args(int argc, char** argv) {
             opts.game_dir = path_from_utf8(argv[++i]);
         } else if (arg == "--dump-frame" && has_value) {
             opts.dump_frame = argv[++i];
+        } else if (arg == "--cpu-hz" && has_value) {
+            opts.cpu_hz = std::strtoull(argv[++i], nullptr, 10);
+            if (*opts.cpu_hz < 1'000'000) {
+                std::fprintf(stderr, "--cpu-hz must be at least 1000000\n");
+                return std::nullopt;
+            }
         } else {
-            const bool needs_value = arg == "--game" || arg == "--dump-frame";
+            const bool needs_value = arg == "--game" || arg == "--dump-frame" || arg == "--cpu-hz";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing value for" : "Unknown option", argv[i],
                          kUsage);
             return std::nullopt;
@@ -92,39 +103,108 @@ void load_title(const GameDir& game, Framebuffer& fb) {
     fb.pixels = decode_planar(planes, Framebuffer::kWidth, Framebuffer::kHeight);
 }
 
-void tick() {
-    // One PIT interrupt period. Phase 1 runs the hosted VETTE.EXE here up to its next IRQ0.
+// Saves (CONFIG.BIN, SCORE.BIN, ...) go here, never into the player's game folder.
+std::filesystem::path save_dir() {
+    char* pref = SDL_GetPrefPath("VETTE2026", "save");
+    if (!pref)
+        throw_sdl_error("SDL_GetPrefPath");
+    std::filesystem::path dir = path_from_utf8(pref);
+    SDL_free(pref);
+    return dir;
 }
 
-void main_loop(Presenter& presenter, const Framebuffer& fb) {
-    // Accumulate elapsed time in units of ns * kPitClockHz, so ticks follow the PIT rate exactly.
-    constexpr std::uint64_t kTickCost = kPitDivisor * kNsPerSecond;
-    std::uint64_t accumulator = 0;
+void copy_frame(const host::Ega::Frame& in, Framebuffer& out) {
+    if (in.width == 0) {  // text mode (startup/exit): not rendered
+        std::fill(out.pixels.begin(), out.pixels.end(), std::uint8_t{0});
+        return;
+    }
+    out.width = in.width;
+    out.height = in.height;
+    out.pixels = in.pixels;
+    for (std::size_t i = 0; i < out.palette.size(); ++i) {
+        const std::uint32_t c = in.palette[i];
+        out.palette[i] = {static_cast<std::uint8_t>(c >> 16), static_cast<std::uint8_t>(c >> 8),
+                          static_cast<std::uint8_t>(c)};
+    }
+}
+
+// Runs the hosted game until the window closes or VETTE.EXE exits.
+void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio) {
+    Framebuffer fb;
+    host::Ega::Frame frame;
+    std::vector<std::uint8_t> scancodes;
+    std::vector<std::int16_t> samples;
+    std::uint8_t mouse_buttons = 0;
+    float mouse_dx = 0;
+    float mouse_dy = 0;
     std::uint64_t last = SDL_GetTicksNS();
 
     for (;;) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_EVENT_QUIT)
+            switch (event.type) {
+            case SDL_EVENT_QUIT:
                 return;
-            if (event.type != SDL_EVENT_KEY_DOWN || event.key.repeat)
-                continue;
-            const SDL_Keycode key = event.key.key;
-            const bool alt_enter = (key == SDLK_RETURN || key == SDLK_KP_ENTER) && (event.key.mod & SDL_KMOD_ALT);
-            if (key == SDLK_ESCAPE)
-                return;
-            if (key == SDLK_F11 || alt_enter)
-                presenter.toggle_fullscreen();
+            case SDL_EVENT_KEY_DOWN:
+            case SDL_EVENT_KEY_UP: {
+                const bool down = event.type == SDL_EVENT_KEY_DOWN;
+                const SDL_Keycode key = event.key.key;
+                const bool alt_enter = (key == SDLK_RETURN || key == SDLK_KP_ENTER) && (event.key.mod & SDL_KMOD_ALT);
+                if (key == SDLK_F11 || alt_enter) {  // host keys; F11 didn't exist on 1989 keyboards
+                    if (down && !event.key.repeat)
+                        presenter.toggle_fullscreen();
+                    break;
+                }
+                // Auto-repeat is forwarded too: a real keyboard repeats make codes while a key is held.
+                scancodes.clear();
+                if (xt_scancode(event.key.scancode, down, scancodes)) {
+                    for (const std::uint8_t b : scancodes)
+                        machine.key(b);
+                }
+                break;
+            }
+            case SDL_EVENT_MOUSE_MOTION:
+                mouse_dx += event.motion.xrel;
+                mouse_dy += event.motion.yrel;
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            case SDL_EVENT_MOUSE_BUTTON_UP: {
+                const std::uint8_t bit = event.button.button == SDL_BUTTON_LEFT    ? 1
+                                         : event.button.button == SDL_BUTTON_RIGHT ? 2
+                                                                                   : 0;
+                mouse_buttons = static_cast<std::uint8_t>(event.button.down ? (mouse_buttons | bit)
+                                                                            : (mouse_buttons & ~bit));
+                machine.mouse_buttons(mouse_buttons);
+                break;
+            }
+            default:
+                break;
+            }
+        }
+        // The mouse driver counts whole mickeys; carry the fractions into the next frame.
+        const int dx = static_cast<int>(mouse_dx);
+        const int dy = static_cast<int>(mouse_dy);
+        if (dx != 0 || dy != 0) {
+            machine.mouse_motion(dx, dy);
+            mouse_dx -= static_cast<float>(dx);
+            mouse_dy -= static_cast<float>(dy);
         }
 
         const std::uint64_t now = SDL_GetTicksNS();
-        accumulator += std::min(now - last, kMaxStepNs) * kPitClockHz;
+        machine.run_for(std::min(now - last, kMaxStepNs));
         last = now;
-        while (accumulator >= kTickCost) {
-            tick();
-            accumulator -= kTickCost;
-        }
+        if (!machine.fault().empty())
+            throw std::runtime_error("VETTE.EXE stopped: " + machine.fault());
+        if (machine.stopped())
+            return;  // the player quit to DOS
 
+        samples.clear();
+        machine.take_audio(samples);
+        if (audio)
+            audio->push(samples);
+
+        machine.render(frame);
+        copy_frame(frame, fb);
         if (presenter.visible())
             presenter.present(fb);
         else
@@ -152,10 +232,9 @@ int run(int argc, char** argv) {
         SDL_Log("Game folder: %s", path_to_utf8(game.root()).c_str());
         identify_vette_exe(game.read("VETTE.EXE"));
 
-        Framebuffer fb;
-        load_title(game, fb);
-
         if (headless) {
+            Framebuffer fb;
+            load_title(game, fb);
             save_bmp(fb, *opts->dump_frame);
             SDL_Log("Wrote %s", opts->dump_frame->c_str());
             return 0;
@@ -163,8 +242,32 @@ int run(int argc, char** argv) {
 
         if (!SDL_Init(SDL_INIT_VIDEO))
             throw_sdl_error("SDL_Init");
+        std::optional<AudioOut> audio;
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            try {
+                audio.emplace(kAudioRate);
+            } catch (const std::exception& e) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "No sound: %s", e.what());
+            }
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "No sound: %s", SDL_GetError());
+        }
+
+        host::MachineConfig config;
+        config.game_dir = game.root();
+        config.save_dir = save_dir();
+        config.audio_rate = kAudioRate;
+        if (opts->cpu_hz)
+            config.cpu_hz = *opts->cpu_hz;
+        host::Machine machine(config);
+        machine.set_log([](const std::string& msg) { SDL_Log("%s", msg.c_str()); });
+        std::string error;
+        if (!machine.boot(error))
+            throw std::runtime_error("Couldn't start VETTE.EXE: " + error);
+        SDL_Log("Saves: %s", path_to_utf8(config.save_dir).c_str());
+
         Presenter presenter(kAppName);
-        main_loop(presenter, fb);
+        main_loop(presenter, machine, audio ? &*audio : nullptr);
         return 0;
     } catch (const std::exception& e) {
         report_error(e.what(), !headless);

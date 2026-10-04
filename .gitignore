@@ -17,6 +17,9 @@
 /re/out/
 /analysis/
 
+# Downloaded third-party test vectors (e.g. SingleStepTests).
+/tests/data/
+
 # --- Build output -----------------------------------------------------------
 /build/
 /out/

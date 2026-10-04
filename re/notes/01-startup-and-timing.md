@@ -47,7 +47,8 @@ clock runs about 0.1% slow, and a 1:1 port must reproduce that.
 
 `detect_cpu_class` (3009:0E28) uses the 8088 `push sp` quirk, then counts `idiv` iterations for 292 PIT
 ticks. It returns 0/1/2. Class 2 (fast) clears `cs:0E26`/`cs:0E27`, which startup copies into
-`124A:2AC7`/`124A:2ABE`. These are probably detail or effect toggles; their meaning is TBD.
+`124A:2AC7`/`124A:2ABE` = `mirror_off` / `windows_off`: slow CPUs start the race with the rear-view mirror and
+the downtown building windows off. Both can be toggled in the race (F6, W). See notes 03.
 
 ## Consequences for the port
 1. **Classic mode needs a reference machine profile.** "1:1" means the frame cadence of a chosen
@@ -57,10 +58,12 @@ ticks. It returns 0/1/2. Class 2 (fast) clears `cs:0E26`/`cs:0E27`, which startu
 2. **High-refresh Enhanced play is native to the design.** The original code already handles any
    `elapsed ≥ 1` (up to 291 fps). Enhanced mode can run the *original* simulation math at e.g. 60 fps
    (alternating 4/5 ticks) with no interpolation hacks. This is a gameplay-affecting option, because
-   rounding changes the feel, so it lives in the gameplay category.
+   rounding changes the feel, so it lives in the gameplay category. Caveats (notes 04): heading, braking,
+   steering and several other terms are per-frame, **not** scaled by `frame_rate`, so a higher frame rate turns
+   and brakes faster. The original's double vsync wait (notes 03) also capped it at refresh/2 (≈30–35 fps).
 3. Demo recordings for lockstep testing must capture `elapsed` per frame along with inputs.
 
 ## Open
-- Which per-frame quantities divide by `frame_rate` (vehicle physics, traffic, police)? → next pass.
-- `engine_speed` (`cs:5891`): speed or RPM?
-- Meaning of the `cpu_slow_flag_*` toggles.
+- ~~Which per-frame quantities divide by `frame_rate`?~~ → notes 04 §1 (six patterns, plus a list of unscaled per-frame terms).
+- ~~`engine_speed`~~ → engine RPM/100 (notes 04 §9).
+- ~~`cpu_slow_flag_*`~~ → initial mirror/windows detail (notes 03).

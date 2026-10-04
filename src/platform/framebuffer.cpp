@@ -7,8 +7,7 @@
 namespace vette {
 
 void save_bmp(const Framebuffer& fb, const std::string& path_utf8) {
-    const SdlPtr<SDL_Surface> surface{
-        SDL_CreateSurface(Framebuffer::kWidth, Framebuffer::kHeight, SDL_PIXELFORMAT_INDEX8)};
+    const SdlPtr<SDL_Surface> surface{SDL_CreateSurface(fb.width, fb.height, SDL_PIXELFORMAT_INDEX8)};
     if (!surface)
         throw_sdl_error("SDL_CreateSurface");
     SDL_Palette* palette = SDL_CreateSurfacePalette(surface.get());
@@ -22,8 +21,8 @@ void save_bmp(const Framebuffer& fb, const std::string& path_utf8) {
         throw_sdl_error("SDL_SetPaletteColors");
 
     auto* dst = static_cast<std::uint8_t*>(surface->pixels);
-    for (int y = 0; y < Framebuffer::kHeight; ++y)
-        std::memcpy(dst + y * surface->pitch, fb.pixels.data() + y * Framebuffer::kWidth, Framebuffer::kWidth);
+    for (int y = 0; y < fb.height; ++y)
+        std::memcpy(dst + y * surface->pitch, fb.pixels.data() + y * fb.width, static_cast<std::size_t>(fb.width));
 
     if (!SDL_SaveBMP(surface.get(), path_utf8.c_str()))
         throw_sdl_error("SDL_SaveBMP");

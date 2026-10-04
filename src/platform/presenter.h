@@ -20,8 +20,10 @@ private:
     // Destroyed in reverse order: textures, then renderer, then window.
     SdlPtr<SDL_Window> window_;
     SdlPtr<SDL_Renderer> renderer_;
-    SdlPtr<SDL_Texture> frame_;   // Framebuffer converted to ARGB, 640x200
+    SdlPtr<SDL_Texture> frame_;   // Framebuffer converted to ARGB, at its size (frame_w_ x frame_h_)
     SdlPtr<SDL_Texture> scaled_;  // frame_ upscaled by (scale_x_, scale_y_), nearest-neighbor
+    int frame_w_ = 0;
+    int frame_h_ = 0;
     int scale_x_ = 0;
     int scale_y_ = 0;
 };

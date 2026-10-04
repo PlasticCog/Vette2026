@@ -51,6 +51,19 @@ python re/tools/ghidra_build.py --refresh  # re-apply re/symbols.csv after editi
 python re/tools/vdis.py 3009:0025 40       # quick disassembly at an image-relative SEG:OFF
 ```
 
+**Headless runs.** `vette_run` boots the original game in the built-in emulator with no window. It
+can inject keys, take screenshots and print memory words. This script reaches a race (answering
+the manual question that the fixed start date selects) and drives off:
+
+```
+vette_run --game Game --seconds 60 --key 13:39 --key 17:1C --key 21:1C --key 25:1C --key 30:1C \
+  --key 31:0A --key 31.3:07 --key 31.6:34 --key 31.9:03 --key 32.2:1C --key 35.5:02 --hold 36:59:48 \
+  --shot 38 --shot 46 --watch 224A:2CD3 --out shots
+```
+
+Scan codes are set 1 in hex. Emulator addresses are image-relative + `1000h` on the segment, the
+same as Ghidra (`224A:2CD3` is `frame_rate`).
+
 [`re/symbols.csv`](re/symbols.csv) is the shared, committed record of every named function and
 variable. The Ghidra database and decompiler exports are derived from the copyrighted binary, so they
 stay local (`re/ghidra/`, `re/out/`). Findings are written up in [`re/notes/`](re/notes/).

@@ -27,6 +27,11 @@ public class VetteExportFunctions extends GhidraScript {
             currentProgram.getName().replaceAll("[^A-Za-z0-9_.-]", "_"));
         Path funcs = root.resolve("funcs");
         Files.createDirectories(funcs);
+        try (var stale = Files.list(funcs)) {  // renamed functions would otherwise leave old files behind
+            for (Path p : (Iterable<Path>) stale::iterator) {
+                Files.delete(p);
+            }
+        }
         base = loaderBaseSegment();
 
         DecompInterface decomp = new DecompInterface();
@@ -44,7 +49,7 @@ public class VetteExportFunctions extends GhidraScript {
                     w.println("// " + addr + " " + fn.getName());
                     int fnSeg = ((SegmentedAddress) fn.getEntryPoint()).getSegment();
                     for (Instruction ins : currentProgram.getListing().getInstructions(fn.getBody(), true)) {
-                        w.printf("%s  %s%n", rel(ins.getAddress()), relOperands(ins.toString(), fnSeg));
+                        w.printf("%s  %s%n", rel(ins.getAddress()), relOperands(text(ins), fnSeg));
                     }
                     w.println();
                     DecompileResults res = decomp.decompileFunction(fn, 60, monitor);
@@ -66,6 +71,25 @@ public class VetteExportFunctions extends GhidraScript {
             return String.format("%04X:%04X", sa.getSegment() - base, sa.getSegmentOffset());
         }
         return a.toString();
+    }
+
+    // Ghidra's text for MOV Sreg,r/m16 (opcode 8E) lists the operands reversed ("MOV AX,ES" for
+    // `mov es,ax`). Swap them back so the listing reads like the machine code.
+    static String text(Instruction ins) throws Exception {
+        byte[] b = ins.getBytes();
+        int i = 0;
+        while (i < b.length && isPrefix(b[i] & 0xFF)) {
+            i++;
+        }
+        if (i < b.length && (b[i] & 0xFF) == 0x8E && ins.getNumOperands() == 2) {
+            return ins.getMnemonicString() + " " + ins.getDefaultOperandRepresentation(1) + "," +
+                ins.getDefaultOperandRepresentation(0);
+        }
+        return ins.toString();
+    }
+
+    static boolean isPrefix(int b) {
+        return b == 0x26 || b == 0x2E || b == 0x36 || b == 0x3E || b == 0xF0 || b == 0xF2 || b == 0xF3;
     }
 
     static final Pattern SEG_ADDR = Pattern.compile("0x([0-9a-f]{1,4}):([0-9a-f]{1,4})");

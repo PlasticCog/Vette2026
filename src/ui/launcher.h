@@ -1,10 +1,12 @@
 #pragma once
-// The launch menu: before the game boots, the player reviews and changes the settings (presets,
-// frame rate, PC speed, enhancements, controls, display, sound), then starts the game or quits.
-// It's drawn into a 640x200 frame like the game's own screens, over the title picture.
+// The launch menu: before the game boots, the player picks the game folder, reviews and changes the
+// settings (presets, frame rate, PC speed, enhancements, controls, display, sound), then plays or
+// quits. Drawn full-window with chunky square-pixel text.
 
+#include <optional>
+
+#include "core/game_dir.h"
 #include "core/settings.h"
-#include "platform/framebuffer.h"
 
 namespace vette {
 class Gamepad;
@@ -15,8 +17,11 @@ namespace vette::ui {
 
 enum class LaunchChoice { Start, Quit };
 
-// Runs until the player starts or quits; edits `settings` in place. Keyboard, mouse and gamepad all
-// work. The display setting is applied to the window immediately.
-LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, const Framebuffer& background, Settings& settings);
+// Runs until the player starts or quits. Edits `settings` in place (including the game folder).
+// `game` starts as the result of `search`. The player can choose another folder, and Start is only
+// possible with a valid one, so `game` is set whenever this returns Start. Keyboard, mouse and
+// gamepad all work; the display setting applies to the window immediately.
+LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& settings, std::optional<GameDir>& game,
+                          const GameDirSearch& search);
 
 }  // namespace vette::ui

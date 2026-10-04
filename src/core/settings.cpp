@@ -84,6 +84,7 @@ std::string Settings::serialize() const {
     out << "display = " << kDisplay[fullscreen] << "\n";
     out << "sound = " << kOnOff[sound] << "\n";
     out << "launcher = " << kOnOff[show_launcher] << "\n";
+    out << "game_folder = " << game_folder << "\n";
     return out.str();
 }
 
@@ -106,6 +107,8 @@ Settings Settings::parse(const std::string& text) {
         read_bool("display", kDisplay, key, value, s.fullscreen);
         read_bool("sound", kOnOff, key, value, s.sound);
         read_bool("launcher", kOnOff, key, value, s.show_launcher);
+        if (key == "game_folder")
+            s.game_folder = std::string(value);  // everything after the first '=', trimmed
     }
     return s;
 }

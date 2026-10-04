@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <vector>
+
+#include "ui/app_icon.h"
 
 namespace vette {
 namespace {
@@ -20,6 +23,19 @@ SdlPtr<SDL_Texture> create_texture(SDL_Renderer* renderer, SDL_TextureAccess acc
     return texture;
 }
 
+// Windows takes the icon from the exe's resources, in every size it has; elsewhere the window gets it here.
+void set_window_icon(SDL_Window* window) {
+#ifndef SDL_PLATFORM_WINDOWS
+    constexpr int kSize = 128;
+    std::vector<std::uint32_t> pixels = ui::app_icon(kSize);
+    SdlPtr<SDL_Surface> icon{SDL_CreateSurfaceFrom(kSize, kSize, SDL_PIXELFORMAT_ARGB8888, pixels.data(), kSize * 4)};
+    if (!icon || !SDL_SetWindowIcon(window, icon.get()))
+        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, "No window icon: %s", SDL_GetError());
+#else
+    (void)window;
+#endif
+}
+
 }  // namespace
 
 Presenter::Presenter(const char* title) {
@@ -30,6 +46,7 @@ Presenter::Presenter(const char* title) {
         throw_sdl_error("SDL_CreateWindowAndRenderer");
     window_.reset(window);
     renderer_.reset(renderer);
+    set_window_icon(window);
 
     if (!SDL_SetRenderVSync(renderer, 1))
         SDL_LogWarn(SDL_LOG_CATEGORY_RENDER, "VSync unavailable: %s", SDL_GetError());
@@ -92,7 +109,49 @@ void Presenter::present(const Framebuffer& fb) {
     SDL_RenderTexture(renderer, scaled_.get(), nullptr, &dst);
     SDL_RenderPresent(renderer);
     picture_ = dst;
+    picture_w_ = fb.width;
+    picture_h_ = fb.height;
 }
+
+void Presenter::present(const ui::Canvas& canvas) {
+    SDL_Renderer* renderer = renderer_.get();
+    if (canvas.width != canvas_w_ || canvas.height != canvas_h_) {
+        canvas_ = create_texture(renderer, SDL_TEXTUREACCESS_STREAMING, canvas.width, canvas.height,
+                                 SDL_SCALEMODE_NEAREST);
+        canvas_w_ = canvas.width;
+        canvas_h_ = canvas.height;
+    }
+    void* pixels = nullptr;
+    int pitch = 0;
+    if (!SDL_LockTexture(canvas_.get(), nullptr, &pixels, &pitch))
+        throw_sdl_error("SDL_LockTexture");
+    for (int y = 0; y < canvas.height; ++y) {
+        auto* row = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(pixels) + y * pitch);
+        const std::uint32_t* src = canvas.pixels.data() + y * canvas.width;
+        for (int x = 0; x < canvas.width; ++x)
+            row[x] = 0xFF000000u | src[x];
+    }
+    SDL_UnlockTexture(canvas_.get());
+
+    int out_w = 0;
+    int out_h = 0;
+    SDL_GetCurrentRenderOutputSize(renderer, &out_w, &out_h);
+    const int w = canvas.width * canvas.scale;
+    const int h = canvas.height * canvas.scale;
+    const SDL_FRect dst{static_cast<float>((out_w - w) / 2), static_cast<float>((out_h - h) / 2), static_cast<float>(w),
+                        static_cast<float>(h)};
+    SDL_SetRenderDrawColor(renderer, static_cast<std::uint8_t>(canvas.background >> 16),
+                           static_cast<std::uint8_t>(canvas.background >> 8), static_cast<std::uint8_t>(canvas.background),
+                           SDL_ALPHA_OPAQUE);
+    SDL_RenderClear(renderer);
+    SDL_RenderTexture(renderer, canvas_.get(), nullptr, &dst);
+    SDL_RenderPresent(renderer);
+    picture_ = dst;
+    picture_w_ = canvas.width;
+    picture_h_ = canvas.height;
+}
+
+void Presenter::output_size(int& w, int& h) const { SDL_GetCurrentRenderOutputSize(renderer_.get(), &w, &h); }
 
 void Presenter::toggle_fullscreen() { set_fullscreen(!fullscreen()); }
 
@@ -103,15 +162,15 @@ bool Presenter::fullscreen() const { return (SDL_GetWindowFlags(window_.get()) &
 bool Presenter::window_to_frame(float wx, float wy, int& fx, int& fy) const {
     float rx = 0;
     float ry = 0;
-    if (frame_w_ == 0 || picture_.w <= 0 || picture_.h <= 0 ||
+    if (picture_w_ == 0 || picture_.w <= 0 || picture_.h <= 0 ||
         !SDL_RenderCoordinatesFromWindow(renderer_.get(), wx, wy, &rx, &ry))
         return false;
     const float u = (rx - picture_.x) / picture_.w;
     const float v = (ry - picture_.y) / picture_.h;
     if (u < 0 || u >= 1 || v < 0 || v >= 1)
         return false;
-    fx = static_cast<int>(u * static_cast<float>(frame_w_));
-    fy = static_cast<int>(v * static_cast<float>(frame_h_));
+    fx = static_cast<int>(u * static_cast<float>(picture_w_));
+    fy = static_cast<int>(v * static_cast<float>(picture_h_));
     return true;
 }
 

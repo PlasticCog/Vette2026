@@ -22,6 +22,7 @@ struct Settings {
     bool fullscreen = false;
     bool sound = true;
     bool show_launcher = true;
+    std::string game_folder;  // UTF-8; empty: look for Game/ next to the program
 
     // Classic is VETTE! exactly as shipped in 1989 (its own frames, a 12 MHz PC/AT, the manual
     // question); Enhanced switches every improvement on. Presets set only the options that change

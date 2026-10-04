@@ -36,6 +36,7 @@ TEST(settings_round_trip) {
     s.fullscreen = true;
     s.sound = false;
     s.show_launcher = false;
+    s.game_folder = "C:\\Old Games\\VETTE = 1989 #1";  // spaces, '=' and '#' survive
     CHECK(Settings::parse(s.serialize()) == s);
 }
 

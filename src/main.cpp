@@ -298,18 +298,15 @@ int run(int argc, char** argv) {
     const bool headless = opts->dump_frame.has_value();
 
     try {
-        const GameDirSearch search = find_game_dir(opts->game_dir);
-        if (!search.dir) {
-            report_error(missing_files_message(search), !headless);
-            return 1;
-        }
-        const GameDir& game = *search.dir;
-        SDL_Log("Game folder: %s", path_to_utf8(game.root()).c_str());
-        identify_vette_exe(game.read("VETTE.EXE"));
-
         if (headless) {
+            const GameDirSearch search = find_game_dir(opts->game_dir);
+            if (!search.dir) {
+                report_error(missing_files_message(search), false);
+                return 1;
+            }
+            identify_vette_exe(search.dir->read("VETTE.EXE"));
             Framebuffer fb;
-            load_title(game, fb);
+            load_title(*search.dir, fb);
             save_bmp(fb, *opts->dump_frame);
             SDL_Log("Wrote %s", opts->dump_frame->c_str());
             return 0;
@@ -323,18 +320,31 @@ int run(int argc, char** argv) {
         Settings settings = load_settings(settings_file);
         opts->apply_to(settings);
 
+        // The game folder: --game, else the one chosen in the launch menu, else Game/ near the program.
+        GameDirSearch search;
+        if (opts->game_dir) {
+            search = find_game_dir(opts->game_dir);
+        } else {
+            if (!settings.game_folder.empty())
+                search = find_game_dir(path_from_utf8(settings.game_folder));
+            if (!search.dir)
+                search = find_game_dir(std::nullopt);
+        }
+        std::optional<GameDir> game = search.dir;
+
         Presenter presenter(kAppName);
         presenter.set_fullscreen(settings.fullscreen);
         Gamepad gamepad;
 
-        if (opts->launcher.value_or(settings.show_launcher)) {
-            Framebuffer title;
-            load_title(game, title);
-            if (ui::run_launcher(presenter, gamepad, title, settings) == ui::LaunchChoice::Quit)
+        // The launch menu: when it's switched on, or to let the player find the game files.
+        if (opts->launcher.value_or(settings.show_launcher) || !game) {
+            if (ui::run_launcher(presenter, gamepad, settings, game, search) == ui::LaunchChoice::Quit)
                 return 0;
             if (!save_settings(settings_file, settings))
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't save %s", path_to_utf8(settings_file).c_str());
         }
+        SDL_Log("Game folder: %s", path_to_utf8(game->root()).c_str());
+        identify_vette_exe(game->read("VETTE.EXE"));
 
         std::optional<AudioOut> audio;
         if (!settings.sound) {
@@ -350,7 +360,7 @@ int run(int argc, char** argv) {
         }
 
         host::MachineConfig config;
-        config.game_dir = game.root();
+        config.game_dir = game->root();
         config.save_dir = save_dir();
         config.audio_rate = kAudioRate;
         config.cpu_hz = opts->cpu_hz.value_or(settings.pc == Settings::Pc::Fast ? kFastPcHz : kAtHz);

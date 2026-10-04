@@ -90,9 +90,25 @@ if(VETTE_BUILD_GAME)
         src/platform/gamepad.cpp
         src/platform/keymap.cpp
         src/platform/presenter.cpp
-        src/ui/draw.cpp
+        src/ui/app_icon.cpp
+        src/ui/canvas.cpp
         src/ui/launcher.cpp
     )
+    # Windows: the icon goes into the exe's resources (Explorer, taskbar, and SDL uses it for the window).
+    # It's written at build time from src/ui/app_icon.cpp, so there's one copy of the picture.
+    if(WIN32 AND NOT CMAKE_CROSSCOMPILING)
+        add_executable(vette_icon src/tools/vette_icon.cpp src/ui/app_icon.cpp)
+        target_include_directories(vette_icon PRIVATE src)
+        vette_warnings(vette_icon)
+        set(VETTE_ICO ${CMAKE_CURRENT_BINARY_DIR}/vette2026.ico)
+        set(VETTE_RC ${CMAKE_CURRENT_BINARY_DIR}/vette2026.rc)
+        add_custom_command(OUTPUT ${VETTE_ICO} COMMAND vette_icon ${VETTE_ICO} DEPENDS vette_icon VERBATIM
+                           COMMENT "Writing vette2026.ico")
+        file(CONFIGURE OUTPUT ${VETTE_RC} CONTENT "1 ICON \"@VETTE_ICO@\"\n" @ONLY)
+        set_source_files_properties(${VETTE_RC} PROPERTIES OBJECT_DEPENDS ${VETTE_ICO})
+        target_sources(vette2026 PRIVATE ${VETTE_RC} ${VETTE_ICO})
+    endif()
+    target_compile_definitions(vette2026 PRIVATE VETTE_VERSION="${PROJECT_VERSION}")
     target_include_directories(vette2026 PRIVATE src)
     target_link_libraries(vette2026 PRIVATE vette_game)
     if(TARGET SDL3::SDL3-static)
@@ -109,7 +125,7 @@ endif()
 if(VETTE_BUILD_TESTS)
     file(GLOB VETTE_TEST_SOURCES CONFIGURE_DEPENDS tests/*.cpp)
     list(FILTER VETTE_TEST_SOURCES EXCLUDE REGEX "/enhanced_[^/]*\\.cpp$")  # vette_enhanced_tests below
-    add_executable(vette_tests ${VETTE_TEST_SOURCES} src/core/settings.cpp)
+    add_executable(vette_tests ${VETTE_TEST_SOURCES} src/core/settings.cpp src/ui/app_icon.cpp)
     target_link_libraries(vette_tests PRIVATE vette_game)
     target_include_directories(vette_tests PRIVATE tests)
     vette_warnings(vette_tests)

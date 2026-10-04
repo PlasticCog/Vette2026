@@ -41,10 +41,12 @@ Current state: the original game runs inside the built-in emulator and is fully 
 keyboard, mouse, gamepad and PC-speaker sound. Native C++ ports of its routines are being added
 one at a time, each verified against the original (see [docs/PORTING.md](docs/PORTING.md)).
 
-**Launch menu.** VETTE! 2026 opens with a launch menu in the style of the game's own screens. Choose a
-preset there (**Classic**, VETTE! exactly as in 1989, or **Enhanced**), or set each option: frame rate,
-PC speed, the manual check, joystick, window or fullscreen, sound, and whether the menu appears at
-startup. It works with the keyboard, mouse or gamepad. Choices are saved in
+**Launch menu.** VETTE! 2026 opens with a launch menu. Choose a preset there (**Classic**, VETTE!
+exactly as in 1989, or **Enhanced**), or set each option: frame rate, PC speed, the manual check,
+joystick, window or fullscreen, sound, and whether the menu appears at startup. **Game folder** shows
+where your game files were found; select it to choose another folder. If the files aren't found, the
+menu opens anyway and asks for the folder. It works with the keyboard, mouse or gamepad. Choices
+(including the folder) are saved in
 `%APPDATA%\VETTE2026\config\settings.ini` (the per-user settings folder on other systems). Command-line
 flags override them for one run; `--launcher` brings the menu back if you switched it off.
 
@@ -122,7 +124,7 @@ stay local (`re/ghidra/`, `re/out/`). Findings are written up in [`re/notes/`](r
 | Path | Contents |
 |---|---|
 | `Game/` | Where players put their original game files (not tracked) |
-| `src/` | The game: `platform/` (SDL3 video), `core/` (game-file discovery), `assets/` (decoders) |
-| `docs/` | Plan |
+| `src/` | `host/` (the emulator that runs the original), `game/` (native ports, smooth renderer), `platform/` (SDL3 window, sound, input), `ui/` (launch menu, program icon), `core/` (game files, settings), `tools/` (`vette_run`, `vette_fuzz`, `vette_icon`) |
+| `docs/` | Plan, porting guide |
 | `re/` | Symbol map, notes, Ghidra scripts and RE tools |
 | `tools/reverse_engineering/` | Earlier asset/resource extraction scripts (reference, unverified) |

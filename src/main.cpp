@@ -2,10 +2,13 @@
 #include "assets/rle.h"
 #include "core/game_dir.h"
 #include "core/path_utf8.h"
+#include "game/options.h"
 #include "host/machine.h"
 #include "platform/audio.h"
 #include "platform/framebuffer.h"
+#include "platform/gamepad.h"
 #include "platform/keymap.h"
+#include "platform/mouse_pointer.h"
 #include "platform/presenter.h"
 
 #include <SDL3/SDL.h>
@@ -29,12 +32,19 @@ namespace {
 constexpr const char* kAppName = "VETTE! 2026";
 
 constexpr const char* kUsage =
-    "Usage: vette2026 [--game <dir>] [--cpu-hz <n>] [--dump-frame <file.bmp>]\n"
+    "Usage: vette2026 [--game <dir>] [--cpu-hz <n>] [--[no-]joystick] [--manual-check]\n"
+    "                 [--dump-frame <file.bmp>]\n"
     "  --game <dir>         folder with the DOS VETTE! files (default: search for Game/)\n"
     "  --cpu-hz <n>         emulated CPU clock in Hz (default 12000000: a 12 MHz 286)\n"
+    "  --joystick           give the PC a joystick even if no gamepad is connected yet\n"
+    "  --no-joystick        no joystick, even with a gamepad connected\n"
+    "  --manual-check       show the original's manual-lookup question before the first race\n"
+    "                       (skipped by default; this version accepts any answer anyway)\n"
     "  --dump-frame <file>  write the title screen to a 640x200 BMP and exit, without a window\n"
     "\n"
-    "F11 or Alt+Enter toggles fullscreen. Every other key, Esc included, goes to the game.\n";
+    "F11 or Alt+Enter toggles fullscreen. Every other key, Esc included, goes to the game.\n"
+    "A gamepad connected at launch becomes the PC's analog joystick. DOS games look for one only\n"
+    "at startup, so whether the joystick exists is decided then (see README.md for the mapping).\n";
 
 constexpr std::uint64_t kNsPerSecond = 1'000'000'000;
 // Longest wall-clock step fed to the emulator, so it doesn't race to catch up after a stall
@@ -46,6 +56,8 @@ struct Options {
     std::optional<std::filesystem::path> game_dir;
     std::optional<std::string> dump_frame;  // UTF-8 path
     std::optional<std::uint64_t> cpu_hz;
+    std::optional<bool> joystick;  // default: whether a gamepad is connected at launch
+    bool manual_check = false;     // show the copy-protection question (skipped by default)
     bool help = false;
 };
 
@@ -57,6 +69,10 @@ std::optional<Options> parse_args(int argc, char** argv) {
         const bool has_value = i + 1 < argc;
         if (arg == "--help" || arg == "-h") {
             opts.help = true;
+        } else if (arg == "--joystick" || arg == "--no-joystick") {
+            opts.joystick = arg == "--joystick";
+        } else if (arg == "--manual-check") {
+            opts.manual_check = true;
         } else if (arg == "--game" && has_value) {
             opts.game_dir = path_from_utf8(argv[++i]);
         } else if (arg == "--dump-frame" && has_value) {
@@ -129,7 +145,7 @@ void copy_frame(const host::Ega::Frame& in, Framebuffer& out) {
 }
 
 // Runs the hosted game until the window closes or VETTE.EXE exits.
-void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio) {
+void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Gamepad& gamepad) {
     Framebuffer fb;
     host::Ega::Frame frame;
     std::vector<std::uint8_t> scancodes;
@@ -142,6 +158,7 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio) {
     for (;;) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
+            scancodes.clear();  // keyboard bytes this event produces, sent after the switch
             switch (event.type) {
             case SDL_EVENT_QUIT:
                 return;
@@ -156,11 +173,7 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio) {
                     break;
                 }
                 // Auto-repeat is forwarded too: a real keyboard repeats make codes while a key is held.
-                scancodes.clear();
-                if (xt_scancode(event.key.scancode, down, scancodes)) {
-                    for (const std::uint8_t b : scancodes)
-                        machine.key(b);
-                }
+                xt_scancode(event.key.scancode, down, scancodes);
                 break;
             }
             case SDL_EVENT_MOUSE_MOTION:
@@ -177,9 +190,12 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio) {
                 machine.mouse_buttons(mouse_buttons);
                 break;
             }
-            default:
+            default:  // gamepad hot-plug, and D-pad/Start/Back as keys
+                gamepad.handle_event(event, scancodes);
                 break;
             }
+            for (const std::uint8_t b : scancodes)
+                machine.key(b);
         }
         // The mouse driver counts whole mickeys; carry the fractions into the next frame.
         const int dx = static_cast<int>(mouse_dx);
@@ -189,6 +205,10 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio) {
             mouse_dx -= static_cast<float>(dx);
             mouse_dy -= static_cast<float>(dy);
         }
+        // Ignored by the machine when it has no game port (MachineConfig::joystick).
+        const JoystickState stick = gamepad.joystick();
+        machine.joystick_axes(stick.x, stick.y);
+        machine.joystick_buttons(stick.buttons);
 
         const std::uint64_t now = SDL_GetTicksNS();
         machine.run_for(std::min(now - last, kMaxStepNs));
@@ -205,6 +225,12 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio) {
 
         machine.render(frame);
         copy_frame(frame, fb);
+        // The mouse driver's pointer goes on the copy, never into video memory. Text mode isn't shown.
+        const host::Bios::Cursor pointer = machine.mouse_cursor();
+        const bool show_pointer = pointer.visible && frame.width != 0;
+        if (show_pointer)
+            draw_mouse_pointer(fb, pointer.x, pointer.y);
+        presenter.show_system_cursor(!show_pointer);
         if (presenter.visible())
             presenter.present(fb);
         else
@@ -253,21 +279,30 @@ int run(int argc, char** argv) {
             SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "No sound: %s", SDL_GetError());
         }
 
+        Gamepad gamepad;
+
         host::MachineConfig config;
         config.game_dir = game.root();
         config.save_dir = save_dir();
         config.audio_rate = kAudioRate;
         if (opts->cpu_hz)
             config.cpu_hz = *opts->cpu_hz;
+        // Fixed for the session: DOS games detect the game port once, at startup.
+        config.joystick = opts->joystick.value_or(gamepad.connected());
+        SDL_Log("Joystick: %s", !config.joystick      ? "none"
+                                : gamepad.connected() ? "gamepad"
+                                                      : "game port present, no gamepad connected (centered)");
         host::Machine machine(config);
         machine.set_log([](const std::string& msg) { SDL_Log("%s", msg.c_str()); });
         std::string error;
         if (!machine.boot(error))
             throw std::runtime_error("Couldn't start VETTE.EXE: " + error);
         SDL_Log("Saves: %s", path_to_utf8(config.save_dir).c_str());
+        if (!opts->manual_check)
+            game::install_skip_manual_check(machine.cpu());
 
         Presenter presenter(kAppName);
-        main_loop(presenter, machine, audio ? &*audio : nullptr);
+        main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad);
         return 0;
     } catch (const std::exception& e) {
         report_error(e.what(), !headless);

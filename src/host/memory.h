@@ -42,9 +42,20 @@ public:
         if (linear - kVideoBase < kVideoSize && video_) {
             video_->vram_write(linear - kVideoBase, value);
         } else if (linear < rom_start_) {
+            if (journal_) {
+                journal_->push_back({linear, ram_[linear]});
+            }
             ram_[linear] = value;
         }
     }
+
+    // While set, every RAM write appends {address, previous value}. Used by the verification
+    // harness to roll a function's effects back. Video memory writes are not journaled.
+    struct JournalEntry {
+        uint32_t linear;
+        uint8_t old;
+    };
+    void set_journal(std::vector<JournalEntry>* journal) { journal_ = journal; }
 
     // Linear little-endian word. Segment-offset wrap (offset FFFFh) is the CPU's job.
     uint16_t read16(uint32_t linear) {
@@ -60,6 +71,7 @@ public:
 
 private:
     std::vector<uint8_t> ram_;
+    std::vector<JournalEntry>* journal_ = nullptr;
     VideoMemory* video_ = nullptr;
     uint32_t rom_start_ = kSize;
 };

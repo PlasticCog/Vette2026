@@ -53,6 +53,15 @@ public:
     // Pops a key (scan << 8 | ascii) from the BIOS keyboard buffer, or -1 if empty (used by DOS).
     int read_key(bool remove);
 
+    // The INT 33h driver's pointer, for the frontend to draw (the host driver doesn't draw into
+    // video memory). Coordinates are the driver's virtual screen: 640x200 in both 0Dh and 0Eh, so
+    // x is twice the pixel column in 320-wide modes.
+    struct Cursor {
+        bool visible;
+        int x, y;
+    };
+    Cursor mouse_cursor() const { return {opt_.mouse_installed && mouse_.show_count >= 0, mouse_.x, mouse_.y}; }
+
 private:
     struct Mouse {
         int x = 320, y = 100;

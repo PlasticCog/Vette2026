@@ -62,11 +62,13 @@ public:
 
     // Output.
     void render(Ega::Frame& out) const { ega_.render(out); }
+    Bios::Cursor mouse_cursor() const { return bios_.mouse_cursor(); }
     void take_audio(std::vector<int16_t>& out);
 
     uint64_t emulated_ns() const;
     Cpu& cpu() { return cpu_; }
     Memory& memory() { return mem_; }
+    Ega& ega() { return ega_; }
     void set_log(std::function<void(const std::string&)> log);
 
     // IoBus

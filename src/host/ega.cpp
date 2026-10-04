@@ -11,6 +11,7 @@
 #include "host/ega.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <utility>
 
 namespace vette::host {
@@ -554,6 +555,56 @@ void Ega::render(Frame& out) const {
             }
         }
     }
+}
+
+void Ega::copy_state_from(const Ega& other) {
+    std::function<uint64_t()> clock = std::move(s_->clock);
+    const bool clocked = s_->clocked;
+    *s_ = *other.s_;
+    s_->clock = std::move(clock);
+    s_->clocked = clocked;
+}
+
+std::string Ega::diff_state(const Ega& other, size_t max_items) const {
+    const State& a = *s_;
+    const State& b = *other.s_;
+    std::string out;
+    size_t items = 0;
+    auto note = [&](const char* what, unsigned index, unsigned va, unsigned vb) {
+        if (items++ < max_items) {
+            char line[96];
+            std::snprintf(line, sizeof line, "%s[%X]: %X vs %X\n", what, index, va, vb);
+            out += line;
+        }
+    };
+    auto regs = [&](const char* what, const auto& ra, const auto& rb) {
+        for (size_t i = 0; i < ra.size(); ++i) {
+            if (ra[i] != rb[i]) {
+                note(what, static_cast<unsigned>(i), ra[i], rb[i]);
+            }
+        }
+    };
+    if (a.latch != b.latch) note("latch", 0, a.latch, b.latch);
+    if (a.mode != b.mode) note("mode", 0, a.mode, b.mode);
+    if (a.misc != b.misc) note("misc", 0, a.misc, b.misc);
+    if (a.seq_index != b.seq_index) note("seq_index", 0, a.seq_index, b.seq_index);
+    if (a.gc_index != b.gc_index) note("gc_index", 0, a.gc_index, b.gc_index);
+    if (a.crtc_index != b.crtc_index) note("crtc_index", 0, a.crtc_index, b.crtc_index);
+    if (a.attr_index != b.attr_index) note("attr_index", 0, a.attr_index, b.attr_index);
+    if (a.attr_data != b.attr_data) note("attr_flipflop", 0, a.attr_data, b.attr_data);
+    regs("seq", a.seq, b.seq);
+    regs("gc", a.gc, b.gc);
+    regs("crtc", a.crtc, b.crtc);
+    regs("attr", a.attr, b.attr);
+    for (uint32_t off = 0; off <= kPlaneMask; ++off) {
+        if (a.vram[off] != b.vram[off]) {
+            note("vram(planes 3210)", off, a.vram[off], b.vram[off]);
+        }
+    }
+    if (items > max_items) {
+        out += "... " + std::to_string(items - max_items) + " more\n";
+    }
+    return out;
 }
 
 } // namespace vette::host

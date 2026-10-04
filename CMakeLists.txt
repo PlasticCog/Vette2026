@@ -31,10 +31,21 @@ add_library(vette_host STATIC ${VETTE_HOST_SOURCES})
 target_include_directories(vette_host PUBLIC src)
 vette_warnings(vette_host)
 
+# --- Native ports of original functions (Phase 2), verified against the hosted original -------------
+file(GLOB VETTE_GAME_SOURCES CONFIGURE_DEPENDS src/game/*.cpp)
+add_library(vette_game STATIC ${VETTE_GAME_SOURCES})
+target_link_libraries(vette_game PUBLIC vette_host)
+vette_warnings(vette_game)
+
 # Headless runner: boots the hosted game, injects keys, saves screenshots (no SDL needed).
 add_executable(vette_run src/tools/vette_run.cpp)
-target_link_libraries(vette_run PRIVATE vette_host)
+target_link_libraries(vette_run PRIVATE vette_game)
 vette_warnings(vette_run)
+
+# Differential fuzzer: calls each native port with random inputs under Verify mode.
+add_executable(vette_fuzz src/tools/vette_fuzz.cpp)
+target_link_libraries(vette_fuzz PRIVATE vette_game)
+vette_warnings(vette_fuzz)
 
 # --- Game executable -----------------------------------------------------------------------------
 if(VETTE_BUILD_GAME)
@@ -59,11 +70,12 @@ if(VETTE_BUILD_GAME)
         src/core/game_dir.cpp
         src/platform/audio.cpp
         src/platform/framebuffer.cpp
+        src/platform/gamepad.cpp
         src/platform/keymap.cpp
         src/platform/presenter.cpp
     )
     target_include_directories(vette2026 PRIVATE src)
-    target_link_libraries(vette2026 PRIVATE vette_host)
+    target_link_libraries(vette2026 PRIVATE vette_game)
     if(TARGET SDL3::SDL3-static)
         target_link_libraries(vette2026 PRIVATE SDL3::SDL3-static)
     else()
@@ -78,7 +90,7 @@ endif()
 if(VETTE_BUILD_TESTS)
     file(GLOB VETTE_TEST_SOURCES CONFIGURE_DEPENDS tests/*.cpp)
     add_executable(vette_tests ${VETTE_TEST_SOURCES})
-    target_link_libraries(vette_tests PRIVATE vette_host)
+    target_link_libraries(vette_tests PRIVATE vette_game)
     target_include_directories(vette_tests PRIVATE tests)
     vette_warnings(vette_tests)
 

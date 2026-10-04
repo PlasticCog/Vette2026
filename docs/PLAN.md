@@ -78,14 +78,42 @@ Exit: annotated map of the main loop and every hardware touchpoint.
 - [x] Headless boot (`vette_run`). The original runs end to end: intro → garage → skill → opponent →
       course → manual quiz → race → crash cutscene → garage. It measures itself at 12–17 fps on an
       emulated 12 MHz 286. The 3D view runs in EGA mode 0Dh (320×200).
-- [ ] Wire into the SDL app (window, keyboard via `platform/keymap`, mouse, audio).
+- [x] Wired into the SDL app: window (640×200 and 320×200 at 4:3), keyboard via `platform/keymap`,
+      mouse with a pointer overlay, PC-speaker audio, and a gamepad as the PC's analog joystick (plus
+      D-pad/Start/Back as menu keys).
+- [x] DOSBox reference comparison (`re/tools/dosbox_reference/`, `re/tools/compare_frames.py`):
+      - Against DOSBox Staging 0.83 (EGA, 1200 cycles, the same CPU class as an emulated 12 MHz 286),
+        all 7 static screens are **100% pixel-identical**: title, garage, skill, course map, quiz, the
+        answer, and the race start.
+      - The animated frames differ only in timing-dependent content (car animation phase, opponent
+        position, clock digits).
+- [x] Manual-check (copy-protection) skip, on by default (`game/options`; notes 06).
 
 Exit: title → garage → race → results all playable, with frames matching DOSBox reference captures.
 
 ### Phase 2 — Incremental native port
-Port order: platform leaves (blits, line/polygon fill, sound driver, input) → fixed-point math and 3D
-pipeline → game systems (vehicle physics, traffic AI, police and tickets, courses and checkpoints, HUD,
-menus, garage quiz, high scores, two-player).
+Workflow and rules: [PORTING.md](PORTING.md).
+- [x] Verification harness (`host/native.*`). Every call runs the original with a write journal, rolls
+      back, runs the native port and compares registers, FLAGS, written bytes and EGA state; the
+      original's result and timing are kept.
+- [x] First port, `sincos_deg`: 48,812 verified calls in a race, 0 mismatches.
+- [x] 3D math core: 8 routines (sin/cos, camera matrix, vector × matrix, the three world→camera
+      transforms, axis table, projection including its INT 0 overflow paths). ~1.9M verified in-game
+      calls and `vette_fuzz` random inputs, 0 mismatches. Pure cores in `game/math3d.h` and
+      `game/projection.h` are ready for the Enhanced renderer.
+- [ ] **Early draw-distance preview** (next after the math core). A native high-resolution renderer runs
+      alongside the hosted original:
+      - It reads the camera, traffic and map from the original's live memory and draws the whole map
+        (the Maximum setting) in place of the original's 3D view. The original's dash is kept.
+      - The original still runs its own render pass unchanged, so its simulation side effects (traffic
+        binding, collision candidates) stay exactly 1:1 with no extra work.
+      - Needs: C++ decoders for the map, cell types and models (formats in notes 05), plus the verified
+        math core.
+
+Port order, adjusted for draw distance: fixed-point math and 3D pipeline first (the Enhanced
+renderer reuses it) → platform leaves (span fill, lines, blits, sound driver, input) → game systems
+(vehicle physics, traffic AI, police and tickets, courses and checkpoints, HUD, menus, garage quiz,
+high scores, two-player).
 
 Exit: a full playthrough executes no original code.
 
@@ -97,7 +125,9 @@ same protocol semantics.
 ### Phase 4 — Enhanced mode (each option toggles independently)
 - **Extended draw distance** (headline feature): everything visible at all times where possible, with
   no object pop-in, roads and landmarks drawn to the horizon. It's render-only, so traffic and police
-  behave 1:1. The original has **no far clip plane**; visibility comes from these rules (notes 03):
+  behave 1:1. Setting: **Original** (the ~6-cell window) / **Extended** (a chosen radius) / **Maximum**
+  (the whole 80×80-cell map, every cell and object, as far as the hardware allows). Maximum is the
+  default in Enhanced mode. The original has **no far clip plane**; visibility comes from these rules (notes 03):
   - **A ~6-cell window**: own cell, 2 ahead, one side row, so 4096–6144 units ahead.
   - **A sort-depth cull** at 0x1400, plus lateral margins.
   - **Per-object LOD distances.**

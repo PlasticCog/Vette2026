@@ -14,6 +14,7 @@ struct SdlDeleter {
     void operator()(SDL_Texture* p) const { SDL_DestroyTexture(p); }
     void operator()(SDL_Surface* p) const { SDL_DestroySurface(p); }
     void operator()(SDL_AudioStream* p) const { SDL_DestroyAudioStream(p); }
+    void operator()(SDL_Gamepad* p) const { SDL_CloseGamepad(p); }
 };
 
 template <class T>

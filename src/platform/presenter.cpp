@@ -102,4 +102,10 @@ bool Presenter::visible() const {
     return (SDL_GetWindowFlags(window_.get()) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN | SDL_WINDOW_OCCLUDED)) == 0;
 }
 
+// SDL's cursor visibility only applies over SDL's own windows, and this app has just the one.
+void Presenter::show_system_cursor(bool show) {
+    if (show != system_cursor_shown_ && (show ? SDL_ShowCursor() : SDL_HideCursor()))
+        system_cursor_shown_ = show;
+}
+
 }  // namespace vette

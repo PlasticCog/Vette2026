@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "host/memory.h"
@@ -52,6 +53,12 @@ public:
 
     // The currently displayed page (CRTC start address) as indices plus the active palette.
     void render(Frame& out) const;
+
+    // Verification harness: copy the complete device state (registers, latches, video memory) from
+    // another Ega, keeping this one's time source; and describe how two states differ (empty if
+    // identical), listing at most `max_items` differences.
+    void copy_state_from(const Ega& other);
+    std::string diff_state(const Ega& other, size_t max_items = 8) const;
 
 private:
     struct State;

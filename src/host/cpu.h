@@ -67,6 +67,17 @@ public:
     void set_code_hook(uint32_t linear, CodeHook hook);
     void clear_code_hook(uint32_t linear);
 
+    // Watches observe execution (verification harness): the watch runs before the instruction at
+    // `linear`, which then executes normally. If the watch moved CS:IP, execution resumes there
+    // instead. A code hook at the same address still applies after the watch.
+    using Watch = std::function<void(Cpu&)>;
+    void set_watch(uint32_t linear, Watch watch);
+    void clear_watch(uint32_t linear);
+    // Adds emulated time, e.g. the original's cost for a function that native code replaced.
+    void add_cycles(uint64_t n) { total_cycles_ += n; }
+    // While set, hardware interrupts stay pending instead of being taken.
+    void set_irq_inhibit(bool on) { irq_inhibit_ = on; }
+
     // Executes whole instructions until at least `cycles` have elapsed and returns the cycles executed.
     // While halted with no deliverable IRQ, idle time passes: the rest of the slice is consumed (the
     // result is then the full `cycles`), and a later run() wakes the CPU when an IRQ is pending and
@@ -100,6 +111,7 @@ private:
     uint64_t total_cycles_ = 0;
     bool halted_ = false;
     bool stop_ = false;
+    bool irq_inhibit_ = false;
 };
 
 } // namespace vette::host

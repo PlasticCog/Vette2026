@@ -1,0 +1,59 @@
+# Reference capture schedule: title -> garage -> skill -> opponent -> course map -> manual quiz ->
+# race start -> race clock running. It follows the README's vette_run key script (which, in both
+# emulators, leaves the car at 0 MPH). Static screens should match pixel for pixel; the opponent's
+# rotating car, the start countdown and the race depend on frame timing.
+#
+# Format, one action per line:   <t> <action> [args] [ours=<seconds>]
+#   t       seconds after the latest `sync`, or `-` for "now"
+#   sync    <mode> <timeout>   wait until the BIOS video mode byte (0040:0049) equals <mode> (hex);
+#                              that moment becomes t = 0 for the following lines
+#   key     <scan>             press a set-1 scan code (hex; E0xx = extended) for 100 ms
+#   down    <scan> / up <scan> press / release and keep going (for held keys)
+#   shot    <name>             save a raw DOSBox capture as <name>.png
+#   patch   <hex> <off> <hex>  find the first byte string in emulated conventional memory (must be
+#                              unique) and write the second one at match + off
+#   ours=   the same event in vette_run's emulated seconds (README script). capture_ours.py
+#           replays these with vette_run, so both emulators see the same inputs and shot names.
+#
+# The vette_run timeline (from 0.1 s shots): mode 0Eh at 0.12 s; title logo complete and static
+# 6.1-11.2; garage stats 13.2-17.0; skill plates 17.1-21.0; opponent (mode 0Dh, animated) from
+# 22.4; course map (0Eh) from 25.1, static 25.3-30.0; quiz (0Dh) from 30.1, static 30.1-31.0;
+# race start view static 32.7-34.6 ("BUCKLE UP") and 34.7-35.6 ("GET READY").
+
+-     sync  0E 60                    # VETTE sets mode 0Eh (vette_run: 0.12 s)
+
+# The manual quiz picks its question from a PIT counter read (rng at 3009:8D64 reads port 40h), so
+# the question depends on exact cycle timing. vette_run asks question 18 (Twin Turbo wheelbase,
+# answer 96.2). Force the same one in DOSBox: at 4160:0A5A, replace the clamp of the scaled random
+# number (cmp dx,2Fh / jle / mov dx,2Fh) with mov dx,18 + NOPs. RAM only; the files are untouched.
+1.0   patch 8BC1B93000F7E183FA2F7E03BA2F00 7 BA12009090909090
+9.4   shot  01_title     ours=9.5
+12.9  key   39           ours=13     # Space
+15.0  shot  02_garage    ours=15.1
+16.9  key   1C           ours=17     # Enter
+19.0  shot  03_skill     ours=19.1
+20.9  key   1C           ours=21     # Enter: the car drives out
+
+-     sync  0D 20                    # opponent screen (vette_run: 22.4 s)
+1.5   shot  04_opponent  ours=23.9   # rotating 3D car: compare structurally
+2.6   key   1C           ours=25
+
+-     sync  0E 20                    # course map (vette_run: 25.1 s)
+2.5   shot  05_course    ours=27.6
+4.9   key   1C           ours=30
+
+-     sync  0D 20                    # manual quiz (vette_run: 30.1 s)
+0.6   shot  06_quiz      ours=30.7
+0.9   key   0A           ours=31     # 9
+1.2   key   07           ours=31.3   # 6
+1.5   key   34           ours=31.6   # .
+1.8   key   03           ours=31.9   # 2
+2.0   shot  07_answer    ours=32.1
+2.1   key   1C           ours=32.2   # Enter
+3.9   shot  08_buckle_up ours=34.0
+5.0   shot  09_get_ready ours=35.1
+5.4   key   02           ours=35.5   # 1
+5.9   down  48           ours=36     # accelerate
+7.9   shot  10_race_a    ours=38     # race clock running: timing-dependent
+15.9  shot  11_race_b    ours=46
+28.9  up    48           ours=59

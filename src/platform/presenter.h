@@ -15,6 +15,9 @@ public:
     void toggle_fullscreen();
     // False while minimized or hidden, when VSync can't be relied on to pace the loop.
     bool visible() const;
+    // Shows or hides the OS mouse pointer while it's over the window (hidden while the game's own
+    // pointer is on screen). Outside the window it is unaffected.
+    void show_system_cursor(bool show);
 
 private:
     // Destroyed in reverse order: textures, then renderer, then window.
@@ -26,6 +29,7 @@ private:
     int frame_h_ = 0;
     int scale_x_ = 0;
     int scale_y_ = 0;
+    bool system_cursor_shown_ = true;
 };
 
 }  // namespace vette

@@ -82,9 +82,20 @@ struct Cpu::Impl {
     bool inhibit_ = false;   // interrupt shadow (STI, MOV SS, POP SS) for the next instruction
     uint64_t end_ = 0;       // end of the current run() slice, for REP string yields
 
-    // Code hooks: a bitmap over the 1 MB linear space makes the per-instruction check one bit test.
+    // Code hooks and watches: a bitmap over the 1 MB linear space makes the per-instruction check
+    // one bit test. A bit is set while either map has an entry at that address.
     std::vector<uint64_t> hook_bits_;
     std::unordered_map<uint32_t, std::shared_ptr<CodeHook>> hooks_;
+    std::unordered_map<uint32_t, std::shared_ptr<Watch>> watches_;
+
+    void update_hook_bit(uint32_t lin) {
+        const uint64_t bit = uint64_t{1} << (lin & 63);
+        if (hooks_.count(lin) || watches_.count(lin)) {
+            hook_bits_[lin >> 6] |= bit;
+        } else {
+            hook_bits_[lin >> 6] &= ~bit;
+        }
+    }
 
     // 286 system state (real mode only).
     uint16_t msw_ = 0xFFF0;
@@ -384,12 +395,21 @@ struct Cpu::Impl {
     }
 
     bool should_yield() const {
-        return c.total_cycles_ >= end_ || c.stop_ || ((R.flags & IF) && c.pic_ && c.pic_->irq_pending());
+        return c.total_cycles_ >= end_ || c.stop_ ||
+               (!c.irq_inhibit_ && (R.flags & IF) && c.pic_ && c.pic_->irq_pending());
     }
 
+    // Runs the watch and/or hook at CS:IP. Returns true if execution must not continue with the
+    // instruction at the original CS:IP (a hook replaced it, or a watch redirected execution).
     bool run_hook() {
         const uint32_t lin = (base(CS) + R.ip) & Memory::kMask;
         if (((hook_bits_[lin >> 6] >> (lin & 63)) & 1) == 0) return false;
+        if (const auto w = watches_.find(lin); w != watches_.end()) {
+            const std::shared_ptr<Watch> watch = w->second;  // the watch may remove itself
+            const uint16_t cs = R.s[CS], ip = R.ip;
+            (*watch)(c);
+            if (R.s[CS] != cs || R.ip != ip) return true;
+        }
         const auto it = hooks_.find(lin);
         if (it == hooks_.end()) return false;
         const std::shared_ptr<CodeHook> hook = it->second;  // the hook may remove itself
@@ -1252,14 +1272,30 @@ void Cpu::set_code_hook(uint32_t linear, CodeHook hook) {
         clear_code_hook(linear);
         return;
     }
-    impl_->hook_bits_[linear >> 6] |= uint64_t{1} << (linear & 63);
     impl_->hooks_[linear] = std::make_shared<CodeHook>(std::move(hook));
+    impl_->update_hook_bit(linear);
 }
 
 void Cpu::clear_code_hook(uint32_t linear) {
     linear &= Memory::kMask;
-    impl_->hook_bits_[linear >> 6] &= ~(uint64_t{1} << (linear & 63));
     impl_->hooks_.erase(linear);
+    impl_->update_hook_bit(linear);
+}
+
+void Cpu::set_watch(uint32_t linear, Watch watch) {
+    linear &= Memory::kMask;
+    if (!watch) {
+        clear_watch(linear);
+        return;
+    }
+    impl_->watches_[linear] = std::make_shared<Watch>(std::move(watch));
+    impl_->update_hook_bit(linear);
+}
+
+void Cpu::clear_watch(uint32_t linear) {
+    linear &= Memory::kMask;
+    impl_->watches_.erase(linear);
+    impl_->update_hook_bit(linear);
 }
 
 int64_t Cpu::run(int64_t cycles) {
@@ -1271,7 +1307,7 @@ int64_t Cpu::run(int64_t cycles) {
     while (total_cycles_ < end) {
         if (im.inhibit_) {
             im.inhibit_ = false;  // interrupt shadow: no IRQ before this instruction
-        } else if ((regs.flags & flag::IF) && pic_ && pic_->irq_pending()) {
+        } else if (!irq_inhibit_ && (regs.flags & flag::IF) && pic_ && pic_->irq_pending()) {
             interrupt(pic_->irq_acknowledge());
             total_cycles_ += timing::kIrq;
             continue;
@@ -1280,7 +1316,7 @@ int64_t Cpu::run(int64_t cycles) {
             total_cycles_ = end;  // idle until the next slice; an IRQ wakes us there
             break;
         }
-        if (!im.hooks_.empty() && im.run_hook()) {
+        if ((!im.hooks_.empty() || !im.watches_.empty()) && im.run_hook()) {
             if (stop_) break;
             continue;
         }

@@ -8,6 +8,11 @@
 // --hold A:B:SC  press scan code SC at second A, release at second B
 // --watch S:O    print the word at emulator address S:O (hex) at every shot
 // --cpu-hz N     emulated CPU clock (default 12000000)
+// --verify F     run native function F (or "all") in Verify mode: every call is checked against the
+//                original; mismatches are printed and the exit code is 4
+// --native F     replace function F (or "all") with its native port, unverified
+// --skip-manual-check  skip the copy-protection question (the game's default; off here so key
+//                scripts that type an answer keep working)
 // --trace        log every DOS file access and unhandled BIOS/port use
 
 #include <algorithm>
@@ -18,13 +23,17 @@
 #include <string>
 #include <vector>
 
+#include "game/natives.h"
+#include "game/options.h"
 #include "host/machine.h"
+#include "host/native.h"
 
 namespace {
 
 using vette::host::Ega;
 using vette::host::Machine;
 using vette::host::MachineConfig;
+using vette::host::NativeRunner;
 
 constexpr uint64_t kNsPerMs = 1'000'000;
 
@@ -74,7 +83,8 @@ bool save_bmp(const std::filesystem::path& path, const Ega::Frame& frame) {
 
 int usage() {
     std::fprintf(stderr, "usage: vette_run --game <dir> [--seconds N] [--shot T]... [--key T:SC]... "
-                         "[--hold A:B:SC]... [--watch S:O]... [--cpu-hz N] [--out dir] [--trace]\n");
+                         "[--hold A:B:SC]... [--watch S:O]... [--cpu-hz N] [--out dir] [--trace]\n"
+                         "       [--verify F|all]... [--native F|all]... [--skip-manual-check]\n");
     return 2;
 }
 
@@ -88,8 +98,10 @@ int main(int argc, char* argv[]) {
     std::vector<double> shots;
     std::vector<KeyEvent> keys;
     std::vector<std::pair<uint16_t, uint16_t>> watches;
+    std::vector<std::pair<std::string, NativeRunner::Mode>> natives;
     std::filesystem::path out_dir = ".";
     bool trace = false;
+    bool skip_manual_check = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -129,12 +141,16 @@ int main(int argc, char* argv[]) {
             }
             watches.push_back({static_cast<uint16_t>(std::strtoul(v.substr(0, colon).c_str(), nullptr, 16)),
                                static_cast<uint16_t>(std::strtoul(v.substr(colon + 1).c_str(), nullptr, 16))});
+        } else if ((a == "--verify" || a == "--native") && has_value) {
+            natives.push_back({argv[++i], a == "--verify" ? NativeRunner::Mode::Verify : NativeRunner::Mode::Native});
         } else if (a == "--cpu-hz" && has_value) {
             config.cpu_hz = std::strtoull(argv[++i], nullptr, 10);
         } else if (a == "--out" && has_value) {
             out_dir = argv[++i];
         } else if (a == "--trace") {
             trace = true;
+        } else if (a == "--skip-manual-check") {
+            skip_manual_check = true;
         } else {
             return usage();
         }
@@ -156,6 +172,24 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if (skip_manual_check) {
+        vette::game::install_skip_manual_check(machine.cpu());
+    }
+    NativeRunner runner(machine);
+    runner.set_report([](const std::string& msg) { std::printf("%s\n", msg.c_str()); });
+    for (const auto& [name, mode] : natives) {
+        if (name == "all") {
+            for (const auto& fn : vette::game::native_functions()) {
+                runner.install(fn, mode);
+            }
+        } else if (const auto* fn = vette::game::find_native(name)) {
+            runner.install(*fn, mode);
+        } else {
+            std::fprintf(stderr, "unknown native function '%s'\n", name.c_str());
+            return 2;
+        }
+    }
+
     const auto total_ms = static_cast<uint64_t>(seconds * 1000);
     size_t next_key = 0, next_shot = 0;
     Ega::Frame frame;
@@ -164,6 +198,7 @@ int main(int argc, char* argv[]) {
             machine.key(keys[next_key++].scancode);
         }
         machine.run_for(kNsPerMs);
+        runner.poll();
         while (next_shot < shots.size() && shots[next_shot] * 1000 <= static_cast<double>(ms + 1)) {
             machine.render(frame);
             char name[64];
@@ -186,5 +221,16 @@ int main(int argc, char* argv[]) {
     if (machine.stopped() && machine.fault().empty()) {
         std::printf("program exited with code %d\n", machine.exit_code());
     }
-    return machine.fault().empty() ? 0 : 3;
+    if (!natives.empty()) {
+        std::printf("native functions:\n%s", runner.summary().c_str());
+    }
+    if (!machine.fault().empty()) {
+        return 3;
+    }
+    for (const auto& fn : vette::game::native_functions()) {
+        if (runner.stats(fn.name).mismatches > 0) {
+            return 4;
+        }
+    }
+    return 0;
 }

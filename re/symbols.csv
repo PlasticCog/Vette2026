@@ -1,0 +1,61 @@
+addr,name,kind,comment
+# VETTE.EXE (DOS 1.1 EN) symbol map. Source of truth for naming; applied to Ghidra by re/ghidra_scripts/VetteApplySymbols.java.
+# Addresses are image-relative SEG:OFF (load segment 0, as produced by re/tools/unexepack.py).
+# kind: func | data | label. Data sizes are noted in comments (b=byte w=word d=dword).
+#
+# --- Startup / main --------------------------------------------------------------------------
+3009:0025,start,func,Real entry point (after EXEPACK). Sets DS=124Ah and runs init and the main menu loop.
+3009:0E28,detect_cpu_class,func,"push sp/pop ax 8088 test, then idiv loop for 0x124 PIT ticks (~1 s). Returns AX 0=8088/slow 1=medium 2=fast; fast clears cs:0E26/0E27."
+3009:0E26,cpu_slow_flag_a,data,b; 0xFF unless detect_cpu_class says fast. Copied to 124A:2AC7 at startup.
+3009:0E27,cpu_slow_flag_b,data,b; 0xFF unless detect_cpu_class says fast. Copied to 124A:2ABE at startup.
+#
+3009:005B,game_outer_loop,label,Outer loop: menus / garage / race setup. Re-entered from 3009:008A 00B2 0618.
+3009:0135,frame_loop,label,Per-frame loop head (back-edge 3009:061B). See re/notes/02-frame-loop.md.
+3009:8F00,video_set_mode_ega_0e,func,INT 10h mode 0Eh (EGA 640x200x16). Double-buffer pages at A000 and A400.
+3009:8DA9,video_page_seg_a,data,w; A000h
+3009:8DAB,video_page_seg_b,data,w; A400h
+#
+# --- Frame timing ----------------------------------------------------------------------------
+3009:051B,frame_measure_rate,label,"Inside the main frame loop: xchg pit_ticks with 0 -> elapsed (min 1); frame_rate = round(291/elapsed), min 4."
+124A:2CD3,frame_rate,data,w; frames per second measured each frame. The simulation scales per-frame motion by this.
+124A:3DE8,race_ticks,data,d; accumulated PIT ticks (291.3 Hz) for the race clock.
+124A:3B1B,race_seconds,data,w; race_ticks / 0x123 (291). The real rate is 291.27 Hz so the clock runs ~0.1% slow.
+3009:700F,race_clock_tick,func,race_clock_update then race_ticks += pit_ticks (before the frame loop resets pit_ticks).
+3009:7021,race_clock_update,func,race_seconds = (race_ticks + pit_ticks) / 291.
+#
+# --- Timer / PIT -----------------------------------------------------------------------------
+3009:99DD,timer_init,func,Sound init then PIT ch0 divisor 0x1000 (291.3 Hz) then installs ISRs.
+3009:987E,timer_install_isrs,func,Hooks INT 08h -> int08_timer and INT 1Ch -> int1c_joystick_buttons.
+3009:98C8,timer_restore,func,Restores INT 08h/1Ch and PIT divisor 0 (18.2 Hz).
+3009:98FD,int08_timer,func,"IRQ0 at 291.3 Hz: ++pit_ticks; every 4th IRQ runs timer_work (72.8 Hz)."
+3009:9918,timer_work,func,"72.8 Hz: snd_engine_pitch_tick + snd_seq_tick; every 4th call chains to BIOS INT 08h (keeps 18.2 Hz time of day)."
+3009:9951,pit_set_ch0_divisor,func,BX = divisor (0 = 65536).
+3009:98FB,pit_ticks,data,w; incremented at 291.3 Hz. Read-and-reset by the frame loop.
+3009:95E4,work_ticks,data,w; incremented at 72.8 Hz.
+3009:95E8,old_int1c,data,d
+3009:95EC,old_int08,data,d
+3009:985C,int1c_joystick_buttons,func,18.2 Hz: reads joystick buttons (port 201h bits 4-5) into joy_buttons.
+3009:927D,joy_buttons,data,b
+#
+# --- PC speaker sound driver -----------------------------------------------------------------
+3009:933E,snd_play,func,AX = sequence pointer (cs-relative). Starts playback if sound_enabled.
+3009:9352,snd_stop,func,Speaker off and points the sequence at the idle sequence 92C0.
+3009:9360,spk_set_divisor,func,"Speaker on, PIT ch2 mode 3 (B6h), divisor CX."
+3009:9373,snd_seq_tick,func,"72.8 Hz sequence step. Entries are {w duration, w divisor}: divisor -1 = rest, duration 0 = jump back by divisor bytes, duration -1 = end."
+3009:93EA,snd_engine_set_target,func,Engine-note slide direction from engine_speed vs previous value.
+3009:9428,snd_engine_pitch_tick,func,72.8 Hz engine-note pitch slide (divisor at cs:92A8 limited to 0x1400..0xB000).
+3009:9277,sound_enabled,data,b
+3009:92A6,snd_seq_engine,data,Engine-note sequence (divisor slides in place).
+3009:92BA,snd_engine_slide,data,w; bit15 = slide down. Low bits = rate.
+3009:92BC,snd_seq_count,data,w
+3009:92BE,snd_seq_ptr,data,w
+3009:92C0,snd_seq_idle,data,
+3009:5891,engine_speed,data,w; drives the engine-note pitch (compared against 0x14/0x35). Speed or RPM - TBD.
+#
+# --- Library segment 3FFC (far) -------------------------------------------------------------
+3FFC:0183,kbd_install,func,Saves INT 09h into cs:0000 and installs kbd_isr (far; called from start).
+3FFC:01AB,kbd_restore,func,Restores the original INT 09h.
+3FFC:01C6,kbd_isr,func,INT 09h keyboard handler (reads port 60h).
+3FFC:0000,old_int09,data,d
+3FFC:0004,kbd_state,data,11 words of key state written by kbd_isr.
+3FFC:0164,kbd_clear_state,func,Zeroes kbd_state and cs:003C.

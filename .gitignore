@@ -1,0 +1,31 @@
+# --- Original game files: copyrighted, never committed -----------------------
+# Players supply their own copy in Game/ (see Game/README.md).
+/Game/*
+!/Game/README.md
+/Vette_DOS_EN/
+/Vette_Mac_EN/
+/Vette_PC-98_JA/
+*.zip
+*.toast
+*.hdi
+*.img
+
+# Anything derived from the original binaries or data (unpacked EXEs, Ghidra
+# databases, decompiler dumps, decoded images/sounds, extracted manual text).
+/re/bin/
+/re/ghidra/
+/re/out/
+/analysis/
+
+# --- Build output -----------------------------------------------------------
+/build/
+/out/
+/.vs/
+CMakeUserPresets.json
+*.user
+
+# --- Tooling ----------------------------------------------------------------
+__pycache__/
+*.pyc
+.vscode/*
+!.vscode/extensions.json

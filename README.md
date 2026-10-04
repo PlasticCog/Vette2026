@@ -41,6 +41,13 @@ Current state: the original game runs inside the built-in emulator and is fully 
 keyboard, mouse, gamepad and PC-speaker sound. Native C++ ports of its routines are being added
 one at a time, each verified against the original (see [docs/PORTING.md](docs/PORTING.md)).
 
+**Launch menu.** VETTE! 2026 opens with a launch menu in the style of the game's own screens. Choose a
+preset there (**Classic**, VETTE! exactly as in 1989, or **Enhanced**), or set each option: frame rate,
+PC speed, the manual check, joystick, window or fullscreen, sound, and whether the menu appears at
+startup. It works with the keyboard, mouse or gamepad. Choices are saved in
+`%APPDATA%\VETTE2026\config\settings.ini` (the per-user settings folder on other systems). Command-line
+flags override them for one run; `--launcher` brings the menu back if you switched it off.
+
 The original asks a manual-lookup question (copy protection) before the first race. VETTE! 2026 skips
 it, since this version of the game accepts any answer anyway. Pass `--manual-check` to see it.
 

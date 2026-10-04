@@ -88,6 +88,10 @@ Exit: annotated map of the main loop and every hardware touchpoint.
       - The animated frames differ only in timing-dependent content (car animation phase, opponent
         position, clock digits).
 - [x] Manual-check (copy-protection) skip, on by default (`game/options`; notes 06).
+- [x] Launch menu (`ui/launcher`, `core/settings`) in the game's EGA style, for keyboard, mouse or gamepad:
+      - Classic/Enhanced presets, plus frame rate, PC speed, draw distance (locked until its renderer
+        lands), manual check, joystick, display and sound.
+      - Saved in settings.ini; command-line flags override for one run.
 
 Exit: title → garage → race → results all playable, with frames matching DOSBox reference captures.
 

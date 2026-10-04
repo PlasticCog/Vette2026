@@ -13,6 +13,11 @@ public:
 
     void present(const Framebuffer& fb);
     void toggle_fullscreen();
+    void set_fullscreen(bool on);
+    bool fullscreen() const;
+    // Maps a window position (mouse event coordinates) to a pixel of the last presented frame.
+    // Returns false when it lies outside the picture.
+    bool window_to_frame(float wx, float wy, int& fx, int& fy) const;
     // False while minimized or hidden, when VSync can't be relied on to pace the loop.
     bool visible() const;
     // Shows or hides the OS mouse pointer while it's over the window (hidden while the game's own
@@ -27,6 +32,7 @@ private:
     SdlPtr<SDL_Texture> scaled_;  // frame_ upscaled by (scale_x_, scale_y_), nearest-neighbor
     int frame_w_ = 0;
     int frame_h_ = 0;
+    SDL_FRect picture_{};  // where the last frame went, in render output pixels
     int scale_x_ = 0;
     int scale_y_ = 0;
     bool system_cursor_shown_ = true;

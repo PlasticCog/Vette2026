@@ -91,11 +91,28 @@ void Presenter::present(const Framebuffer& fb) {
     SDL_RenderClear(renderer);
     SDL_RenderTexture(renderer, scaled_.get(), nullptr, &dst);
     SDL_RenderPresent(renderer);
+    picture_ = dst;
 }
 
-void Presenter::toggle_fullscreen() {
-    const bool fullscreen = (SDL_GetWindowFlags(window_.get()) & SDL_WINDOW_FULLSCREEN) != 0;
-    SDL_SetWindowFullscreen(window_.get(), !fullscreen);
+void Presenter::toggle_fullscreen() { set_fullscreen(!fullscreen()); }
+
+void Presenter::set_fullscreen(bool on) { SDL_SetWindowFullscreen(window_.get(), on); }
+
+bool Presenter::fullscreen() const { return (SDL_GetWindowFlags(window_.get()) & SDL_WINDOW_FULLSCREEN) != 0; }
+
+bool Presenter::window_to_frame(float wx, float wy, int& fx, int& fy) const {
+    float rx = 0;
+    float ry = 0;
+    if (frame_w_ == 0 || picture_.w <= 0 || picture_.h <= 0 ||
+        !SDL_RenderCoordinatesFromWindow(renderer_.get(), wx, wy, &rx, &ry))
+        return false;
+    const float u = (rx - picture_.x) / picture_.w;
+    const float v = (ry - picture_.y) / picture_.h;
+    if (u < 0 || u >= 1 || v < 0 || v >= 1)
+        return false;
+    fx = static_cast<int>(u * static_cast<float>(frame_w_));
+    fy = static_cast<int>(v * static_cast<float>(frame_h_));
+    return true;
 }
 
 bool Presenter::visible() const {

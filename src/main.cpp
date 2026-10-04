@@ -2,6 +2,7 @@
 #include "assets/rle.h"
 #include "core/game_dir.h"
 #include "core/path_utf8.h"
+#include "core/settings.h"
 #include "game/options.h"
 #include "game/smooth.h"
 #include "host/machine.h"
@@ -11,6 +12,7 @@
 #include "platform/keymap.h"
 #include "platform/mouse_pointer.h"
 #include "platform/presenter.h"
+#include "ui/launcher.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>  // UTF-8 argv on Windows
@@ -33,8 +35,10 @@ namespace {
 constexpr const char* kAppName = "VETTE! 2026";
 
 constexpr const char* kUsage =
-    "Usage: vette2026 [--game <dir>] [--fps smooth|original] [--pc fast|286] [--cpu-hz <n>]\n"
-    "                 [--[no-]joystick] [--manual-check] [--dump-frame <file.bmp>]\n"
+    "Usage: vette2026 [--[no-]launcher] [--game <dir>] [--fps smooth|original] [--pc fast|286]\n"
+    "                 [--cpu-hz <n>] [--[no-]joystick] [--manual-check] [--dump-frame <file.bmp>]\n"
+    "Settings come from the launch menu (saved in settings.ini); these flags override them for one run.\n"
+    "  --launcher           show the launch menu even if it's switched off (--no-launcher: skip it)\n"
     "  --game <dir>         folder with the DOS VETTE! files (default: search for Game/)\n"
     "  --fps smooth         (default) the race view is drawn at the display's refresh rate, blending\n"
     "                       between the game's own frames; the game logic is unchanged\n"
@@ -64,14 +68,28 @@ constexpr int kAudioRate = 48000;
 constexpr std::uint64_t kFastPcHz = 140'000'000;
 constexpr std::uint64_t kAtHz = 12'000'000;
 
+// Command-line overrides of the saved settings (unset = use the setting).
 struct Options {
     std::optional<std::filesystem::path> game_dir;
     std::optional<std::string> dump_frame;  // UTF-8 path
     std::optional<std::uint64_t> cpu_hz;
-    bool smooth = true;  // --fps smooth (display-rate race view) vs original
-    std::optional<bool> joystick;  // default: whether a gamepad is connected at launch
-    bool manual_check = false;     // show the copy-protection question (skipped by default)
+    std::optional<Settings::FrameRate> frame_rate;
+    std::optional<Settings::Pc> pc;
+    std::optional<bool> joystick;
+    std::optional<bool> manual_check;
+    std::optional<bool> launcher;
     bool help = false;
+
+    void apply_to(Settings& s) const {
+        if (frame_rate)
+            s.frame_rate = *frame_rate;
+        if (pc)
+            s.pc = *pc;
+        if (joystick)
+            s.joystick = *joystick ? Settings::Joystick::On : Settings::Joystick::Off;
+        if (manual_check)
+            s.manual_check = *manual_check;
+    }
 };
 
 // Prints the problem and returns nullopt on bad usage.
@@ -86,6 +104,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
             opts.joystick = arg == "--joystick";
         } else if (arg == "--manual-check") {
             opts.manual_check = true;
+        } else if (arg == "--launcher" || arg == "--no-launcher") {
+            opts.launcher = arg == "--launcher";
         } else if (arg == "--game" && has_value) {
             opts.game_dir = path_from_utf8(argv[++i]);
         } else if (arg == "--dump-frame" && has_value) {
@@ -98,13 +118,11 @@ std::optional<Options> parse_args(int argc, char** argv) {
             }
         } else if (arg == "--fps" && has_value && (std::string_view(argv[i + 1]) == "smooth" ||
                                                   std::string_view(argv[i + 1]) == "original")) {
-            opts.smooth = std::string_view(argv[++i]) == "smooth";
+            opts.frame_rate = std::string_view(argv[++i]) == "smooth" ? Settings::FrameRate::Smooth
+                                                                     : Settings::FrameRate::Original;
         } else if (arg == "--pc" && has_value && (std::string_view(argv[i + 1]) == "fast" ||
                                                  std::string_view(argv[i + 1]) == "286")) {
-            if (!opts.cpu_hz)
-                opts.cpu_hz = std::string_view(argv[++i]) == "fast" ? kFastPcHz : kAtHz;
-            else
-                ++i;  // --cpu-hz wins
+            opts.pc = std::string_view(argv[++i]) == "fast" ? Settings::Pc::Fast : Settings::Pc::At286;
         } else {
             const bool needs_value = arg == "--game" || arg == "--dump-frame" || arg == "--cpu-hz" ||
                                      arg == "--fps" || arg == "--pc";
@@ -142,15 +160,20 @@ void load_title(const GameDir& game, Framebuffer& fb) {
     fb.pixels = decode_planar(planes, Framebuffer::kWidth, Framebuffer::kHeight);
 }
 
-// Saves (CONFIG.BIN, SCORE.BIN, ...) go here, never into the player's game folder.
-std::filesystem::path save_dir() {
-    char* pref = SDL_GetPrefPath("VETTE2026", "save");
+std::filesystem::path pref_dir(const char* app) {
+    char* pref = SDL_GetPrefPath("VETTE2026", app);
     if (!pref)
         throw_sdl_error("SDL_GetPrefPath");
     std::filesystem::path dir = path_from_utf8(pref);
     SDL_free(pref);
     return dir;
 }
+
+// The game's saves (CONFIG.BIN, SCORE.BIN, ...) go here, never into the player's game folder.
+std::filesystem::path save_dir() { return pref_dir("save"); }
+
+// settings.ini (the launch menu's choices).
+std::filesystem::path settings_dir() { return pref_dir("config"); }
 
 void copy_frame(const host::Ega::Frame& in, Framebuffer& out) {
     if (in.width == 0) {  // text mode (startup/exit): not rendered
@@ -294,8 +317,29 @@ int run(int argc, char** argv) {
 
         if (!SDL_Init(SDL_INIT_VIDEO))
             throw_sdl_error("SDL_Init");
+
+        // Saved settings, then this run's command-line overrides.
+        const std::filesystem::path settings_file = settings_dir() / "settings.ini";
+        Settings settings = load_settings(settings_file);
+        opts->apply_to(settings);
+
+        Presenter presenter(kAppName);
+        presenter.set_fullscreen(settings.fullscreen);
+        Gamepad gamepad;
+
+        if (opts->launcher.value_or(settings.show_launcher)) {
+            Framebuffer title;
+            load_title(game, title);
+            if (ui::run_launcher(presenter, gamepad, title, settings) == ui::LaunchChoice::Quit)
+                return 0;
+            if (!save_settings(settings_file, settings))
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't save %s", path_to_utf8(settings_file).c_str());
+        }
+
         std::optional<AudioOut> audio;
-        if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        if (!settings.sound) {
+            SDL_Log("Sound: off");
+        } else if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
             try {
                 audio.emplace(kAudioRate);
             } catch (const std::exception& e) {
@@ -305,15 +349,14 @@ int run(int argc, char** argv) {
             SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "No sound: %s", SDL_GetError());
         }
 
-        Gamepad gamepad;
-
         host::MachineConfig config;
         config.game_dir = game.root();
         config.save_dir = save_dir();
         config.audio_rate = kAudioRate;
-        config.cpu_hz = opts->cpu_hz.value_or(kFastPcHz);
+        config.cpu_hz = opts->cpu_hz.value_or(settings.pc == Settings::Pc::Fast ? kFastPcHz : kAtHz);
         // Fixed for the session: DOS games detect the game port once, at startup.
-        config.joystick = opts->joystick.value_or(gamepad.connected());
+        config.joystick = settings.joystick == Settings::Joystick::Auto ? gamepad.connected()
+                                                                         : settings.joystick == Settings::Joystick::On;
         SDL_Log("Joystick: %s", !config.joystick      ? "none"
                                 : gamepad.connected() ? "gamepad"
                                                       : "game port present, no gamepad connected (centered)");
@@ -323,16 +366,16 @@ int run(int argc, char** argv) {
         if (!machine.boot(error))
             throw std::runtime_error("Couldn't start VETTE.EXE: " + error);
         SDL_Log("Saves: %s", path_to_utf8(config.save_dir).c_str());
-        if (!opts->manual_check)
+        if (!settings.manual_check)
             game::install_skip_manual_check(machine.cpu());
         game::install_idle_skip(machine);  // the fast PC spends most cycles waiting for retrace
+        const bool smooth_fps = settings.frame_rate == Settings::FrameRate::Smooth;
         std::optional<game::SmoothRenderer> smooth;
-        if (opts->smooth)
+        if (smooth_fps)
             smooth.emplace(machine);
-        SDL_Log("Frame rate: %s; emulated CPU %.0f MHz", opts->smooth ? "smooth (display refresh)" : "original",
+        SDL_Log("Frame rate: %s; emulated CPU %.0f MHz", smooth_fps ? "smooth (display refresh)" : "original",
                 static_cast<double>(config.cpu_hz) / 1e6);
 
-        Presenter presenter(kAppName);
         main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad, smooth ? &*smooth : nullptr);
         if (smooth && smooth->stats().replays)
             SDL_Log("Smooth: %llu game frames, %llu display frames, %.2f ms per replay",

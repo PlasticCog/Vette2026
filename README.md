@@ -115,6 +115,12 @@ Add `--verify all` to check every native port against the original during the ru
 Scan codes are set 1 in hex. Emulator addresses are image-relative + `1000h` on the segment, the
 same as Ghidra (`224A:2CD3` is `frame_rate`).
 
+**World extraction.** `vette_world` extracts the 3D city from the running original (the whole 80x80-cell
+map, every object with all its levels of detail, and the car and building models) for the Enhanced
+renderer's extended draw distance. To check the result, it redraws the original's view from the extracted
+world and compares: every race frame and random whole-map view tested so far is pixel-identical. Its
+source file header lists the options.
+
 [`re/symbols.csv`](re/symbols.csv) is the shared, committed record of every named function and
 variable. The Ghidra database and decompiler exports are derived from the copyrighted binary, so they
 stay local (`re/ghidra/`, `re/out/`). Findings are written up in [`re/notes/`](re/notes/).
@@ -124,7 +130,7 @@ stay local (`re/ghidra/`, `re/out/`). Findings are written up in [`re/notes/`](r
 | Path | Contents |
 |---|---|
 | `Game/` | Where players put their original game files (not tracked) |
-| `src/` | `host/` (the emulator that runs the original), `game/` (native ports, smooth renderer), `platform/` (SDL3 window, sound, input), `ui/` (launch menu, program icon), `core/` (game files, settings), `tools/` (`vette_run`, `vette_fuzz`, `vette_icon`) |
+| `src/` | `host/` (the emulator that runs the original), `game/` (native ports, smooth renderer), `platform/` (SDL3 window, sound, input), `ui/` (launch menu, program icon), `core/` (game files, settings), `enhanced/` (world extraction for the Enhanced renderer), `tools/` (`vette_run`, `vette_fuzz`, `vette_world`, `vette_icon`) |
 | `docs/` | Plan, porting guide |
 | `re/` | Symbol map, notes, Ghidra scripts and RE tools |
 | `tools/reverse_engineering/` | Earlier asset/resource extraction scripts (reference, unverified) |

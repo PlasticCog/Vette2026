@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <utility>
 
 namespace vette::host {
@@ -221,6 +222,23 @@ struct Ega::State {
         }
         const uint64_t shift = frame_ticks - uint64_t{vrs} * line_ticks;
         return (ticks(to_ns) + shift) / frame_ticks != (ticks(from_ns) + shift) / frame_ticks;
+    }
+
+    // Emulated time of the next vertical retrace start (or end) strictly after `ns`.
+    uint64_t next_vretrace_edge(uint64_t ns, bool start) const {
+        if (vrs >= vtotal) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        const uint64_t edge = (uint64_t{vrs} + (start ? 0u : vr_lines)) * line_ticks % frame_ticks;
+        const uint64_t now_ticks = ticks(ns);
+        const uint64_t pos = now_ticks % frame_ticks;
+        const uint64_t ahead = pos < edge ? edge - pos : frame_ticks - pos + edge;
+        // The first ns whose tick count reaches the edge: ceil(target * ns_den / hz_num), split so it
+        // can't overflow.
+        const uint64_t target = now_ticks + ahead;
+        const uint64_t whole = target / hz_num * ns_den;
+        const uint64_t part = (target % hz_num * ns_den + hz_num - 1) / hz_num;
+        return std::max(whole + part, ns + 1);
     }
 
     uint8_t input_status0() const {
@@ -515,7 +533,15 @@ void Ega::set_time_source(std::function<uint64_t()> now_ns) {
     s.vint_armed_ns = s.now();
 }
 
-void Ega::render(Frame& out) const {
+uint16_t Ega::display_start() const { return static_cast<uint16_t>(s_->displayed_start()); }
+
+bool Ega::in_vertical_retrace() const { return (s_->input_status1() & 0x08) != 0; }
+
+uint64_t Ega::next_vertical_retrace_ns(bool start) const { return s_->next_vretrace_edge(s_->now(), start); }
+
+void Ega::render(Frame& out) const { render_page(display_start(), out); }
+
+void Ega::render_page(uint16_t start_address, Frame& out) const {
     const State& s = *s_;
     const bool lines350 = (s.misc & 0x80) != 0;  // negative vertical sync: 350-line monitor mode
     for (size_t i = 0; i < out.palette.size(); ++i) {
@@ -538,7 +564,7 @@ void Ega::render(Frame& out) const {
         return;
     }
 
-    const uint32_t start = s.displayed_start();
+    const uint32_t start = start_address;
     const uint32_t stride = s.crtc[0x13] * 2u;  // byte mode: the offset register counts words
     const uint64_t enable = (s.attr[0x12] & 0x0Fu) * 0x0101010101010101ull;  // color plane enable
     const int bytes_per_row = p->width / 8;

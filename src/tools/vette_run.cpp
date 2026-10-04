@@ -11,6 +11,9 @@
 // --verify F     run native function F (or "all") in Verify mode: every call is checked against the
 //                original; mismatches are printed and the exit code is 4
 // --native F     replace function F (or "all") with its native port, unverified
+// --smooth       take screenshots through the smooth renderer (race view interpolated between frames)
+// --smooth-check replay every game frame and compare it with the original's own drawing (exactness)
+// --idle-skip    skip emulated time spent polling for vertical retrace (the game's default)
 // --skip-manual-check  skip the copy-protection question (the game's default; off here so key
 //                scripts that type an answer keep working)
 // --trace        log every DOS file access and unhandled BIOS/port use
@@ -20,11 +23,13 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "game/natives.h"
 #include "game/options.h"
+#include "game/smooth.h"
 #include "host/machine.h"
 #include "host/native.h"
 
@@ -84,7 +89,8 @@ bool save_bmp(const std::filesystem::path& path, const Ega::Frame& frame) {
 int usage() {
     std::fprintf(stderr, "usage: vette_run --game <dir> [--seconds N] [--shot T]... [--key T:SC]... "
                          "[--hold A:B:SC]... [--watch S:O]... [--cpu-hz N] [--out dir] [--trace]\n"
-                         "       [--verify F|all]... [--native F|all]... [--skip-manual-check]\n");
+                         "       [--verify F|all]... [--native F|all]... [--skip-manual-check] [--smooth]\n"
+                         "       [--smooth-check] [--idle-skip]\n");
     return 2;
 }
 
@@ -102,6 +108,9 @@ int main(int argc, char* argv[]) {
     std::filesystem::path out_dir = ".";
     bool trace = false;
     bool skip_manual_check = false;
+    bool smooth_shots = false;  // screenshots through the smooth renderer (interpolated race view)
+    bool idle_skip = false;     // skip time spent polling for vertical retrace (the game's default)
+    bool smooth_check = false;  // replay every game frame and compare it with the original's drawing
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -151,6 +160,12 @@ int main(int argc, char* argv[]) {
             trace = true;
         } else if (a == "--skip-manual-check") {
             skip_manual_check = true;
+        } else if (a == "--smooth") {
+            smooth_shots = true;
+        } else if (a == "--idle-skip") {
+            idle_skip = true;
+        } else if (a == "--smooth-check") {
+            smooth_check = true;
         } else {
             return usage();
         }
@@ -175,6 +190,9 @@ int main(int argc, char* argv[]) {
     if (skip_manual_check) {
         vette::game::install_skip_manual_check(machine.cpu());
     }
+    if (idle_skip) {
+        vette::game::install_idle_skip(machine);
+    }
     NativeRunner runner(machine);
     runner.set_report([](const std::string& msg) { std::printf("%s\n", msg.c_str()); });
     for (const auto& [name, mode] : natives) {
@@ -190,6 +208,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    std::unique_ptr<vette::game::SmoothRenderer> smooth;
+    if (smooth_shots || smooth_check) {
+        smooth = std::make_unique<vette::game::SmoothRenderer>(machine);
+    }
+    uint64_t checked_frames = 0, mismatched_frames = 0, mismatched_pixels = 0, last_checked = 0;
+
     const auto total_ms = static_cast<uint64_t>(seconds * 1000);
     size_t next_key = 0, next_shot = 0;
     Ega::Frame frame;
@@ -199,8 +223,21 @@ int main(int argc, char* argv[]) {
         }
         machine.run_for(kNsPerMs);
         runner.poll();
+        // Once per game frame, as soon as the original has finished drawing it (self_check is -1 until then).
+        if (smooth_check && smooth->stats().game_frames != last_checked) {
+            if (const int diff = smooth->self_check(); diff >= 0) {
+                last_checked = smooth->stats().game_frames;
+                ++checked_frames;
+                if (diff > 0) {
+                    ++mismatched_frames;
+                    mismatched_pixels += static_cast<uint64_t>(diff);
+                }
+            }
+        }
         while (next_shot < shots.size() && shots[next_shot] * 1000 <= static_cast<double>(ms + 1)) {
-            machine.render(frame);
+            if (!smooth_shots || !smooth->render(machine.emulated_ns(), frame)) {
+                machine.render(frame);
+            }
             char name[64];
             std::snprintf(name, sizeof name, "shot_%06.2f.bmp", shots[next_shot]);
             const bool saved = save_bmp(out_dir / name, frame);
@@ -223,6 +260,18 @@ int main(int argc, char* argv[]) {
     }
     if (!natives.empty()) {
         std::printf("native functions:\n%s", runner.summary().c_str());
+    }
+    if (smooth) {
+        const auto& st = smooth->stats();
+        std::printf("smooth: %llu game frames, %llu replays, %.3f ms per replay\n",
+                    static_cast<unsigned long long>(st.game_frames), static_cast<unsigned long long>(st.replays),
+                    st.replays ? st.replay_ms / static_cast<double>(st.replays) : 0.0);
+        if (smooth_check) {
+            std::printf("smooth check: %llu frames compared, %llu differ (%llu pixels)\n",
+                        static_cast<unsigned long long>(checked_frames),
+                        static_cast<unsigned long long>(mismatched_frames),
+                        static_cast<unsigned long long>(mismatched_pixels));
+        }
     }
     if (!machine.fault().empty()) {
         return 3;

@@ -31,8 +31,9 @@ add_library(vette_host STATIC ${VETTE_HOST_SOURCES})
 target_include_directories(vette_host PUBLIC src)
 vette_warnings(vette_host)
 
-# --- Native ports of original functions (Phase 2), verified against the hosted original -------------
-file(GLOB VETTE_GAME_SOURCES CONFIGURE_DEPENDS src/game/*.cpp)
+# --- Native ports of original functions (Phase 2), verified against the hosted original, and the
+# --- Enhanced layer (src/enhanced: world extraction and renderers that read the game's state) -------
+file(GLOB VETTE_GAME_SOURCES CONFIGURE_DEPENDS src/game/*.cpp src/enhanced/*.cpp)
 add_library(vette_game STATIC ${VETTE_GAME_SOURCES})
 target_link_libraries(vette_game PUBLIC vette_host)
 vette_warnings(vette_game)
@@ -46,6 +47,13 @@ vette_warnings(vette_run)
 add_executable(vette_fuzz src/tools/vette_fuzz.cpp)
 target_link_libraries(vette_fuzz PRIVATE vette_game)
 vette_warnings(vette_fuzz)
+
+# World extraction tool (dumps and validates the Enhanced world model), once it exists.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/vette_world.cpp)
+    add_executable(vette_world src/tools/vette_world.cpp)
+    target_link_libraries(vette_world PRIVATE vette_game)
+    vette_warnings(vette_world)
+endif()
 
 # --- Game executable -----------------------------------------------------------------------------
 if(VETTE_BUILD_GAME)

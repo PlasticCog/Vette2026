@@ -86,7 +86,14 @@ struct Cpu::Impl {
     // one bit test. A bit is set while either map has an entry at that address.
     std::vector<uint64_t> hook_bits_;
     std::unordered_map<uint32_t, std::shared_ptr<CodeHook>> hooks_;
-    std::unordered_map<uint32_t, std::shared_ptr<Watch>> watches_;
+    struct WatchEntry {
+        WatchId id;
+        std::shared_ptr<Watch> fn;
+    };
+    std::unordered_map<uint32_t, std::vector<WatchEntry>> watches_;
+    std::unordered_map<WatchId, uint32_t> watch_addr_;  // id -> linear
+    std::unordered_map<uint32_t, WatchId> owned_watch_;  // linear -> id of the set_watch watch there
+    WatchId next_watch_id_ = 1;
 
     void update_hook_bit(uint32_t lin) {
         const uint64_t bit = uint64_t{1} << (lin & 63);
@@ -405,10 +412,12 @@ struct Cpu::Impl {
         const uint32_t lin = (base(CS) + R.ip) & Memory::kMask;
         if (((hook_bits_[lin >> 6] >> (lin & 63)) & 1) == 0) return false;
         if (const auto w = watches_.find(lin); w != watches_.end()) {
-            const std::shared_ptr<Watch> watch = w->second;  // the watch may remove itself
+            const std::vector<WatchEntry> list = w->second;  // copy: watches may add or remove watches
             const uint16_t cs = R.s[CS], ip = R.ip;
-            (*watch)(c);
-            if (R.s[CS] != cs || R.ip != ip) return true;
+            for (const WatchEntry& e : list) {
+                (*e.fn)(c);
+                if (R.s[CS] != cs || R.ip != ip) return true;
+            }
         }
         const auto it = hooks_.find(lin);
         if (it == hooks_.end()) return false;
@@ -1282,20 +1291,45 @@ void Cpu::clear_code_hook(uint32_t linear) {
     impl_->update_hook_bit(linear);
 }
 
-void Cpu::set_watch(uint32_t linear, Watch watch) {
+Cpu::WatchId Cpu::add_watch(uint32_t linear, Watch watch) {
     linear &= Memory::kMask;
-    if (!watch) {
-        clear_watch(linear);
+    const WatchId id = impl_->next_watch_id_++;
+    impl_->watches_[linear].push_back({id, std::make_shared<Watch>(std::move(watch))});
+    impl_->watch_addr_[id] = linear;
+    impl_->update_hook_bit(linear);
+    return id;
+}
+
+void Cpu::remove_watch(WatchId id) {
+    const auto at = impl_->watch_addr_.find(id);
+    if (at == impl_->watch_addr_.end()) {
         return;
     }
-    impl_->watches_[linear] = std::make_shared<Watch>(std::move(watch));
+    const uint32_t linear = at->second;
+    impl_->watch_addr_.erase(at);
+    auto& list = impl_->watches_[linear];
+    std::erase_if(list, [id](const Impl::WatchEntry& e) { return e.id == id; });
+    if (list.empty()) {
+        impl_->watches_.erase(linear);
+    }
     impl_->update_hook_bit(linear);
+}
+
+void Cpu::set_watch(uint32_t linear, Watch watch) {
+    linear &= Memory::kMask;
+    clear_watch(linear);
+    if (watch) {
+        impl_->owned_watch_[linear] = add_watch(linear, std::move(watch));
+    }
 }
 
 void Cpu::clear_watch(uint32_t linear) {
     linear &= Memory::kMask;
-    impl_->watches_.erase(linear);
-    impl_->update_hook_bit(linear);
+    if (const auto it = impl_->owned_watch_.find(linear); it != impl_->owned_watch_.end()) {
+        const WatchId id = it->second;
+        impl_->owned_watch_.erase(it);
+        remove_watch(id);
+    }
 }
 
 int64_t Cpu::run(int64_t cycles) {

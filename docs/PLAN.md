@@ -101,7 +101,20 @@ Workflow and rules: [PORTING.md](PORTING.md).
       transforms, axis table, projection including its INT 0 overflow paths). ~1.9M verified in-game
       calls and `vette_fuzz` random inputs, 0 mismatches. Pure cores in `game/math3d.h` and
       `game/projection.h` are ready for the Enhanced renderer.
-- [ ] **Early draw-distance preview** (next after the math core). A native high-resolution renderer runs
+- [x] **Smooth frame rate** (`game/smooth.*`): the race view renders at the display's refresh rate while
+      the simulation keeps its own cadence.
+      - Each game frame is captured at 3009:0356. Every display frame replays the original's 3D drawing
+        section (02DA–0373) on a throwaway copy, with the camera and cars interpolated between the last
+        two game frames. The traffic steps inside the section are skipped in the copy, and overlays drawn
+        later (mirror, messages) are carried over from the displayed page.
+      - Replays are pixel-identical to the original's own frames (`vette_run --smooth-check`: 0 differing
+        pixels over hundreds of frames, at 12–140 MHz) and cost ~2 ms each.
+      - The default emulated PC runs at 140 MHz, where the game sits at its own 30 fps cap (its double
+        retrace wait).
+      - `install_idle_skip` fast-forwards the time spent polling for retrace, which halves the cost of
+        emulating the race (38% → 18% of one core).
+      - Highway mode uses a separate renderer and is not smoothed yet (it falls back to the game's frames).
+- [ ] **Early draw-distance preview** (in progress: world extraction). A native high-resolution renderer runs
       alongside the hosted original:
       - It reads the camera, traffic and map from the original's live memory and draws the whole map
         (the Maximum setting) in place of the original's 3D view. The original's dash is kept.

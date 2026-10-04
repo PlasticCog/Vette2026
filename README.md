@@ -44,6 +44,16 @@ one at a time, each verified against the original (see [docs/PORTING.md](docs/PO
 The original asks a manual-lookup question (copy protection) before the first race. VETTE! 2026 skips
 it, since this version of the game accepts any answer anyway. Pass `--manual-check` to see it.
 
+**Smooth frame rate.** The race view is drawn at your display's refresh rate (60, 120, 144 Hz…) while the
+game logic keeps its own cadence, exactly as the original. For every display frame, the original's own
+3D drawing code runs again on a throwaway copy of the latest game frame, with the camera and cars blended
+between the last two game frames. This adds at most one game frame (~33 ms) of delay. `--fps original`
+shows only the frames the game draws itself.
+
+**PC speed.** By default the emulated PC is fast enough that the game runs at its own built-in limit of
+30 fps, as it did on fast 386/486 PCs; the game then also enables its rear-view mirror and building
+windows. `--pc 286` emulates a 12 MHz PC/AT of 1989 (about 12-17 fps); `--cpu-hz <n>` sets any clock.
+
 ## Controls
 
 - **Keyboard:** every key goes to the game, Esc included. F11 or Alt+Enter toggles fullscreen.

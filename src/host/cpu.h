@@ -67,10 +67,16 @@ public:
     void set_code_hook(uint32_t linear, CodeHook hook);
     void clear_code_hook(uint32_t linear);
 
-    // Watches observe execution (verification harness): the watch runs before the instruction at
-    // `linear`, which then executes normally. If the watch moved CS:IP, execution resumes there
-    // instead. A code hook at the same address still applies after the watch.
+    // Watches observe execution: a watch runs before the instruction at `linear`, which then executes
+    // normally. If a watch moved CS:IP, execution resumes there instead (later watches at the old
+    // address are skipped). A code hook at the same address still applies after the watches.
+    // Any number of watches can share an address: add_watch/remove_watch identify each by its id.
+    // set_watch/clear_watch are a single-owner shorthand: they replace or remove only the watch
+    // previously set at that address through set_watch.
     using Watch = std::function<void(Cpu&)>;
+    using WatchId = uint64_t;
+    WatchId add_watch(uint32_t linear, Watch watch);
+    void remove_watch(WatchId id);
     void set_watch(uint32_t linear, Watch watch);
     void clear_watch(uint32_t linear);
     // Adds emulated time, e.g. the original's cost for a function that native code replaced.

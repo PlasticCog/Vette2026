@@ -139,6 +139,21 @@ uint64_t Machine::cycle_of_pit(uint64_t pit) const {
 
 uint64_t Machine::emulated_ns() const { return mul_div(cpu_.total_cycles(), kNsPerSecond, config_.cpu_hz); }
 
+uint64_t Machine::next_event_cycle() const {
+    uint64_t next = cycle_of_pit(next_irq0_);
+    if (!kbd_full_ && !kbd_queue_.empty()) {
+        next = std::min(next, cycle_of_pit(kbd_ready_at_));
+    }
+    return next;
+}
+
+uint64_t Machine::cycle_at_ns(uint64_t ns) const {
+    if (ns == kNever) {
+        return kNever;
+    }
+    return mul_div(ns, config_.cpu_hz, kNsPerSecond) + 1;  // first cycle at or after that time
+}
+
 RealTime Machine::wall_clock() const {
     const uint64_t ns = emulated_ns();
     const std::tm tm = local_tm(start_epoch_ + static_cast<int64_t>(ns / kNsPerSecond));

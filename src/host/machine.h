@@ -66,6 +66,10 @@ public:
     void take_audio(std::vector<int16_t>& out);
 
     uint64_t emulated_ns() const;
+    // For skipping idle time (a program polling for an event): the CPU cycle of the next scheduled
+    // hardware event (timer interrupt, keyboard byte), and the first cycle at or after an emulated time.
+    uint64_t next_event_cycle() const;
+    uint64_t cycle_at_ns(uint64_t ns) const;
     Cpu& cpu() { return cpu_; }
     Memory& memory() { return mem_; }
     Ega& ega() { return ega_; }

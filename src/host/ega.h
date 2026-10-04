@@ -53,6 +53,15 @@ public:
 
     // The currently displayed page (CRTC start address) as indices plus the active palette.
     void render(Frame& out) const;
+    // The same from an explicit start address, e.g. a back-buffer page the program is drawing into.
+    void render_page(uint16_t start_address, Frame& out) const;
+    // The start address the display shows now (the CRTC start as latched at vertical retrace).
+    uint16_t display_start() const;
+    // Vertical retrace timing without the side effect of reading 3DAh (which resets the attribute
+    // flip-flop): whether a retrace is in progress now, and the emulated time of the next retrace
+    // start (or end) strictly after now. Used to skip time a program spends polling for retrace.
+    bool in_vertical_retrace() const;
+    uint64_t next_vertical_retrace_ns(bool start) const;
 
     // Verification harness: copy the complete device state (registers, latches, video memory) from
     // another Ega, keeping this one's time source; and describe how two states differ (empty if

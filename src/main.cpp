@@ -3,6 +3,7 @@
 #include "core/game_dir.h"
 #include "core/path_utf8.h"
 #include "game/options.h"
+#include "game/smooth.h"
 #include "host/machine.h"
 #include "platform/audio.h"
 #include "platform/framebuffer.h"
@@ -32,10 +33,15 @@ namespace {
 constexpr const char* kAppName = "VETTE! 2026";
 
 constexpr const char* kUsage =
-    "Usage: vette2026 [--game <dir>] [--cpu-hz <n>] [--[no-]joystick] [--manual-check]\n"
-    "                 [--dump-frame <file.bmp>]\n"
+    "Usage: vette2026 [--game <dir>] [--fps smooth|original] [--pc fast|286] [--cpu-hz <n>]\n"
+    "                 [--[no-]joystick] [--manual-check] [--dump-frame <file.bmp>]\n"
     "  --game <dir>         folder with the DOS VETTE! files (default: search for Game/)\n"
-    "  --cpu-hz <n>         emulated CPU clock in Hz (default 12000000: a 12 MHz 286)\n"
+    "  --fps smooth         (default) the race view is drawn at the display's refresh rate, blending\n"
+    "                       between the game's own frames; the game logic is unchanged\n"
+    "  --fps original       show only the frames the game itself draws\n"
+    "  --pc fast            (default) a fast PC: the game runs at its own 30 fps limit\n"
+    "  --pc 286             a 12 MHz PC/AT, as in 1989: about 12-17 fps\n"
+    "  --cpu-hz <n>         emulated CPU clock in Hz (overrides --pc)\n"
     "  --joystick           give the PC a joystick even if no gamepad is connected yet\n"
     "  --no-joystick        no joystick, even with a gamepad connected\n"
     "  --manual-check       show the original's manual-lookup question before the first race\n"
@@ -52,10 +58,17 @@ constexpr std::uint64_t kNsPerSecond = 1'000'000'000;
 constexpr std::uint64_t kMaxStepNs = kNsPerSecond / 4;
 constexpr int kAudioRate = 48000;
 
+// Emulated CPU clocks. The game measures its own frame time, and its frame rate is capped by its
+// double vertical-retrace wait at half the EGA refresh (~30 fps). 140 MHz of our 286 timing reaches
+// that cap even with the mirror and window detail that the game enables on fast CPUs.
+constexpr std::uint64_t kFastPcHz = 140'000'000;
+constexpr std::uint64_t kAtHz = 12'000'000;
+
 struct Options {
     std::optional<std::filesystem::path> game_dir;
     std::optional<std::string> dump_frame;  // UTF-8 path
     std::optional<std::uint64_t> cpu_hz;
+    bool smooth = true;  // --fps smooth (display-rate race view) vs original
     std::optional<bool> joystick;  // default: whether a gamepad is connected at launch
     bool manual_check = false;     // show the copy-protection question (skipped by default)
     bool help = false;
@@ -83,10 +96,20 @@ std::optional<Options> parse_args(int argc, char** argv) {
                 std::fprintf(stderr, "--cpu-hz must be at least 1000000\n");
                 return std::nullopt;
             }
+        } else if (arg == "--fps" && has_value && (std::string_view(argv[i + 1]) == "smooth" ||
+                                                  std::string_view(argv[i + 1]) == "original")) {
+            opts.smooth = std::string_view(argv[++i]) == "smooth";
+        } else if (arg == "--pc" && has_value && (std::string_view(argv[i + 1]) == "fast" ||
+                                                 std::string_view(argv[i + 1]) == "286")) {
+            if (!opts.cpu_hz)
+                opts.cpu_hz = std::string_view(argv[++i]) == "fast" ? kFastPcHz : kAtHz;
+            else
+                ++i;  // --cpu-hz wins
         } else {
-            const bool needs_value = arg == "--game" || arg == "--dump-frame" || arg == "--cpu-hz";
-            std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing value for" : "Unknown option", argv[i],
-                         kUsage);
+            const bool needs_value = arg == "--game" || arg == "--dump-frame" || arg == "--cpu-hz" ||
+                                     arg == "--fps" || arg == "--pc";
+            std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
+                         argv[i], kUsage);
             return std::nullopt;
         }
     }
@@ -145,7 +168,9 @@ void copy_frame(const host::Ega::Frame& in, Framebuffer& out) {
 }
 
 // Runs the hosted game until the window closes or VETTE.EXE exits.
-void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Gamepad& gamepad) {
+// `smooth` (optional) draws the race view at the display's refresh rate (game/smooth.h).
+void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Gamepad& gamepad,
+               game::SmoothRenderer* smooth) {
     Framebuffer fb;
     host::Ega::Frame frame;
     std::vector<std::uint8_t> scancodes;
@@ -223,7 +248,8 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
         if (audio)
             audio->push(samples);
 
-        machine.render(frame);
+        if (!smooth || !smooth->render(machine.emulated_ns(), frame))
+            machine.render(frame);
         copy_frame(frame, fb);
         // The mouse driver's pointer goes on the copy, never into video memory. Text mode isn't shown.
         const host::Bios::Cursor pointer = machine.mouse_cursor();
@@ -285,8 +311,7 @@ int run(int argc, char** argv) {
         config.game_dir = game.root();
         config.save_dir = save_dir();
         config.audio_rate = kAudioRate;
-        if (opts->cpu_hz)
-            config.cpu_hz = *opts->cpu_hz;
+        config.cpu_hz = opts->cpu_hz.value_or(kFastPcHz);
         // Fixed for the session: DOS games detect the game port once, at startup.
         config.joystick = opts->joystick.value_or(gamepad.connected());
         SDL_Log("Joystick: %s", !config.joystick      ? "none"
@@ -300,9 +325,20 @@ int run(int argc, char** argv) {
         SDL_Log("Saves: %s", path_to_utf8(config.save_dir).c_str());
         if (!opts->manual_check)
             game::install_skip_manual_check(machine.cpu());
+        game::install_idle_skip(machine);  // the fast PC spends most cycles waiting for retrace
+        std::optional<game::SmoothRenderer> smooth;
+        if (opts->smooth)
+            smooth.emplace(machine);
+        SDL_Log("Frame rate: %s; emulated CPU %.0f MHz", opts->smooth ? "smooth (display refresh)" : "original",
+                static_cast<double>(config.cpu_hz) / 1e6);
 
         Presenter presenter(kAppName);
-        main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad);
+        main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad, smooth ? &*smooth : nullptr);
+        if (smooth && smooth->stats().replays)
+            SDL_Log("Smooth: %llu game frames, %llu display frames, %.2f ms per replay",
+                    static_cast<unsigned long long>(smooth->stats().game_frames),
+                    static_cast<unsigned long long>(smooth->stats().replays),
+                    smooth->stats().replay_ms / static_cast<double>(smooth->stats().replays));
         return 0;
     } catch (const std::exception& e) {
         report_error(e.what(), !headless);

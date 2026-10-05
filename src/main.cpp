@@ -57,7 +57,7 @@ constexpr const char* kUsage =
     "Usage: vette2026 [--[no-]launcher] [--game <dir>] [--fps smooth|original] [--pc fast|286]\n"
     "                 [--draw-distance original|extended|maximum] [--cpu-hz <n>] [--[no-]joystick]\n"
     "                 [--effects off|speaker|adlib|mac] [--music off|original|pc98] [--no-sound]\n"
-    "                 [--graphics dos|pc98|mac]\n"
+    "                 [--graphics dos|pc98|mac] [--scaling sharp|smooth]\n"
     "                 [--manual-check] [--dump-frame <file.bmp>]\n"
     "Settings come from the launch menu (saved in settings.ini); these flags override them for one run.\n"
     "  --launcher           show the launch menu even if it's switched off (--no-launcher: skip it)\n"
@@ -78,6 +78,8 @@ constexpr const char* kUsage =
     "                       version's digitized sounds (Game/Mac); off\n"
     "  --music original     (default) the title and winner tunes on the effects' device; pc98: the PC-98\n"
     "                       version's FM songs (Game/PC98); off. --no-sound: no effects, no music\n"
+    "  --scaling sharp      (default) the pictures simply enlarged, every pixel a solid block; smooth:\n"
+    "                       the edges between pixels softened\n"
     "  --graphics dos       (default) the DOS screens; pc98 or mac: that version's art in their place\n"
     "                       (from Game/PC98 or Game/Mac)\n"
     "  --manual-check       show the original's manual-lookup question before the first race\n"
@@ -137,6 +139,7 @@ struct Options {
     std::optional<Settings::Effects> effects;
     std::optional<Settings::Music> music;
     std::optional<Settings::Graphics> graphics;
+    std::optional<Settings::Scaling> scaling;
     std::vector<ScriptedKey> keys;
     std::vector<ScriptedPoke> pokes;     // sorted by time
     std::vector<std::uint64_t> shots;    // emulated ns, sorted
@@ -162,6 +165,8 @@ struct Options {
             s.music = *music;
         if (graphics)
             s.graphics = *graphics;
+        if (scaling)
+            s.scaling = *scaling;
     }
 };
 
@@ -199,6 +204,9 @@ std::optional<Options> parse_args(int argc, char** argv) {
                 return std::nullopt;
             }
             opts.effects = static_cast<Settings::Effects>(it - std::begin(kNames));
+        } else if (arg == "--scaling" && has_value && (std::string_view(argv[i + 1]) == "sharp" ||
+                                                      std::string_view(argv[i + 1]) == "smooth")) {
+            opts.scaling = std::string_view(argv[++i]) == "sharp" ? Settings::Scaling::Sharp : Settings::Scaling::Smooth;
         } else if (arg == "--graphics" && has_value) {
             const std::string_view v = argv[++i];
             static constexpr std::string_view kNames[] = {"dos", "pc98", "mac"};
@@ -278,7 +286,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--key" || arg == "--hold" || arg == "--shot" || arg == "--quit-after" ||
                                      arg == "--poke" ||
                                      arg == "--wav" || arg == "--effects" || arg == "--music" ||
-                                     arg == "--graphics";
+                                     arg == "--graphics" || arg == "--scaling";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
                          argv[i], kUsage);
             return std::nullopt;
@@ -771,6 +779,7 @@ int run(int argc, char** argv) {
 
         Presenter presenter(kAppName);
         presenter.set_fullscreen(settings.fullscreen);
+        presenter.set_smooth_scaling(settings.scaling == Settings::Scaling::Smooth);
         Gamepad gamepad;
 
         // The launch menu: when it's switched on, or to let the player find the game files.

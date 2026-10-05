@@ -56,7 +56,8 @@ one at a time, each verified against the original (see [docs/PORTING.md](docs/PO
 
 **Launch menu.** VETTE! 2026 opens with a launch menu. Choose a preset there (**Classic**, VETTE!
 exactly as in 1989, or **Enhanced**), or set each option: frame rate, PC speed, draw distance, the
-manual check, joystick, window or fullscreen, sound, and whether the menu appears at startup. **Game folder** shows
+manual check, joystick, window or fullscreen, scaling (sharp pixels, or smooth), sound, and whether the
+menu appears at startup. **Game folder** shows
 where your game files were found; select it to choose another folder. If the files aren't found, the
 menu opens anyway and asks for the folder. It works with the keyboard, mouse or gamepad. Choices
 (including the folder) are saved in

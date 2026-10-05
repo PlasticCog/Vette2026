@@ -26,7 +26,7 @@ namespace vette::ui {
 namespace {
 
 enum Row {
-    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kGraphics, kEffects, kMusic, kManualCheck, kJoystick, kDisplay, kLauncher,
+    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kGraphics, kEffects, kMusic, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
     kPlay, kQuit, kRows
 };
 
@@ -45,6 +45,7 @@ const char* label(int row) {
     case kManualCheck: return "Manual check";
     case kJoystick: return "Joystick";
     case kDisplay: return "Display";
+    case kScaling: return "Scaling";
     case kGraphics: return "Graphics";
     case kEffects: return "Sound effects";
     case kMusic: return "Music";
@@ -93,6 +94,7 @@ std::string value(int row, const Settings& s, const GameDirSearch& search, const
     case kJoystick:
         return s.joystick == Settings::Joystick::Auto ? "Auto" : s.joystick == Settings::Joystick::On ? "On" : "Off";
     case kDisplay: return s.fullscreen ? "Full screen" : "Window";
+    case kScaling: return s.scaling == Settings::Scaling::Sharp ? "Sharp pixels" : "Smooth";
     case kGraphics: {
         const std::string v = s.graphics == Settings::Graphics::Dos    ? "DOS (original)"
                               : s.graphics == Settings::Graphics::Pc98 ? "PC-98"
@@ -147,6 +149,10 @@ std::string_view help(int row, const Settings& s) {
         return "Auto: a gamepad connected at startup becomes the PC's joystick. On: always there. Off: none "
                "(the pad still works in menus).";
     case kDisplay: return "F11 or Alt+Enter switches at any time.";
+    case kScaling:
+        return s.scaling == Settings::Scaling::Sharp
+                   ? "The original's pictures simply enlarged: every pixel a solid block."
+                   : "The original's pictures enlarged with the edges between pixels softened.";
     case kGraphics:
         return s.graphics == Settings::Graphics::Dos
                    ? "The DOS version's EGA screens, as in 1989."
@@ -302,6 +308,10 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             break;
         case kManualCheck: s.manual_check = !s.manual_check; break;
         case kJoystick: s.joystick = static_cast<Settings::Joystick>((static_cast<int>(s.joystick) + dir + 3) % 3); break;
+        case kScaling:
+            s.scaling = s.scaling == Settings::Scaling::Sharp ? Settings::Scaling::Smooth : Settings::Scaling::Sharp;
+            presenter.set_smooth_scaling(s.scaling == Settings::Scaling::Smooth);
+            break;
         case kDisplay:
             s.fullscreen = !s.fullscreen;
             presenter.set_fullscreen(s.fullscreen);

@@ -49,6 +49,9 @@ public:
     // The window's drawable size in pixels (what a Canvas should be laid out for).
     void output_size(int& w, int& h) const;
     SDL_Window* window() const { return window_.get(); }
+    // Smooth: the 2D pictures' pixel edges softened ("sharp bilinear"); otherwise every pixel is a
+    // solid block (nearest neighbour), as the original's graphics simply enlarged.
+    void set_smooth_scaling(bool smooth) { smooth_ = smooth; }
     void toggle_fullscreen();
     void set_fullscreen(bool on);
     bool fullscreen() const;
@@ -99,6 +102,7 @@ private:
     int picture_w_ = 0;    // and its size in its own pixels (for window_to_frame)
     int picture_h_ = 0;
     bool system_cursor_shown_ = true;
+    bool smooth_ = false;
 };
 
 }  // namespace vette

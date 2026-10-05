@@ -28,6 +28,10 @@ struct Settings {
     bool manual_check = false;  // show the original's copy-protection question
     Joystick joystick = Joystick::Auto;
     bool fullscreen = false;
+    // How the 2D pictures are enlarged: Sharp keeps every original pixel a solid block (nearest
+    // neighbour); Smooth softens the edges between them.
+    enum class Scaling { Sharp, Smooth };
+    Scaling scaling = Scaling::Sharp;
     Effects effects = Effects::AdLib;
     Music music = Music::Original;
     Graphics graphics = Graphics::Dos;

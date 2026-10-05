@@ -39,6 +39,7 @@ TEST(settings_round_trip) {
     s.draw_distance = Settings::DrawDistance::Maximum;
     s.joystick = Settings::Joystick::On;
     s.fullscreen = true;
+    s.scaling = Settings::Scaling::Smooth;
     s.effects = Settings::Effects::Mac;
     s.music = Settings::Music::Pc98;
     s.graphics = Settings::Graphics::Pc98;

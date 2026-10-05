@@ -73,10 +73,9 @@ void Presenter::frame_scale(int frame_w, int frame_h, float& sx, float& sy) cons
     sy = dst.h / static_cast<float>(frame_h);
 }
 
-// Sharp bilinear: nearest-neighbor upscale by whole factors close to the output size, then a linear
-// filter for the remaining non-integer stretch. Pixels stay crisp, and only the edges between them
-// blend, so the uneven pixel aspect (2.4:1 at 640x200, 1.2:1 at 320x200) doesn't produce rows of
-// visibly different heights. With `transparency`, kTransparentPixel pixels are see-through
+// Smooth scaling is "sharp bilinear": nearest-neighbor upscale by whole factors close to the output
+// size, then a linear filter for the remaining non-integer stretch, so only the edges between pixels
+// blend. Sharp scaling uses nearest neighbour all the way: every pixel a solid block. With `transparency`, kTransparentPixel pixels are see-through
 // (premultiplied alpha, so the linear filter doesn't darken the edges).
 SDL_Texture* Presenter::upload(Layer& layer, const std::uint8_t* src_pixels, int w, int h,
                                const std::array<std::uint32_t, 16>& argb, bool transparency, const SDL_FRect& dst) {
@@ -117,6 +116,7 @@ SDL_Texture* Presenter::upload(Layer& layer, const std::uint8_t* src_pixels, int
     if (transparency)
         SDL_SetTextureBlendMode(layer.frame.get(), SDL_BLENDMODE_BLEND_PREMULTIPLIED);
     SDL_SetRenderTarget(renderer, nullptr);
+    SDL_SetTextureScaleMode(layer.scaled.get(), smooth_ ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
     return layer.scaled.get();
 }
 
@@ -217,8 +217,8 @@ SDL_Texture* Presenter::art_texture(const graphics::Image& image) {
             throw_sdl_error("SDL_CreateTexture");
         SDL_UpdateTexture(t.get(), nullptr, image.pixels.data(), image.width * 4);
         SDL_SetTextureBlendMode(t.get(), SDL_BLENDMODE_BLEND);
-        SDL_SetTextureScaleMode(t.get(), SDL_SCALEMODE_LINEAR);
     }
+    SDL_SetTextureScaleMode(t.get(), smooth_ ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
     return t.get();
 }
 

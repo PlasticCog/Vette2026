@@ -8,6 +8,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(VETTE_BUILD_GAME "Build the game executable (needs SDL3)" ON)
 option(VETTE_BUILD_TESTS "Build the unit tests" ON)
 
+include(FetchContent)
+
 if(VETTE_BUILD_GAME)
     find_package(SDL3 CONFIG QUIET)
 endif()
@@ -25,6 +27,15 @@ function(vette_warnings target)
     endif()
 endfunction()
 
+# Adds a tool when its source file exists (tools under parallel development appear as they're written).
+function(vette_tool name)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/${name}.cpp)
+        add_executable(${name} src/tools/${name}.cpp)
+        target_link_libraries(${name} PRIVATE ${ARGN})
+        vette_warnings(${name})
+    endif()
+endfunction()
+
 # --- Emulation host: runs the original VETTE.EXE (Phase 1), no SDL dependency ---------------------
 file(GLOB VETTE_HOST_SOURCES CONFIGURE_DEPENDS src/host/*.cpp)
 add_library(vette_host STATIC ${VETTE_HOST_SOURCES})
@@ -37,6 +48,13 @@ add_library(vette_game STATIC ${VETTE_GAME_SOURCES})
 target_link_libraries(vette_game PUBLIC vette_host)
 vette_warnings(vette_game)
 
+# --- Core: game folders, settings, and the original versions' file formats (no SDL) -----------------
+file(GLOB VETTE_CORE_SOURCES CONFIGURE_DEPENDS src/core/*.cpp src/assets/*.cpp)
+list(REMOVE_ITEM VETTE_CORE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/core/game_dir.cpp)  # SDL: the game's
+add_library(vette_core STATIC ${VETTE_CORE_SOURCES})
+target_include_directories(vette_core PUBLIC src)
+vette_warnings(vette_core)
+
 # --- Enhanced layer (src/enhanced: the city extracted from the running game, and the renderer that
 # --- draws it at any resolution and draw distance) ----------------------------------------------------
 file(GLOB VETTE_ENHANCED_SOURCES CONFIGURE_DEPENDS src/enhanced/*.cpp)
@@ -44,26 +62,47 @@ add_library(vette_enhanced STATIC ${VETTE_ENHANCED_SOURCES})
 target_link_libraries(vette_enhanced PUBLIC vette_game)
 vette_warnings(vette_enhanced)
 
+# --- Sound: FM chips (ymfm), digitized samples, the mixer and the enhanced sound sources ------------
+# ymfm (BSD-3-Clause, Aaron Giles) emulates the AdLib's YM3812 and the PC-98's YM2203.
+FetchContent_Declare(ymfm
+    GIT_REPOSITORY https://github.com/aaronsgiles/ymfm.git
+    GIT_TAG 81aec25ccbb98f4873a255f7551ac4dadac59b4a)
+FetchContent_MakeAvailable(ymfm)
+file(GLOB YMFM_SOURCES ${ymfm_SOURCE_DIR}/src/*.cpp)
+add_library(ymfm STATIC ${YMFM_SOURCES})
+target_include_directories(ymfm SYSTEM PUBLIC ${ymfm_SOURCE_DIR}/src)
+set_target_properties(ymfm PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+file(GLOB VETTE_SOUND_SOURCES CONFIGURE_DEPENDS src/sound/*.cpp)
+add_library(vette_sound STATIC ${VETTE_SOUND_SOURCES})
+target_link_libraries(vette_sound PUBLIC vette_game vette_core ymfm)
+vette_warnings(vette_sound)
+
+# --- Graphics: the PC-98 and Mac versions' art in place of the DOS screens (once it exists) ----------
+file(GLOB VETTE_GRAPHICS_SOURCES CONFIGURE_DEPENDS src/graphics/*.cpp)
+if(VETTE_GRAPHICS_SOURCES)
+    add_library(vette_graphics STATIC ${VETTE_GRAPHICS_SOURCES})
+    target_link_libraries(vette_graphics PUBLIC vette_game vette_core)
+    vette_warnings(vette_graphics)
+endif()
+
 # Headless runner: boots the hosted game, injects keys, saves screenshots (no SDL needed).
-add_executable(vette_run src/tools/vette_run.cpp)
-target_link_libraries(vette_run PRIVATE vette_game)
-vette_warnings(vette_run)
-
+vette_tool(vette_run vette_game vette_core)
 # Differential fuzzer: calls each native port with random inputs under Verify mode.
-add_executable(vette_fuzz src/tools/vette_fuzz.cpp)
-target_link_libraries(vette_fuzz PRIVATE vette_game)
-vette_warnings(vette_fuzz)
-
+vette_tool(vette_fuzz vette_game)
 # World extraction tool: dumps the Enhanced world model and validates it against the original.
-add_executable(vette_world src/tools/vette_world.cpp)
-target_link_libraries(vette_world PRIVATE vette_enhanced)
-vette_warnings(vette_world)
+vette_tool(vette_world vette_enhanced)
+# The other versions' files: Mac resources and sounds, PC-98 disk files and FM sound, art.
+vette_tool(vette_mac vette_sound)
+vette_tool(vette_pc98 vette_sound)
+if(TARGET vette_graphics)
+    vette_tool(vette_gfx vette_graphics)
+endif()
 
 # --- Game executable -----------------------------------------------------------------------------
 if(VETTE_BUILD_GAME)
     # SDL3: the installed package found above, otherwise built from source (static).
     if(NOT SDL3_FOUND)
-        include(FetchContent)
         set(SDL_SHARED OFF CACHE BOOL "" FORCE)
         set(SDL_STATIC ON CACHE BOOL "" FORCE)
         set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
@@ -73,14 +112,15 @@ if(VETTE_BUILD_GAME)
             GIT_SHALLOW TRUE)
         FetchContent_MakeAvailable(SDL3)
     endif()
+    if(TARGET SDL3::SDL3-static)
+        set(VETTE_SDL SDL3::SDL3-static)
+    else()
+        set(VETTE_SDL SDL3::SDL3)
+    endif()
 
     add_executable(vette2026
         src/main.cpp
-        src/assets/planar.cpp
-        src/assets/rle.cpp
-        src/core/crc32.cpp
         src/core/game_dir.cpp
-        src/core/settings.cpp
         src/platform/audio.cpp
         src/platform/framebuffer.cpp
         src/platform/gamepad.cpp
@@ -106,11 +146,9 @@ if(VETTE_BUILD_GAME)
     endif()
     target_compile_definitions(vette2026 PRIVATE VETTE_VERSION="${PROJECT_VERSION}")
     target_include_directories(vette2026 PRIVATE src)
-    target_link_libraries(vette2026 PRIVATE vette_enhanced)
-    if(TARGET SDL3::SDL3-static)
-        target_link_libraries(vette2026 PRIVATE SDL3::SDL3-static)
-    else()
-        target_link_libraries(vette2026 PRIVATE SDL3::SDL3)
+    target_link_libraries(vette2026 PRIVATE vette_enhanced vette_sound vette_core ${VETTE_SDL})
+    if(TARGET vette_graphics)
+        target_link_libraries(vette2026 PRIVATE vette_graphics)
     endif()
     vette_warnings(vette2026)
 endif()
@@ -121,8 +159,11 @@ endif()
 if(VETTE_BUILD_TESTS)
     file(GLOB VETTE_TEST_SOURCES CONFIGURE_DEPENDS tests/*.cpp)
     list(FILTER VETTE_TEST_SOURCES EXCLUDE REGEX "/enhanced_[^/]*\\.cpp$")  # vette_enhanced_tests below
-    add_executable(vette_tests ${VETTE_TEST_SOURCES} src/core/settings.cpp src/ui/app_icon.cpp)
-    target_link_libraries(vette_tests PRIVATE vette_game)
+    add_executable(vette_tests ${VETTE_TEST_SOURCES} src/ui/app_icon.cpp)
+    target_link_libraries(vette_tests PRIVATE vette_sound vette_core vette_game)
+    if(TARGET vette_graphics)
+        target_link_libraries(vette_tests PRIVATE vette_graphics)
+    endif()
     target_include_directories(vette_tests PRIVATE tests)
     vette_warnings(vette_tests)
 

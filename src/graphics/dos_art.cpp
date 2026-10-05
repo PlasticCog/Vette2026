@@ -49,6 +49,27 @@ bool decode_dos_picture(std::span<const std::uint8_t> file, int header, int widt
     return true;
 }
 
+bool decode_dos_sprite(std::span<const std::uint8_t> file, DosPicture& out, std::string* error) {
+    if (file.size() < 4) {
+        if (error) *error = "file too short";
+        return false;
+    }
+    const int row_bytes = file[0] | file[1] << 8, height = file[2] | file[3] << 8;
+    const auto plane = static_cast<std::size_t>(row_bytes) * static_cast<std::size_t>(height);
+    if (row_bytes <= 0 || height <= 0 || row_bytes > 128 || height > 480 || file.size() < 4 + plane * 5) {
+        if (error) *error = "not a sprite";
+        return false;
+    }
+    const int width = row_bytes * 8;
+    out.width = width;
+    out.height = height;
+    out.pixels = decode_planar(file.subspan(4 + plane, plane * 4), width, height);
+    out.opaque.assign(static_cast<std::size_t>(width) * height, 0);
+    for (std::size_t i = 0; i < out.opaque.size(); ++i)
+        out.opaque[i] = static_cast<std::uint8_t>(((file[4 + i / 8] >> (7 - i % 8)) & 1) == 0);
+    return true;
+}
+
 bool decode_dos_dash(std::span<const std::uint8_t> program_image, DosPicture& out, std::string* error) {
     if (program_image.size() <= kDashImageOffset) {
         if (error) *error = "program image too short";

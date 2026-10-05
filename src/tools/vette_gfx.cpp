@@ -16,6 +16,10 @@
 //                   folder is read like the game does (PC98/, Mac/ in any form), with the extracted
 //                   copy under Vette_Mac_EN/ standing in for a missing Mac/.
 // --key T:SC, --hold A:B:SC, --shot T, --seconds N, --skip-manual-check, --idle-skip: as vette_run
+// --poke A:B:SEG:OFF:BYTE  write BYTE at emulator address SEG:OFF (hex) every millisecond from second A
+//                   to B: steers the game to screens a script can't easily reach. The README's race
+//                   script with --poke 45:62:224A:2AFF:0 ends in a win: the winner screen at 54 s,
+//                   the high scores at 60 s (DS:2AFF is the race-over picture)
 // --size WxH        output size of each picture (4:3 recommended)
 
 #include <algorithm>
@@ -51,8 +55,15 @@ struct KeyEvent {
     uint8_t scancode;
 };
 
-bool save(const fs::path& path, const Image& img) {
-    return vette::assets::write_png(path, img.width, img.height, img.pixels);
+struct Poke {
+    uint64_t from_ms, to_ms;
+    uint32_t linear;
+    uint8_t value;
+};
+
+// Pictures with transparency (the dumped art) keep their alpha; composites are opaque.
+bool save(const fs::path& path, const Image& img, bool alpha = false) {
+    return vette::assets::write_png(path, img.width, img.height, img.pixels, alpha);
 }
 
 std::string fmt_time(double t) {
@@ -87,7 +98,7 @@ int dump(const vette::graphics::ArtFiles& files, const fs::path& out) {
                     pict.frame_left, pict.frame_top, pict.skipped ? " (approximated)" : "");
         for (const auto& t : pict.texts) std::printf(" [text at %d,%d: \"%s\"]", t.x, t.y, t.text.c_str());
         std::printf("\n");
-        save(out / ("mac_pict_" + std::to_string(id) + ".png"), vette::graphics::from_pict(pict, 0));
+        save(out / ("mac_pict_" + std::to_string(id) + ".png"), vette::graphics::from_pict(pict, 0), true);
     }
     if (picts == 0) std::printf("no Mac pictures found\n");
     std::array<std::uint32_t, 16> pal{};
@@ -165,6 +176,7 @@ int main(int argc, char* argv[]) {
     double seconds = 10;
     std::vector<double> shots;
     std::vector<KeyEvent> keys;
+    std::vector<Poke> pokes;
     int out_w = 1280, out_h = 960;
     bool skip_manual_check = false, idle_skip = false, do_stills = false, trace_io = false;
 
@@ -202,6 +214,21 @@ int main(int argc, char* argv[]) {
             const auto sc = static_cast<uint8_t>(std::strtoul(v.substr(a == "--hold" ? c2 + 1 : c1 + 1).c_str(), nullptr, 16));
             keys.push_back({from, sc});
             keys.push_back({to, static_cast<uint8_t>(sc | 0x80)});
+        } else if (a == "--poke" && has_value) {
+            const std::string v = argv[++i];
+            std::vector<std::string> parts;
+            for (size_t at = 0;;) {
+                const size_t c = v.find(':', at);
+                parts.push_back(v.substr(at, c - at));
+                if (c == std::string::npos) break;
+                at = c + 1;
+            }
+            if (parts.size() != 5) return usage();
+            const auto hex = [&](std::size_t k) { return std::strtoul(parts[k].c_str(), nullptr, 16); };
+            pokes.push_back({static_cast<uint64_t>(std::atof(parts[0].c_str()) * 1000),
+                             static_cast<uint64_t>(std::atof(parts[1].c_str()) * 1000),
+                             Cpu::linear(static_cast<uint16_t>(hex(2)), static_cast<uint16_t>(hex(3))),
+                             static_cast<uint8_t>(hex(4))});
         } else if (a == "--skip-manual-check") {
             skip_manual_check = true;
         } else if (a == "--idle-skip") {
@@ -292,6 +319,8 @@ int main(int argc, char* argv[]) {
     vette::host::Ega::Frame frame;
     for (uint64_t ms = 0; ms < total_ms && !machine.stopped(); ++ms) {
         while (next_key < keys.size() && keys[next_key].at_ms <= ms) machine.key(keys[next_key++].scancode);
+        for (const auto& p : pokes)
+            if (ms >= p.from_ms && ms <= p.to_ms) machine.memory().write8(p.linear, p.value);
         machine.run_for(1'000'000);
         while (next_shot < shots.size() && shots[next_shot] * 1000 <= static_cast<double>(ms + 1)) {
             machine.render(frame);

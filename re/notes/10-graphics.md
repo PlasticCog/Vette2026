@@ -28,7 +28,8 @@ time) by `3009:CBDA/CBF0`; full-screen pictures go to the off-screen page A800h 
 | Course map | `MAPPIC.BIN`, RLE | 640×200 | 0Eh | off-screen; the menu shows the left 160 columns (part of the city map) and the small map top right, with white text panels drawn by the game | course text, route markers |
 | High scores | `HIGHSC.BIN`, RLE | 640×200 | 0Eh | full screen | names and times (**TBD**: not reached headlessly) |
 | Winner | `WINNER.BIN`, RLE | 640×200 | 0Eh | full screen | **TBD** |
-| Race dashboard | **no file**: RLE inside VETTE.EXE at program-image offset 100h (100h–1D07h) | 320×80 | 0Dh | rows 120–199 of both pages | hands, gauge bars, speed/RPM digits, cruise/auto lights, shift arrow, clock and message display, sign panel (speed limit, turn icons), damage |
+| Race dashboard | **no file**: RLE inside VETTE.EXE at program-image offset 100h (100h–1D07h) | 320×80 | 0Dh | rows 120–199 of both pages, from the off-screen copy cs:0023 (`3009:5F00`) | hands, gauge bars, speed/RPM digits, cruise/auto lights, steering arrows, shift arrow, clock and message display, sign panel (speed limit, turn icons), the right hand on the shifter |
+| Dashboard looking left (F1) / right (F3) | **no file**: RLE in VETTE.EXE at 0A226h / 08C95h (unpacked at race start into cs:001F / cs:001D, `3009:5C64` / `5C29`) | 320×80 | 0Dh | rows 120–199 when DS:2B87 = −85 / +85 (`3009:71A8`) | the side mirror above it |
 | Crash | `CRASH0.BIN`, `CRASH1.BIN`, RLE | 176×128 | 0Dh | over the 3D view, e.g. (72,30), dissolved in | — (0 = into a truck, 1 = into the water) |
 | Lost the race | `LOSER0-3.BIN`, RLE | 176×128 | 0Dh | as the crash pictures (**TBD** position) | — (0 Porsche, 1 Lamborghini, 2 Testarossa, 3 F40; speech bubble in the picture) |
 | Notice to appear | `PENALTY.BIN`, RLE | 208×121 | ? | **TBD** | ticket text **TBD** |
@@ -39,6 +40,30 @@ time) by `3009:CBDA/CBF0`; full-screen pictures go to the off-screen page A800h 
 | Scores, config | `SCORE.BIN` (text table), `CONFIG.BIN` | | | | |
 
 `vette_gfx --trace-io` logs the file opens/reads and every `3009:8666` unpack with its caller.
+
+**The dashboard's dynamic parts** (front view; `3009:61C3` walks a table of 7 values at DS:3B0B with
+handlers at cs:579E, redrawing a part when its value changes) **confirmed**:
+
+| Part | Value | Drawn by | Frame rectangle |
+|---|---|---|---|
+| Left glove on the wheel | DS:2B84 steering: sprite = 4 if negative, else min(s/2, 3) | `5F39` (5 sprites at cs:001B) | (0,123)–(64,199) |
+| Wheel top mark | DS:2B84 | `6066` | (120,121) 6×12 |
+| Speed bar + digits | DS:2D43 → DS:3AA1 = mph (`hud_speed_value`), bar (mph−3)/2 units of 40 | `5E4C`, digits `6230` at 1C52h | (65..104, 148..195) |
+| Rev bar + digits | player +2Ch → cs:588F (×100 rpm) | `6136`, digits at 1C5Dh | (151..192, 148..195) |
+| Shift light | DS:2D51 | `600D` | (144,144) 16×10 |
+| CC / AUTO lights | DS:2AD7 (cruise) / DS:2D50 (automatic) | `5F6D` / `5F7E` | (112,136) / (128,136) 16×7 |
+| Steering arrows | DS:2B84 sign, blinking (DS:3A98) | `62CC` → `601C`/`6022` | (112,170) / (128,170) 16×10 |
+| Hand on the shifter + gear gate | DS:2D45 gear; shown in neutral, while DS:2ACB, and for 2 s (DS:3A9D = 2 × frame_rate) after a change | `63B1` → `6372` | (223..320, 165..200) |
+| Clock, messages | race clock; street names, warnings | `6C60`, `5DC3`, ... (green, colour 2) | (224..320, 136..166) |
+| Road signs | speed limit, no-turn, arrows | `64E6` | (240..320, 120..135) |
+
+**The course map screen** (`3009:FBCC`): MAPPIC.BIN is unpacked to A800h; DS:FD10 is the course on show
+(1–4, arrow keys), DS:FD0E the selection. For each course the screen is rebuilt on A400h: MAPPIC
+copied, a white panel (`88AF`: course 1 at (160,0) 320×200, course 2 at (0,60) 480×140, course 3 at
+(0,0) 288×136, none for course 4), the course title and historical landmark text (`FD7F`/`FDA7`/
+`FDCF`), the right-hand column (`FD4F`, always at (480,60): course, route, on-ramps, the red "Arrow Key
+to view" / "Enter Key selects" at rows 180–199), and the course's part of the overview map highlighted
+by XORing colour 1 into the rest of it (line records at DS:FC6C/FCA2/FCBD drawn by `4CBF`).
 
 ## 2. PC-98 (1.02J)
 
@@ -104,20 +129,34 @@ Text opcodes appear only in the course boxes (5383, 6398, 15714, 27402: "Course 
 | High scores; victory party | 134 (512×342); 141 (512×342) |
 | About box; credits | 2860; 148 |
 
+**Where the Mac draws them.** The Color VETTE! application's globals are initialised from MPW's
+compressed data in CODE 10 (from 1ABEh: records `count, A5 offset, bytes`; a count byte 1xh means a
+12-bit count with the next byte; 60h records are relocations; below-A5 size 7A28h). From them:
+the course map's route rectangles per course (4208 at (0,92), 4358 at (175,92), 19759 at (0,164),
+30266 at (0,97)), the course boxes (6398, 5383, 27402, 15714 at (300,10), (30,150), (150,10),
+(300,10), each 193×100), the five buttons (y 297–317, x 38/132/226/320/413, 64 wide) and the
+opponent screen's labels. The dashboard pieces are drawn at start into an off-screen sheet (their
+rectangles there are also in the data) and copied to the screen by code: their screen places were
+found by matching the "off" pieces against the dashboard picture 24055 (speedometer 16939 at (120,75),
+tachometer 12609 at (272,75), CRUISE 4343 at (184,70), AUTO 13406 at (232,70), steering arrows 24445
+at (192,91) and 12092 at (232,91)); the hands sit at (0,36), and the shifter, its gate and the
+digits where the Mac's layout has room (see `mac_dash.cpp`).
+
 ## 4. Mapping and status
 
 | DOS | PC-98 | Mac | Recognised by | Status |
 |---|---|---|---|---|
-| TITLE.BIN | TITLE.PIC (palette only) | 24592, letterboxed; DOS sprites + credits on top; DOS © line kept below | full picture, ≥ 50% | **done** |
+| TITLE.BIN | TITLE.PIC (palette only) | 24592, letterboxed; Mac "presents" (31166), logo (20793 + mask 31198) and the approaching car (198, 3499, 7083 with masks) in place of SPETRUM/BIGVET/VX; DOS cable car, man in white and credits on top; DOS © line kept below | full picture, ≥ 50%; the sprites at their fixed places over it (≥ 80%) | **done** |
 | GARAGE.BIN | GARAGE.PIC; DOS menu bar kept | 17313; DOS menu bar in the top letterbox; statistics panel and graph curve moved into the Mac display; selected car framed on the Mac buttons; DOS car and mechanic hidden | ≥ 55% | **done** |
 | EGAPIC.BIN | EGAPIC.PIC (2× width) | 12670; graph curves, statistics and 3D car moved into the Mac panels; selected opponent framed | ≥ 50% | **done** |
-| HIGHSC.BIN | HIGHSC.PIC | 134 (same layout) | ≥ 50% | done, unverified in a live run (stills only) |
-| WINNER.BIN | WINNER.PIC | 141 (same scene) | ≥ 50% | done, unverified live |
-| dashboard (VETTE.EXE) | DASH.PIC (2× width) | 24055 stretched over the DOS rows; gauge bars, digits, lights and messages moved onto the Mac gauges (approximate) | rows 120–199, ≥ 60% | PC-98 **done**; Mac **first pass** (needs native gauges) |
+| MAPPIC.BIN | MAPPIC.PIC (identical) | 26478 with the course's route and box, the course button framed, the DOS instructions in the bar under the map (`mac_map.cpp`; course from DS:FD10) | the overview map (480,0) 160×60, XOR 1 tolerated, ≥ 60% | **done** (live) |
+| HIGHSC.BIN | HIGHSC.PIC | 134; course number, times and the top ten moved next to the Mac labels | ≥ 50% | **done** (live, with `--poke`) |
+| WINNER.BIN | WINNER.PIC | 141 (same scene, nothing dynamic) | ≥ 50% | **done** (live, with `--poke`) |
+| dashboard (VETTE.EXE) | DASH.PIC (2× width) | 24055 stretched over rows 120–199; arcs, digits, lights, hands, shifter and gate drawn from the game's state (`mac_dash.cpp`); clock/messages (colour 2) and road signs moved onto the Mac displays | rows 120–199, ≥ 60% | **done** (live) |
+| side dashboards (VETTE.EXE) | — (DOS pixels, PC-98 colours) | 1091 (F1, look left) / 28120 (F3, look right), full width standing on the bottom (91 / 82 rows) | rows 120–199, ≥ 60% | **done** (live) |
 | CRASH0/1.BIN | CRASH0/1.PIC | 147 / 140, scaled to cover the DOS rectangle | searched anywhere (byte-aligned), ≥ 60% | **done** |
-| LOSER0-3.BIN | LOSER0-3.PIC + English bubbles | 135–138 | searched | done, unverified live |
-| MAPPIC.BIN | (identical) | — | — | later: needs a native layout |
-| PENALTY, TICKET, EGASKILL, sprites, horizons | identical / TBD | 145, 144, 17619, sprite PICTs, strips 500–535 | — | later |
+| LOSER0-3.BIN | LOSER0-3.PIC + English bubbles | 135–138 | searched | done (stills; a live loss needs a full race) |
+| PENALTY, TICKET, EGASKILL, garage car, horizons | identical / TBD | 145, 144, 17619, 24443 + 21053, strips 500–535 | — | later |
 
 ## 5. The substitution layer (`src/graphics/substitution.h`)
 
@@ -130,8 +169,9 @@ of it (hysteresis: dissolves, menus drawn over it). Full-screen pictures compete
 (dashboard, crash, loser) are found independently, the floating ones by a search over byte-aligned
 columns (the game's blits are byte-aligned) with a 64-point probe first. No game state, hook or
 address is needed, so it is robust against everything the game draws, works the same with Smooth and
-Enhanced rendering, and can't disturb Classic mode's timing. Cost: 0.1–0.4 ms per frame (PC-98),
-0.3–2.3 ms (Mac, mostly the hole filling), measured by `vette_gfx`. Alternatives kept in reserve: a
+Enhanced rendering, and can't disturb Classic mode's timing. Cost per frame (`vette_gfx`, Release):
+PC-98 0.1–0.6 ms; Mac 0.2 ms (course map) to 0.7–1.4 ms (title with its sprites, garage, dashboard),
+2.2 ms on the high scores; the live game logged 1.4 ms on average over menus and a race. Alternatives kept in reserve: a
 CPU watch on the INT 21h entry for file opens (`vette_gfx --trace-io` does this), or on `3009:8666`
 for every picture unpack with its destination; useful for sprites (below).
 
@@ -155,6 +195,31 @@ art has square pixels and is placed `Contain` (letterboxed: 512×322 fills the w
 5% vertical stretch) or `Cover` (crash/loser pictures, 402×286 over 176×128: wider than the DOS
 rectangle, the DOS pixels under the overflow are dropped).
 
+**Screens drawn from the game's state** (`screen_handler.h`): after the table's work for a screen, a
+handler may add layers and moved pieces. It reads the game's values from the emulator's memory
+(`game_state.h`: data segment 124Ah and code segment 3009h at +1000h) and probes the DOS frame
+itself where that is simpler and exact: a light is on when the DOS game drew over the dashboard
+picture in its rectangle. Images never change once handed out (the presenter caches textures by
+pointer): the gauge arcs are 65 precomputed steps each, revealed along the band from its start
+(distance along the lit pixels, calibrated at the Mac scale's marks); the course boxes with their
+text are made once, when the DOS font (DS:F3DE, 8×10) can first be read.
+- *Mac dashboard*: everything of the DOS dashboard is hidden except the clock/messages (only colour 2
+  moves, so the shifter hand that overlaps them in DOS doesn't) and the road signs. Values: speed
+  DS:3AA1, revs cs:588F (both what the DOS digits show, at most one game frame apart from the frame
+  on screen), gear DS:2D45 and gearbox DS:2D47 (gate pictures 10000–10005, 10006–10012, 10013–10020:
+  neutral, the gears, reverse), steering DS:2B84 (hands 16269, 3738, 16018, 27381; 30004 = no hand,
+  for the other way, like the DOS sprite choice). Lights, arrows, shift light and the shifter's
+  visibility are probed in the DOS frame.
+- *Mac course map*: course = DS:FD10; route PICT recoloured red, the course box with its text in
+  the DOS font (Chicago 12 title drawn twice for weight, Monaco 9 lines), the button framed; the DOS
+  screen is hidden except its two red instruction lines, moved under the map.
+
+**Sprites over a full-screen picture** (`ScreenSpec::parent`): looked for only when their parent
+picture is recognised, at fixed places (the title's sprites are always drawn at the same spots);
+masked sprite pixels don't count, frame pixels that still show the parent (a sprite wiping in) don't
+stay on top, and `Fit::Native` draws the Mac sprite at the parent art's scale, centred on (or standing
+on the bottom of) the DOS sprite.
+
 **The PC-98 palette** replaces the EGA colours everywhere (also in frames nothing is recognised in), so
 the PC-98 set looks like the PC-98 throughout.
 
@@ -176,7 +241,8 @@ transparent pixels stay transparent in `base`/`over`, so the order is `under`, s
 backdrop, since `base` is non-empty in the race). Settings: `Art` (DOS/PC-98/Mac) and
 `SubstitutionOptions::english_text`; build the files with `ArtFiles::from_game_dir(game_dir, &notes)`
 (PC-98 through `Pc98Files`, Mac through `MacFiles`), call `set_program_memory(machine.memory().ram())`
-after boot, and gray out an art set whose `available()` is empty (log `warnings()`). The launcher
+after boot (the dashboards, the gauges and the course map need it every frame), and gray out an art set
+whose `available()` is empty (log `warnings()`). The launcher
 option needs nothing else from the game.
 
 `graphics::render(composite, w, h)` is a CPU reference of the same drawing (used by `vette_gfx` and
@@ -184,15 +250,18 @@ the tests); it could serve as a fallback (one texture upload per frame).
 
 ## 7. Later
 
-- **Sprites on the Mac title and garage:** replace the DOS logo/car/cable car/"presents"/man with the
-  Mac's masked PICTs. Positions are known from the blits (`3009:8534` masked sprite, `3009:8666` VX
-  frames: a CPU watch gives sprite, frame and position), so this is a lookup, not image search.
-- **Mac dashboard, natively:** speed, RPM, gear, lights and messages from the game's state, drawn with
-  the Mac gauge pictures; the Mac horizon strips 500–535 for the panorama.
-- **Mac garage statistics** with the Mac stat cards (one per car and page) instead of the moved DOS text.
-- **Course map** for the Mac: aerial map 26478, route line PICTs and the course boxes, course from state.
-- **PC-98 gauges** (SPEED/TACHS/...): decode their layouts from `0000:53FB` and the gauge drawing code.
-- **Penalty/ticket/high-score/winner** screens in live runs (scripts that finish or lose a race and get
-  a ticket) to place their dynamic text; TICKET.BIN's layout.
+- **Garage**: the Mac statistics cards (one per car and page) instead of the moved DOS text; the
+  DOS car driving in stays hidden (the Mac garage has its own car; 24443 + 21053 is its side view).
+- **Title**: the cable car (6482 + mask 16709) and the man in white with the lamppost (20289... and
+  25025...) are the DOS game's sprites from VETTE.EXE, still drawn as DOS pixels.
+- **Mac dashboard extras**: the Mac's sign strip 29556 for the road signs (needs the sign codes from
+  `64E6`), the info strip 179 for the full-screen view, the horizon strips 500–535 for the panorama.
+- **Course map text**: the DOS historical-landmark paragraph has no place in the Mac layout and is
+  not shown in Mac mode; the course box text uses the DOS font (the Mac's Chicago and Monaco are in
+  the System file, not the game).
+- **PC-98 gauges** (SPEED/TACHS/...): decode their layouts from `0000:53FB` and the gauge drawing code;
+  PC-98 side views (LEFTWHEE.PIC is 640×76, maybe the left view).
+- **Penalty/ticket** screens and a lost race in live runs (a ticket and a loss need driving scripts;
+  `vette_gfx --poke` reaches the win and high-score path); TICKET.BIN's layout.
 - Horizons and the 3D view in the PC-98 set are DOS pixels with the PC-98 palette; the PC-98 draws its
   race at 640 wide, which the Enhanced renderer already exceeds.

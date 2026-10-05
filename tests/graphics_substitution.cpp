@@ -282,7 +282,10 @@ TEST(graphics_real_art_sets) {
             continue;
         }
         for (const auto& w : sub.warnings()) std::printf("  %s: %s\n", art_name(art), w.c_str());
-        CHECK_EQ(sub.available().size(), static_cast<std::size_t>(Screen::Count) - 1);
+        // Every screen; the PC-98 has no pictures for the side views of the dashboard, and its title
+        // sprites are the DOS ones.
+        const std::size_t all = static_cast<std::size_t>(Screen::Count) - 1;
+        CHECK_EQ(sub.available().size(), art == Art::Pc98 ? all - 5 : all);
         CHECK(sub.warnings().empty());
         const FrameView view{title.pixels.data(), 640, 200, &kEga};
         Composite c;

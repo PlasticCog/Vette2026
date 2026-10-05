@@ -9,6 +9,8 @@
 #include "assets/pc98_pic.h"
 #include "assets/pict.h"
 #include "graphics/dos_art.h"
+#include "graphics/game_state.h"
+#include "graphics/screen_handler.h"
 
 namespace vette::graphics {
 
@@ -17,10 +19,15 @@ namespace {
 // --- The screen table ---------------------------------------------------------------------------
 
 enum class Fit {
-    Stretch,  // fill the target rectangle
-    Contain,  // keep the art's aspect ratio, as large as fits, centred (letterboxed)
-    Cover,    // keep the aspect ratio, cover the target, centred (overflowing it)
+    Stretch,      // fill the target rectangle
+    Contain,      // keep the art's aspect ratio, as large as fits, centred (letterboxed)
+    Cover,        // keep the aspect ratio, cover the target, centred (overflowing it)
+    BottomWidth,  // keep the aspect ratio, the target's width, standing on its bottom edge
+    Native,       // sprites: at the screen's art's scale, centred on the DOS sprite (ArtSpec::bottom:
+                  // standing on its bottom edge)
 };
+
+enum class Handler { None, MacDash, MacMap };
 
 // A DOS region moved to where the replacement layout has it: `dos` in frame pixels, `art` in the
 // replacement image's pixels. Opaque moves the whole rectangle; otherwise only the pixels that
@@ -29,7 +36,8 @@ struct Remap {
     IRect dos;
     IRect art;
     bool opaque;
-    int ignore = -1;  // a colour left behind (e.g. DOS grid lines where the art has its own grid)
+    int ignore = -1;         // a colour left behind (e.g. DOS grid lines where the art has its own grid)
+    std::uint16_t only = 0;  // nonzero: only these colours (bit per palette index) move
 };
 
 // A highlight drawn on the replacement when a DOS region shows a colour: e.g. the selected car
@@ -54,18 +62,25 @@ struct ArtSpec {
     // Rectangles of the picture (its own coordinates) where the art has Japanese text and the DOS
     // picture English: with Options::english_text, the DOS pixels stay on top there.
     std::vector<IRect> japanese;
+    Handler handler = Handler::None;  // code that adds what depends on the game's state
+    int mask_pict = 0;                // Mac sprites: the 1-bit picture of their shape (black = opaque)
+    bool bottom = false;              // Fit::Native: align bottom edges
 };
 
 struct ScreenSpec {
     Screen id;
-    const char* file;      // DOS picture; nullptr = the dashboard in VETTE.EXE
-    int header;            // bytes before the packed data
+    const char* file;      // DOS picture; nullptr: packed into VETTE.EXE, at `header` in the program image
+    int header;            // bytes before the packed data (or the offset in the program image)
     int width, height;     // the picture
     int frame_w, frame_h;  // the video mode it appears in
     int x, y;              // where; x < 0: wherever the game draws it (searched for)
     float threshold;       // fraction of the compared pixels that must equal the picture
     bool background;       // a full-screen picture (one per frame) rather than an inset
     ArtSpec pc98, mac;
+    IRect area{0, 0, 0, 0};  // the part of the picture compared (empty: all); the rest may be covered
+    int xor_match = 0;       // nonzero: a pixel XORed with this also counts as the picture's
+    bool sprite = false;     // `file` is a masked sprite (decode_dos_sprite), not an RLE picture
+    Screen parent = Screen::None;  // looked for only over this full-screen picture
 };
 
 constexpr std::uint32_t kHighlight = 0xFFFFD020;  // indicator frames: Mac-style yellow
@@ -83,11 +98,13 @@ ArtSpec mac_art(int pict, Fit fit) {
     a.close_holes = true;  // the Mac art differs from the DOS picture under the DOS text
     return a;
 }
-Remap remap(IRect dos, IRect art, bool opaque, int ignore = -1) { return {dos, art, opaque, ignore}; }
+Remap remap(IRect dos, IRect art, bool opaque, int ignore = -1, std::uint16_t only = 0) {
+    return {dos, art, opaque, ignore, only};
+}
 ScreenSpec screen(Screen id, const char* file, int header, IRect pic, int frame_w, int frame_h, float threshold,
                   bool background, ArtSpec pc98, ArtSpec mac) {
     return {id, file, header, pic.w, pic.h, frame_w, frame_h, pic.x, pic.y, threshold, background, std::move(pc98),
-            std::move(mac)};
+            std::move(mac), {0, 0, 0, 0}, 0, false, Screen::None};
 }
 
 std::vector<ScreenSpec> make_table() {
@@ -98,6 +115,30 @@ std::vector<ScreenSpec> make_table() {
         ArtSpec mac = mac_art(24592, Fit::Contain);
         mac.keep = {{0, 190, 306, 10}};
         t.push_back(screen(Screen::Title, "TITLE.BIN", 0, {0, 0, 640, 200}, 640, 200, 0.5f, true, pc98_art("TITLE.PIC"), mac));
+    }
+    // The title's animation, Mac only (the PC-98 has the same sprites): "Spectrum HoloByte presents",
+    // the VETTE! logo and the car coming up the road (five frames of VX.BIN, unpacked at fixed
+    // places, 3009:C73A-C79E) become the Mac's pictures, at the Mac title's scale. The cable car and
+    // the man in white stay the DOS game's.
+    {
+        const auto sprite = [&](Screen id, const char* file, int header, IRect at, bool masked, int pict, int mask,
+                                bool bottom) {
+            ArtSpec mac = mac_art(pict, Fit::Native);
+            mac.mask_pict = mask;
+            mac.bottom = bottom;
+            mac.close_holes = false;
+            ScreenSpec s = screen(id, file, header, at, 640, 200, 0.8f, false, ArtSpec{}, mac);
+            s.sprite = masked;
+            s.parent = Screen::Title;
+            t.push_back(s);
+        };
+        sprite(Screen::TitlePresents, "SPETRUM.BIN", 0, {120, 14, 392, 12}, true, 31166, 0, false);
+        sprite(Screen::TitleLogo, "BIGVET.BIN", 0, {72, 31, 496, 78}, true, 20793, 31198, false);
+        sprite(Screen::TitleCar, "VX.BIN", 0x0000, {320, 137, 128, 16}, false, 198, 25396, true);
+        sprite(Screen::TitleCar, "VX.BIN", 0x0333, {320, 126, 144, 26}, false, 198, 25396, true);
+        sprite(Screen::TitleCar, "VX.BIN", 0x08C8, {320, 114, 176, 38}, false, 3499, 439, true);
+        sprite(Screen::TitleCar, "VX.BIN", 0x12F8, {320, 97, 208, 54}, false, 3499, 439, true);
+        sprite(Screen::TitleCar, "VX.BIN", 0x22E9, {344, 120, 224, 51}, false, 7083, 22525, true);
     }
     // Garage: the DOS menu bar stays (in the Mac letterbox, like a menu bar); the statistics panel
     // and the graph move into the Mac garage's display; the DOS car driving in is hidden (the Mac
@@ -133,21 +174,50 @@ std::vector<ScreenSpec> make_table() {
         t.push_back(screen(Screen::Opponents, "EGAPIC.BIN", 2, {0, 0, 320, 200}, 320, 200, 0.5f, true,
                            pc98_art("EGAPIC.PIC"), mac));
     }
-    t.push_back(screen(Screen::HighScores, "HIGHSC.BIN", 0, {0, 0, 640, 200}, 640, 200, 0.5f, true,
-                       pc98_art("HIGHSC.PIC"), mac_art(134, Fit::Contain)));
+    // High scores: the course number, the opponent's and the player's times and the top ten list move
+    // next to the Mac picture's labels (its list is spaced wider than the DOS one).
+    {
+        ArtSpec mac = mac_art(134, Fit::Contain);
+        mac.remaps = {remap({52, 12, 26, 16}, {98, 1, 21, 31}, false),
+                      remap({154, 40, 100, 15}, {126, 60, 80, 29}, false),
+                      remap({154, 82, 130, 15}, {113, 136, 104, 29}, false),
+                      remap({300, 26, 340, 112}, {252, 52, 258, 173}, false)};
+        t.push_back(screen(Screen::HighScores, "HIGHSC.BIN", 0, {0, 0, 640, 200}, 640, 200, 0.5f, true,
+                           pc98_art("HIGHSC.PIC"), mac));
+    }
     t.push_back(screen(Screen::Winner, "WINNER.BIN", 0, {0, 0, 640, 200}, 640, 200, 0.5f, true,
                        pc98_art("WINNER.PIC"), mac_art(141, Fit::Contain)));
-    // The race dashboard (mode 0Dh rows 120-199). Hands, gauges, digits, lights and messages are
-    // the DOS game's and stay on top.
+    // The race dashboards (mode 0Dh rows 120-199), packed into VETTE.EXE: ahead, looking left (F1),
+    // looking right (F3). The PC-98 has its own picture of the front one only. On the Mac, the gauges,
+    // lights and hands are drawn from the game's state (mac_dash.cpp); of the DOS dashboard's own
+    // drawing only the clock and messages (green, colour 2) and the road signs move onto the Mac's
+    // displays.
     {
         ArtSpec mac = mac_art(24055, Fit::Stretch);
-        // The gauges (bars and digits), the cruise/auto lights and the message display move onto
-        // the Mac dashboard's own (rough placement; the gauges should be redrawn natively later).
-        mac.remaps = {remap({55, 148, 50, 48}, {100, 66, 80, 80}, false),
-                      remap({145, 148, 55, 48}, {268, 62, 90, 84}, false),
-                      remap({110, 133, 34, 14}, {183, 64, 76, 18}, false),
-                      remap({222, 135, 98, 32}, {372, 42, 132, 48}, false)};
-        t.push_back(screen(Screen::Dash, nullptr, 0, {0, 120, 320, 80}, 320, 200, 0.6f, false, pc98_art("DASH.PIC"), mac));
+        mac.handler = Handler::MacDash;
+        mac.remaps = {remap({224, 136, 96, 30}, {378, 52, 124, 33}, false, -1, 1u << 2),
+                      remap({240, 120, 80, 15}, {376, 28, 128, 22}, false)};
+        mac.hide = {{0, 120, 320, 80}};
+        t.push_back(screen(Screen::Dash, nullptr, 0x100, {0, 120, 320, 80}, 320, 200, 0.6f, false, pc98_art("DASH.PIC"), mac));
+        t.push_back(screen(Screen::DashLeft, nullptr, 0xA226, {0, 120, 320, 80}, 320, 200, 0.6f, false, ArtSpec{},
+                           mac_art(1091, Fit::BottomWidth)));
+        t.push_back(screen(Screen::DashRight, nullptr, 0x8C95, {0, 120, 320, 80}, 320, 200, 0.6f, false, ArtSpec{},
+                           mac_art(28120, Fit::BottomWidth)));
+    }
+    // The course map. The DOS game draws its text panels over a different part of MAPPIC.BIN for each
+    // course; the overview map top right is always there, so the picture is recognised by it. The
+    // Mac's map shows the course's route and box (mac_map.cpp); nothing of the DOS screen stays but
+    // the instructions.
+    {
+        ArtSpec mac = mac_art(26478, Fit::Contain);
+        mac.handler = Handler::MacMap;
+        mac.hide = {{0, 0, 640, 200}};
+        ScreenSpec s = screen(Screen::CourseMap, "MAPPIC.BIN", 0, {0, 0, 640, 200}, 640, 200, 0.6f, true,
+                              pc98_art("MAPPIC.PIC"), mac);
+        // The game highlights the course's part of the overview map by XORing colour 1 into the rest.
+        s.area = {480, 0, 160, 60};
+        s.xor_match = 1;
+        t.push_back(s);
     }
     // Pictures the race view shows over the 3D view, wherever the game draws them.
     const struct {
@@ -185,17 +255,19 @@ FRect place(const IRect& target, int img_w, int img_h, Fit fit, int frame_w, int
     if (fit == Fit::Stretch || img_w <= 0 || img_h <= 0) return t;
     // The frame is shown 4:3: a frame pixel is 4/frame_w by 3/frame_h display units; art pixels are square.
     const float ux = 4.0f / static_cast<float>(frame_w), uy = 3.0f / static_cast<float>(frame_h);
+    if (fit == Fit::BottomWidth) {
+        const float h = t.w * ux / static_cast<float>(img_w) * static_cast<float>(img_h) / uy;
+        return {t.x, t.y + t.h - h, t.w, h};
+    }
     const float sw = t.w * ux / static_cast<float>(img_w), sh = t.h * uy / static_cast<float>(img_h);
     const float s = fit == Fit::Contain ? std::min(sw, sh) : std::max(sw, sh);
     const float w = static_cast<float>(img_w) * s / ux, h = static_cast<float>(img_h) * s / uy;
     return {t.x + (t.w - w) / 2, t.y + (t.h - h) / 2, w, h};
 }
 
-// A rectangle of the art image (placed at `dst`) in frame pixels.
+// A rectangle of the art image's `src` part (placed at `dst`) in frame pixels.
 FRect art_to_frame(const FRect& dst, const IRect& src, const IRect& a) {
-    const float kx = dst.w / static_cast<float>(src.w), ky = dst.h / static_cast<float>(src.h);
-    return {dst.x + static_cast<float>(a.x - src.x) * kx, dst.y + static_cast<float>(a.y - src.y) * ky,
-            static_cast<float>(a.w) * kx, static_cast<float>(a.h) * ky};
+    return graphics::art_to_frame(dst, src.w, src.h, {a.x - src.x, a.y - src.y, a.w, a.h});
 }
 
 IRect clip(const IRect& r, int w, int h) {
@@ -206,25 +278,30 @@ IRect clip(const IRect& r, int w, int h) {
 
 // Morphological closing (3x3 dilate, then erode): fills one- and two-pixel holes in the mask, so
 // text drawn over a background of its own colour doesn't get holes when the art behind differs.
+// Separable: a 3x3 square is a row of three, then a column of three; the edges repeat.
 void close_mask(std::vector<std::uint8_t>& m, int w, int h) {
-    std::vector<std::uint8_t> d(m.size());
-    const auto at = [&](const std::vector<std::uint8_t>& v, int x, int y) {
-        return v[static_cast<std::size_t>(std::clamp(y, 0, h - 1)) * w + std::clamp(x, 0, w - 1)];
+    std::vector<std::uint8_t> t(m.size());
+    const auto pass = [w, h](const std::vector<std::uint8_t>& in, std::vector<std::uint8_t>& out, bool rows, bool any) {
+        for (int y = 0; y < h; ++y) {
+            const std::size_t row = static_cast<std::size_t>(y) * w;
+            for (int x = 0; x < w; ++x) {
+                const std::size_t i = row + x;
+                std::size_t a = i, b = i;
+                if (rows) {
+                    a = x > 0 ? i - 1 : i;
+                    b = x + 1 < w ? i + 1 : i;
+                } else {
+                    a = y > 0 ? i - static_cast<std::size_t>(w) : i;
+                    b = y + 1 < h ? i + static_cast<std::size_t>(w) : i;
+                }
+                out[i] = any ? static_cast<std::uint8_t>(in[a] | in[i] | in[b]) : static_cast<std::uint8_t>(in[a] & in[i] & in[b]);
+            }
+        }
     };
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            std::uint8_t any = 0;
-            for (int dy = -1; dy <= 1 && !any; ++dy)
-                for (int dx = -1; dx <= 1 && !any; ++dx) any = at(m, x + dx, y + dy);
-            d[static_cast<std::size_t>(y) * w + x] = any;
-        }
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            std::uint8_t all = 1;
-            for (int dy = -1; dy <= 1 && all; ++dy)
-                for (int dx = -1; dx <= 1 && all; ++dx) all = at(d, x + dx, y + dy);
-            m[static_cast<std::size_t>(y) * w + x] = all;
-        }
+    pass(m, t, true, true);    // dilate
+    pass(t, m, false, true);
+    pass(m, t, true, false);   // erode
+    pass(t, m, false, false);
 }
 
 // Cuts the part of a moved piece that `cover` (later art) hides, when the cover takes a whole edge
@@ -256,18 +333,54 @@ bool trim_piece(Composite::Piece& p, const FRect& cover) {
     return false;
 }
 
-Image frame_image(int w, int h, std::uint32_t rgb) {
+}  // namespace
+
+FRect art_to_frame(const FRect& dst, int art_w, int art_h, const IRect& a) {
+    const float kx = dst.w / static_cast<float>(art_w), ky = dst.h / static_cast<float>(art_h);
+    return {dst.x + static_cast<float>(a.x) * kx, dst.y + static_cast<float>(a.y) * ky, static_cast<float>(a.w) * kx,
+            static_cast<float>(a.h) * ky};
+}
+
+Image load_mac_picture(const ArtFiles& files, int id, std::vector<std::string>& warnings) {
+    const auto data = files.mac_pict ? files.mac_pict(static_cast<std::int16_t>(id)) : std::vector<std::uint8_t>{};
+    assets::Pict pict;
+    std::string err;
+    if (data.empty()) {
+        warnings.push_back("PICT " + std::to_string(id) + ": not found");
+        return {};
+    }
+    if (!assets::decode_pict(data, pict, &err)) {
+        warnings.push_back("PICT " + std::to_string(id) + ": " + err);
+        return {};
+    }
+    return from_pict(pict, 0);
+}
+
+Image frame_image(int w, int h, std::uint32_t argb, int thickness) {
     Image img;
-    img.width = w;
-    img.height = h;
-    img.pixels.assign(static_cast<std::size_t>(w) * h, 0);
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x)
-            if (x < 2 || y < 2 || x >= w - 2 || y >= h - 2) img.pixels[static_cast<std::size_t>(y) * w + x] = rgb;
+    img.width = std::max(w, 0);
+    img.height = std::max(h, 0);
+    img.pixels.assign(static_cast<std::size_t>(img.width) * img.height, 0);
+    for (int y = 0; y < img.height; ++y)
+        for (int x = 0; x < img.width; ++x)
+            if (x < thickness || y < thickness || x >= w - thickness || y >= h - thickness)
+                img.pixels[static_cast<std::size_t>(y) * img.width + x] = argb;
     return img;
 }
 
-}  // namespace
+void move_pixels(const FrameView& frame, const IRect& dos, std::uint16_t colors, const FRect& dst, Composite& out) {
+    const IRect c = clip(dos, frame.width, frame.height);
+    if (c.w <= 0 || c.h <= 0) return;
+    const auto n = static_cast<std::size_t>(frame.width) * frame.height;
+    if (out.moved.size() != n) out.moved.assign(n, kTransparent);
+    for (int y = c.y; y < c.y + c.h; ++y)
+        for (int x = c.x; x < c.x + c.w; ++x) {
+            const std::size_t p = static_cast<std::size_t>(y) * frame.width + x;
+            const std::uint8_t v = frame.pixels[p];
+            out.moved[p] = v != kTransparent && ((colors >> (v & 15)) & 1) ? v : kTransparent;
+        }
+    out.pieces.push_back({c, dst});
+}
 
 const char* art_name(Art art) {
     switch (art) {
@@ -279,9 +392,11 @@ const char* art_name(Art art) {
 }
 
 const char* screen_name(Screen screen) {
-    static constexpr const char* kNames[] = {"none", "title", "garage", "opponents", "high scores", "winner",
-                                             "dashboard", "crash 0", "crash 1", "loser 0", "loser 1",
-                                             "loser 2", "loser 3"};
+    static constexpr const char* kNames[] = {"none",       "title",          "garage",         "opponents",
+                                             "high scores", "winner",        "dashboard",      "crash 0",
+                                             "crash 1",    "loser 0",        "loser 1",        "loser 2",
+                                             "loser 3",    "course map",     "dashboard left", "dashboard right",
+                                             "title logo", "title presents", "title car"};
     const auto i = static_cast<std::size_t>(screen);
     return i < std::size(kNames) ? kNames[i] : "?";
 }
@@ -296,8 +411,9 @@ struct Substitution::Impl {
         std::vector<Image> indicator_images;
         IRect last{-1, -1, 0, 0};  // where it was last found
         bool active = false;       // found in the previous frame (lower threshold: hysteresis)
-        bool confirmed = false;    // the dashboard's reference has been recognised once
+        std::vector<std::uint8_t> packed;  // pictures in VETTE.EXE: the bytes ref was decoded from
         std::vector<std::pair<int, int>> probes;  // sample points for searching
+        std::unique_ptr<ScreenHandler> handler;
     };
 
     Art art = Art::Dos;
@@ -309,6 +425,7 @@ struct Substitution::Impl {
     const std::uint8_t* ram = nullptr;
 
     void load(const ArtFiles& files);
+    void refresh_program_picture(Entry& e);
     float match_at(const FrameView& f, const Entry& e, int x0, int y0, int step) const;
     bool locate(const FrameView& f, Entry& e, float& ratio);
 };
@@ -347,18 +464,25 @@ void Substitution::Impl::load(const ArtFiles& files) {
             } else if (!assets::decode_pict(data, pict, &err)) {
                 warnings.push_back("PICT " + std::to_string(e.art->pict) + ": " + err);
             } else {
-                e.image = from_pict(pict);
+                e.image = from_pict(pict, e.art->fit == Fit::Native ? 0u : 0xFFFFFFFFu);
+                if (e.art->mask_pict) {
+                    const Image mask = load_mac_picture(files, e.art->mask_pict, warnings);
+                    e.image = mask.empty() ? Image{} : apply_mask(e.image, mask);
+                }
             }
         }
         if (e.image.empty()) continue;
-        // The DOS picture it replaces (the dashboard comes from the running program later).
+        if (e.art->handler == Handler::MacDash) e.handler = make_mac_dash(files, warnings);
+        if (e.art->handler == Handler::MacMap) e.handler = make_mac_map(files, warnings);
+        // The DOS picture it replaces (the dashboards come from the running program later).
         if (spec.file) {
             const auto data = files.dos_file ? files.dos_file(spec.file) : std::vector<std::uint8_t>{};
             if (data.empty()) {
                 warnings.push_back(std::string(spec.file) + ": not found");
                 continue;
             }
-            if (!decode_dos_picture(data, spec.header, spec.width, spec.height, e.ref, &err)) {
+            if (spec.sprite ? !decode_dos_sprite(data, e.ref, &err)
+                            : !decode_dos_picture(data, spec.header, spec.width, spec.height, e.ref, &err)) {
                 warnings.push_back(std::string(spec.file) + ": " + err);
                 continue;
             }
@@ -373,19 +497,32 @@ void Substitution::Impl::load(const ArtFiles& files) {
     for (auto& e : entries) e.art = art == Art::Pc98 ? &e.spec.pc98 : &e.spec.mac;
 }
 
+// A picture packed into VETTE.EXE, read from the running program: decoded again whenever its packed
+// bytes change (before the EXEPACK stub has run they are still compressed).
+void Substitution::Impl::refresh_program_picture(Entry& e) {
+    const auto& s = e.spec;
+    const std::size_t at = kProgramImage + static_cast<std::size_t>(s.header);
+    constexpr std::size_t kCompared = 256, kRange = 0x100000;
+    if (!ram || at + kCompared > kRange) return;
+    if (e.packed.size() == kCompared && std::equal(e.packed.begin(), e.packed.end(), ram + at)) return;
+    e.packed.assign(ram + at, ram + at + kCompared);
+    e.ref_ok = decode_dos_picture(std::span<const std::uint8_t>(ram + at, kRange - at), 0, s.width, s.height, e.ref);
+}
+
 // Fraction of the compared pixels (every `step`th, skipping transparent ones) equal to the picture
-// placed at (x0, y0).
+// placed at (x0, y0), within the spec's comparison area.
 float Substitution::Impl::match_at(const FrameView& f, const Entry& e, int x0, int y0, int step) const {
+    const IRect a = e.spec.area.w > 0 ? e.spec.area : IRect{0, 0, e.ref.width, e.ref.height};
     long n = 0, eq = 0, samples = 0;
-    for (int y = 0; y < e.ref.height; y += step) {
+    for (int y = a.y; y < a.y + a.h; y += step) {
         const std::uint8_t* row = f.pixels + static_cast<std::size_t>(y0 + y) * f.width + x0;
         const std::uint8_t* ref = e.ref.pixels.data() + static_cast<std::size_t>(y) * e.ref.width;
-        for (int x = (y / step) % step; x < e.ref.width; x += step) {
+        for (int x = a.x + (y / step) % step; x < a.x + a.w; x += step) {
             ++samples;
             const std::uint8_t v = row[x];
-            if (v == kTransparent) continue;
+            if (v == kTransparent || !e.ref.covers(static_cast<std::size_t>(y) * e.ref.width + x)) continue;
             ++n;
-            eq += v == ref[x];
+            eq += v == ref[x] || (e.spec.xor_match && (v ^ e.spec.xor_match) == ref[x]);
         }
     }
     if (n == 0 || n * 10 < samples) return 0;  // mostly transparent: nothing to judge by
@@ -447,7 +584,8 @@ Art Substitution::art() const { return impl_->art; }
 
 std::vector<Screen> Substitution::available() const {
     std::vector<Screen> out;
-    for (const auto& e : impl_->entries) out.push_back(e.spec.id);
+    for (const auto& e : impl_->entries)
+        if (std::find(out.begin(), out.end(), e.spec.id) == out.end()) out.push_back(e.spec.id);
     return out;
 }
 
@@ -480,23 +618,22 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
     std::vector<Match> matches;
     Impl::Entry* best_bg = nullptr;
     float best_ratio = 0;
-    for (auto& e : m.entries) {
+    // Sprites (entries with a parent) are looked for in a second pass, over their parent only.
+    const auto recognise = [&](Impl::Entry& e, bool second_pass) {
         const auto& s = e.spec;
-        if (s.frame_w != f.width || s.frame_h != f.height) {
+        if ((s.parent != Screen::None) != second_pass) return;
+        if (s.frame_w != f.width || s.frame_h != f.height ||
+            (second_pass && (!best_bg || best_bg->spec.id != s.parent))) {
             e.active = false;
-            continue;
+            return;
         }
-        // The dashboard, from the program image (load segment 1000h). Until it has been recognised
-        // once it is read again each time: before the EXEPACK stub has run, the bytes are still packed.
-        if (!s.file && !e.confirmed && m.ram)
-            e.ref_ok = decode_dos_dash(std::span<const std::uint8_t>(m.ram + 0x10000, 0x100000 - 0x10000), e.ref);
-        if (!e.ref_ok) continue;
+        if (!s.file) m.refresh_program_picture(e);
+        if (!e.ref_ok) return;
         float ratio = 0;
         if (!m.locate(f, e, ratio)) {
             e.active = false;
-            continue;
+            return;
         }
-        if (!s.file) e.confirmed = true;
         if (s.background) {
             if (ratio > best_ratio) {
                 if (best_bg) best_bg->active = false;
@@ -505,12 +642,14 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
             } else {
                 e.active = false;
             }
-            continue;
+            return;
         }
         e.active = true;
         matches.push_back({&e, e.last});
         m.found.push_back({s.id, ratio, e.last});
-    }
+    };
+    for (auto& e : m.entries) recognise(e, false);
+    for (auto& e : m.entries) recognise(e, true);
     if (best_bg) {
         best_bg->active = true;
         matches.insert(matches.begin(), {best_bg, best_bg->last});
@@ -547,7 +686,18 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
             for (int y = r.y; y < r.y + r.h; ++y)
                 std::fill_n(out.base.begin() + static_cast<std::ptrdiff_t>(y) * w + r.x, r.w, kTransparent);
         const IRect src{0, 0, e.image.width, e.image.height};
-        const FRect dst = place(match.rect, e.image.width, e.image.height, a.fit, w, h);
+        FRect dst = place(match.rect, e.image.width, e.image.height, a.fit == Fit::Native ? Fit::Contain : a.fit, w, h);
+        if (a.fit == Fit::Native && &match != &matches.front() && !matches.front().e->image.empty()) {
+            // The parent's art scale (frame pixels per art pixel), centred on the DOS sprite.
+            const FRect& bg = out.layers.front().dst;
+            const float kx = bg.w / static_cast<float>(matches.front().e->image.width);
+            const float ky = bg.h / static_cast<float>(matches.front().e->image.height);
+            const float dw = static_cast<float>(e.image.width) * kx, dh = static_cast<float>(e.image.height) * ky;
+            const float cx = static_cast<float>(match.rect.x) + static_cast<float>(match.rect.w) / 2;
+            const float y = a.bottom ? static_cast<float>(match.rect.y + match.rect.h) - dh
+                                     : static_cast<float>(match.rect.y) + (static_cast<float>(match.rect.h) - dh) / 2;
+            dst = {cx - dw / 2, y, dw, dh};
+        }
         out.layers.push_back({&e.image, src, dst});
         if (&match != &matches.front()) covers.push_back({out.pieces.size(), dst});
         // An inset's art can be larger than the DOS picture (Fit::Cover): what the frame showed
@@ -563,27 +713,46 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
             }
         }
 
+        // A sprite's parent picture: where the frame still shows it, the sprite isn't drawn (yet).
+        const Impl::Entry* parent = nullptr;
+        IRect parent_rect{};
+        if (e.spec.parent != Screen::None && matches.front().e->spec.id == e.spec.parent &&
+            matches.front().e->ref.width == w && matches.front().e->ref.height == h) {
+            parent = matches.front().e;
+            parent_rect = matches.front().rect;
+        }
         // The DOS pixels on top: wherever the frame differs from the DOS picture, except where a
-        // later inset (a crash picture over the dashboard) is: those pixels are the inset's.
-        std::vector<std::uint8_t> mask(static_cast<std::size_t>(r.w) * r.h);
-        for (int y = 0; y < r.h; ++y)
+        // later inset (a crash picture over the dashboard) is: those pixels are the inset's. Not
+        // needed when all of it is hidden and nothing is moved from it (the Mac course map).
+        bool all_hidden = false;
+        for (const auto& hd : a.hide)
+            all_hidden = all_hidden || (a.remaps.empty() && hd.x <= r.x && hd.y <= r.y && hd.x + hd.w >= r.x + r.w &&
+                                        hd.y + hd.h >= r.y + r.h);
+        std::vector<std::uint8_t> mask(all_hidden ? 0 : static_cast<std::size_t>(r.w) * r.h);
+        for (int y = 0; y < r.h && !all_hidden; ++y)
             for (int x = 0; x < r.w; ++x) {
                 const std::uint8_t v = f.pixels[static_cast<std::size_t>(r.y + y) * w + r.x + x];
                 const std::uint8_t ref = e.ref.pixels[static_cast<std::size_t>(r.y + y - match.rect.y) * e.ref.width +
                                                       (r.x + x - match.rect.x)];
                 mask[static_cast<std::size_t>(y) * r.w + x] = v != kTransparent && v != ref;
+                if (!e.ref.covers(static_cast<std::size_t>(r.y + y - match.rect.y) * e.ref.width + (r.x + x - match.rect.x)))
+                    mask[static_cast<std::size_t>(y) * r.w + x] = 2;  // not the sprite's: leave as it is
+                else if (parent && v == parent->ref.pixels[static_cast<std::size_t>(r.y + y - parent_rect.y) * parent->ref.width +
+                                                           (r.x + x - parent_rect.x)])
+                    mask[static_cast<std::size_t>(y) * r.w + x] = 0;  // not drawn yet (a sprite wiping in)
             }
-        for (const Match* later = &match + 1; later != matches.data() + matches.size(); ++later) {
+        for (const Match* later = &match + 1; later != matches.data() + matches.size() && !all_hidden; ++later) {
             const IRect c = clip(later->rect, w, h);
             for (int y = std::max(c.y, r.y); y < std::min(c.y + c.h, r.y + r.h); ++y)
                 for (int x = std::max(c.x, r.x); x < std::min(c.x + c.w, r.x + r.w); ++x)
                     mask[static_cast<std::size_t>(y - r.y) * r.w + (x - r.x)] = 0;
         }
-        if (a.close_holes && r.w > 0 && r.h > 0) close_mask(mask, r.w, r.h);
-        for (int y = 0; y < r.h; ++y)
+        if (a.close_holes && r.w > 0 && r.h > 0 && !all_hidden) close_mask(mask, r.w, r.h);
+        for (int y = 0; y < r.h && !all_hidden; ++y)
             for (int x = 0; x < r.w; ++x) {
                 const std::size_t p = static_cast<std::size_t>(r.y + y) * w + r.x + x;
-                out.over[p] = mask[static_cast<std::size_t>(y) * r.w + x] ? f.pixels[p] : kTransparent;
+                const std::uint8_t k = mask[static_cast<std::size_t>(y) * r.w + x];
+                if (k != 2) out.over[p] = k ? f.pixels[p] : kTransparent;
             }
         std::vector<IRect> keep = a.keep;
         if (m.options.english_text)
@@ -608,7 +777,8 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
                 for (int x = c.x; x < c.x + c.w; ++x) {
                     const std::size_t p = static_cast<std::size_t>(y) * w + x;
                     const std::uint8_t v = rm.opaque && !covered(x, y) ? f.pixels[p] : out.over[p];
-                    out.moved[p] = v == rm.ignore ? kTransparent : v;
+                    const bool wanted = v != kTransparent && v != rm.ignore && (!rm.only || ((rm.only >> (v & 15)) & 1));
+                    out.moved[p] = wanted ? v : kTransparent;
                     out.over[p] = kTransparent;
                 }
             out.pieces.push_back({c, art_to_frame(dst, src, rm.art)});
@@ -629,6 +799,7 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
                 out.layers.push_back({&img, {0, 0, img.width, img.height}, art_to_frame(dst, src, ind.art)});
             }
         }
+        if (e.handler) e.handler->compose({f, m.ram, e.ref, match.rect, dst, e.image.width, e.image.height}, out);
     }
     if (!covers.empty()) {
         std::size_t kept = 0;

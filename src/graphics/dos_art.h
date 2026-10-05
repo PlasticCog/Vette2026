@@ -17,11 +17,18 @@ namespace vette::graphics {
 struct DosPicture {
     int width = 0, height = 0;
     std::vector<std::uint8_t> pixels;  // palette indices 0-15, row-major
+    std::vector<std::uint8_t> opaque;  // sprites: 1 where the picture covers the screen (empty: all)
+
+    bool covers(std::size_t i) const { return opaque.empty() || opaque[i] != 0; }
 };
 
 // Decodes an RLE-packed planar picture of width x height, skipping `header` bytes first.
 bool decode_dos_picture(std::span<const std::uint8_t> file, int header, int width, int height, DosPicture& out,
                         std::string* error = nullptr);
+
+// Decodes a masked sprite file (BIGVET.BIN, SPETRUM.BIN, REDVETTE.BIN; not packed): a word of
+// bytes per row, a word of rows, then a mask plane (1 = transparent) and the 4 colour planes.
+bool decode_dos_sprite(std::span<const std::uint8_t> file, DosPicture& out, std::string* error = nullptr);
 
 // Where VETTE.EXE's program image keeps the packed dashboard (320x80, mode 0Dh rows 120-199).
 constexpr std::size_t kDashImageOffset = 0x100;

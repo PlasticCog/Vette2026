@@ -42,6 +42,12 @@ enum class Screen {
     Loser1,
     Loser2,
     Loser3,
+    CourseMap,   // MAPPIC.BIN (the course selection map)
+    DashLeft,    // the race dashboard looking left (F1) and right (F3), also in VETTE.EXE
+    DashRight,
+    TitleLogo,      // the title's sprites: BIGVET.BIN (the VETTE! logo), SPETRUM.BIN ("presents"),
+    TitlePresents,  // VX.BIN (the car coming up the road, five frames)
+    TitleCar,
     Count
 };
 const char* screen_name(Screen screen);
@@ -73,9 +79,10 @@ public:
     std::vector<Screen> available() const;
     const std::vector<std::string>& warnings() const;
 
-    // The race dashboard is packed into VETTE.EXE, so it is read from the running program: the
-    // emulator's memory (Memory::ram(), 1 MB). Read lazily when a race frame first appears (the
-    // EXEPACK stub has unpacked the program by then). Without it the dashboard isn't replaced.
+    // The running game's memory (Memory::ram(), 1 MB): the race dashboards are packed into VETTE.EXE
+    // and read from there (lazily, once the EXEPACK stub has unpacked the program), and the Mac
+    // dashboard and course map draw the game's values (speed, revs, gear, the course on show) from
+    // it every frame. Without it those screens aren't replaced.
     void set_program_memory(const std::uint8_t* ram);
 
     // Builds the composite for a displayed frame. Returns false, leaving `out` alone, when the frame

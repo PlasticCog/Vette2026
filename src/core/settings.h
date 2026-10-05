@@ -16,7 +16,7 @@ struct Settings {
 
     FrameRate frame_rate = FrameRate::Smooth;
     Pc pc = Pc::Fast;
-    DrawDistance draw_distance = DrawDistance::Original;  // Extended/Maximum: renderer in development
+    DrawDistance draw_distance = DrawDistance::Maximum;  // Extended/Maximum: the Enhanced 3D renderer
     bool manual_check = false;  // show the original's copy-protection question
     Joystick joystick = Joystick::Auto;
     bool fullscreen = false;

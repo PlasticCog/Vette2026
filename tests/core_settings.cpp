@@ -17,11 +17,13 @@ TEST(settings_presets) {
     CHECK(s.preset() == Settings::Preset::Classic);
     CHECK(s.frame_rate == Settings::FrameRate::Original);
     CHECK(s.pc == Settings::Pc::At286);
+    CHECK(s.draw_distance == Settings::DrawDistance::Original);
     CHECK(s.manual_check);
     s.manual_check = false;  // one change away from a preset is Custom
     CHECK(s.preset() == Settings::Preset::Custom);
     s.apply(Settings::Preset::Enhanced);
     CHECK(s.preset() == Settings::Preset::Enhanced);
+    CHECK(s.draw_distance == Settings::DrawDistance::Maximum);
     // Options outside the presets don't affect which preset is matched.
     s.fullscreen = true;
     s.joystick = Settings::Joystick::Off;

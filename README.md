@@ -42,8 +42,8 @@ keyboard, mouse, gamepad and PC-speaker sound. Native C++ ports of its routines 
 one at a time, each verified against the original (see [docs/PORTING.md](docs/PORTING.md)).
 
 **Launch menu.** VETTE! 2026 opens with a launch menu. Choose a preset there (**Classic**, VETTE!
-exactly as in 1989, or **Enhanced**), or set each option: frame rate, PC speed, the manual check,
-joystick, window or fullscreen, sound, and whether the menu appears at startup. **Game folder** shows
+exactly as in 1989, or **Enhanced**), or set each option: frame rate, PC speed, draw distance, the
+manual check, joystick, window or fullscreen, sound, and whether the menu appears at startup. **Game folder** shows
 where your game files were found; select it to choose another folder. If the files aren't found, the
 menu opens anyway and asks for the folder. It works with the keyboard, mouse or gamepad. Choices
 (including the folder) are saved in
@@ -58,6 +58,17 @@ game logic keeps its own cadence, exactly as the original. For every display fra
 3D drawing code runs again on a throwaway copy of the latest game frame, with the camera and cars blended
 between the last two game frames. This adds at most one game frame (~33 ms) of delay. `--fps original`
 shows only the frames the game draws itself.
+
+**Draw distance.** The original draws only the few city blocks around the car, about two blocks ahead.
+With **Maximum** (the Enhanced preset), VETTE! 2026 draws the race view's 3D world itself, at your
+display's full resolution, with the whole city in view to the horizon. **Extended** draws eight blocks
+around the car. The city is taken from your own copy of the game when it starts (about 0.1 s): every
+building, road and landmark with its most detailed model, and the cars and pedestrians where the game
+has them. It is drawn in the original's back-to-front order, so things hide each other just as they do
+in the original. The dash, rear-view mirror and messages are still the game's own. `--draw-distance
+original|extended|maximum` overrides the setting for one run. Not yet covered: the mirror and the
+freeway sections show the original's view, and the painted skyline behind the city stays, so far
+buildings stand in front of their painted copies.
 
 **PC speed.** By default the emulated PC is fast enough that the game runs at its own built-in limit of
 30 fps, as it did on fast 386/486 PCs; the game then also enables its rear-view mirror and building

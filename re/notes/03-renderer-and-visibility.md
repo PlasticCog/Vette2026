@@ -104,6 +104,11 @@ x_right DS:3160, y_bottom DS:315C, centre_y DS:316B, centre_x DS:3169, height DS
   A6A9). Division is signed `idiv`, truncating. **confirmed** `project_points_simple` 4160:086B and `project_points_simple_near` 3009:25A0 do the
   same with the variable DS:3167 (=256).
 - **Near plane z = 1**: a vertex with Z < 1 gets flag 2 (A66B) and is later clipped in camera space. **confirmed**
+- **Rounding bias** (measured: the Enhanced SceneBuilder's validation mode only matches the frames to the pixel
+  with it). Camera-space values come out as floor(c·32767/32768) of the exact value (the Q15 matrix is scaled by
+  0x7FFF, and the high word of a product floors), so a ground point 10 units below the eye gets Y = 9; with the
+  truncating `idiv` the screen position is then centre + trunc(X·256/Z). A near-plane crossing is at
+  t = (1 − z_a)·32768/(z_b − z_a) in Q15. Each shifts edges by up to a pixel, mostly upwards near the camera. **likely**
 - **Divide overflow** is caught by a custom **INT 0 handler** (`int00_div_overflow` 3009:2565, installed by 253D). It
   returns AX=0x7FFF and skips the 2-byte `idiv` when the return address points at F6/F7 (286+ fault semantics;
   on 8086 it just returns). On 0x7FFF the projector recomputes a 32-bit quotient, stores it at +0x400/+0x402 and sets
@@ -209,6 +214,22 @@ Object routines compare |camera − object| per axis (`cdq; xor; shr; adc` abs i
 | DS:18 | 0666 (mirror pass), 0C48 (highway toggle path) | mirror pass: skips the far cells (table *), inverts the 2D winding test. **confirmed** |
 | DS:355A | 372A toggle | full-screen viewport 356B vs dash viewport 3579. **confirmed** |
 So `cpu_slow_flag_a` = mirror initially off, and `cpu_slow_flag_b` = building windows initially off.
+
+### View keys
+The key handler table at image offset 30E52 holds one near pointer per scancode from 3Bh (F1). F3 (camera yaw = heading + 85)
+and F4 were checked in the host with vette_world key scripts: **confirmed**. The others follow from the table: **likely**.
+
+| Key | Handler | Effect |
+|---|---|---|
+| F1 (3Bh) | 092B | look left: view yaw offset DS:2B87 = −85 (in-car, dash viewport 3579) |
+| F2 (3Ch) | 094C | look ahead: DS:2B87 = 0 |
+| F3 (3Dh) | 090A | look right: DS:2B87 = +85 |
+| F4 (3Eh) | 0A49 | **helicopter view**: DS:2C7D (camera distance behind the car) = 100h, DS:2CCF (extra eye height) = 88h, pitch DS:2BEB = −17, DS:2ACF = DS:2ADD = FF, full-screen viewport (3762). The camera ends up 146 units up |
+| F7 (41h) / F8 (42h) | 0A1A / 0A20 | extra eye height DS:2CCF ±8 (not below 0) |
+
+F1–F3 return through 0A74, which clears DS:2CCF, DS:2BEB and DS:2C7D (back in the car). 0ABB/0AC1 change DS:2C7D
+by ±10h and 0A2D/0A3B the pitch by ±5 (|pitch| ≤ 5Ah); their keys are not identified yet. The digit keys (0962…)
+are the manual gear selection (`gear_select` 1F01), not views.
 
 ## Rear-view mirror (`draw_mirror_view` 3009:0666)
 Yaw +180 (or ±95 in the side views), pitch negated. The matrix column 0 is negated (mirror image). DS:18=FF.

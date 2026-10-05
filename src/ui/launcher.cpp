@@ -29,11 +29,9 @@ enum Row {
 // Colours (0xRRGGBB).
 constexpr uint32_t kBackground = 0x0E1324, kSelection = 0x28345A, kRule = 0x2E3A5C;
 constexpr uint32_t kGold = 0xFFC23C, kSubtitle = 0xB9BECB, kLabel = 0xC5CAD6, kValue = 0xEEF0F4;
-constexpr uint32_t kDisabled = 0x5D6475, kHelp = 0xD6DAE4, kHint = 0x7C8396, kGood = 0x62D96B, kBad = 0xFF6464;
+constexpr uint32_t kHelp = 0xD6DAE4, kHint = 0x7C8396, kGood = 0x62D96B, kBad = 0xFF6464;
 
 constexpr int kValueColumn = 20;  // characters from the left margin
-
-bool selectable(int row) { return row != kDrawDistance; }  // in development
 
 const char* label(int row) {
     switch (row) {
@@ -61,7 +59,10 @@ std::string value(int row, const Settings& s, const std::optional<GameDir>& game
                                                           : "Custom";
     case kFrameRate: return s.frame_rate == Settings::FrameRate::Smooth ? "Smooth (display rate)" : "Original";
     case kPc: return s.pc == Settings::Pc::Fast ? "Fast PC (30 fps)" : "1989 PC/AT (12 MHz)";
-    case kDrawDistance: return "Original (more soon)";
+    case kDrawDistance:
+        return s.draw_distance == Settings::DrawDistance::Original   ? "Original"
+               : s.draw_distance == Settings::DrawDistance::Extended ? "Extended"
+                                                                     : "Maximum (whole city)";
     case kManualCheck: return s.manual_check ? "Show" : "Skip";
     case kJoystick:
         return s.joystick == Settings::Joystick::Auto ? "Auto" : s.joystick == Settings::Joystick::On ? "On" : "Off";
@@ -78,8 +79,8 @@ std::string_view help(int row, const Settings& s) {
         return "The folder with your DOS VETTE! files: by default the folder Game next to vette2026 "
                "(Game/README.md lists the files). Enter: choose another folder.";
     case kPreset:
-        return "Classic is VETTE! as it was in 1989. Enhanced turns on the smooth frame rate and a fast PC, "
-               "and skips the manual question. Changing an option below makes it Custom.";
+        return "Classic is VETTE! as it was in 1989. Enhanced turns on the smooth frame rate, a fast PC and "
+               "the whole city in view, and skips the manual question. Changing an option below makes it Custom.";
     case kFrameRate:
         return s.frame_rate == Settings::FrameRate::Smooth
                    ? "The race is drawn at your display's refresh rate, blending between the game's own frames. "
@@ -93,7 +94,11 @@ std::string_view help(int row, const Settings& s) {
                    : "A 12 MHz PC/AT as in 1989: 12-17 frames per second; mirror and building windows start "
                      "off (F6 and W toggle them).";
     case kDrawDistance:
-        return "In development: Extended, and Maximum, which draws the whole city to the horizon.";
+        return s.draw_distance == Settings::DrawDistance::Original
+                   ? "The game's own 3D view: about two blocks ahead, at 320x200."
+               : s.draw_distance == Settings::DrawDistance::Extended
+                   ? "The 3D view at your display's resolution, eight blocks around you."
+                   : "The 3D view at your display's resolution, with the whole city in view to the horizon.";
     case kManualCheck:
         return "Copy protection: the original asks a question from the manual before the first race. This "
                "version of the game accepts any answer.";
@@ -211,9 +216,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
                                  false);
     };
     const auto move = [&](int dir) {
-        do {
-            selected = (selected + dir + kRows) % kRows;
-        } while (!selectable(selected));
+        selected = (selected + dir + kRows) % kRows;
     };
     const auto change = [&](int row, int dir) {
         switch (row) {
@@ -225,6 +228,9 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
                                                                        : Settings::FrameRate::Smooth;
             break;
         case kPc: s.pc = s.pc == Settings::Pc::Fast ? Settings::Pc::At286 : Settings::Pc::Fast; break;
+        case kDrawDistance:
+            s.draw_distance = static_cast<Settings::DrawDistance>((static_cast<int>(s.draw_distance) + dir + 3) % 3);
+            break;
         case kManualCheck: s.manual_check = !s.manual_check; break;
         case kJoystick: s.joystick = static_cast<Settings::Joystick>((static_cast<int>(s.joystick) + dir + 3) % 3); break;
         case kDisplay:
@@ -333,7 +339,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
                     break;
                 for (int row = 0; row < kRows; ++row) {
                     const int y = lay.row_y(row) - 3;
-                    if (selectable(row) && fy >= y && fy < y + lay.pitch) {
+                    if (fy >= y && fy < y + lay.pitch) {
                         selected = row;
                         if (click)
                             done = activate(row, e.button.button == SDL_BUTTON_RIGHT ? -1 : 1);
@@ -385,12 +391,11 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
                 canvas.text(m, y, std::string(sel ? "> " : "  ") + label(row), sel ? kGold : kValue);
                 continue;
             }
-            const bool on = selectable(row);
-            canvas.text(m, y, label(row), sel ? kGold : on ? kLabel : kDisabled);
+            canvas.text(m, y, label(row), sel ? kGold : kLabel);
             std::string v = fit_left(value(row, s, game), value_chars);
-            if (row != kFolder && on)
+            if (row != kFolder)
                 v = "< " + v + " >";
-            canvas.text(value_x, y, v, !on ? kDisabled : row == kFolder && !game ? kBad : kValue);
+            canvas.text(value_x, y, v, row == kFolder && !game ? kBad : kValue);
         }
 
         // Status, help and key hints.

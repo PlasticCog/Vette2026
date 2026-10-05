@@ -65,10 +65,12 @@ void Settings::apply(Preset p) {
     if (p == Preset::Classic) {
         frame_rate = FrameRate::Original;
         pc = Pc::At286;
+        draw_distance = DrawDistance::Original;
         manual_check = true;
     } else if (p == Preset::Enhanced) {
         frame_rate = FrameRate::Smooth;
         pc = Pc::Fast;
+        draw_distance = DrawDistance::Maximum;
         manual_check = false;
     }
 }

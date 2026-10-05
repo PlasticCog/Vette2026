@@ -1,8 +1,17 @@
 #pragma once
 
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "platform/framebuffer.h"
 #include "platform/sdl_util.h"
 #include "ui/canvas.h"
+
+namespace vette::enhanced {
+struct Scene;
+}
 
 namespace vette {
 
@@ -15,6 +24,13 @@ public:
 
     void present(const Framebuffer& fb);
     void present(const ui::Canvas& canvas);
+    // The race view with the Enhanced 3D view: `under` (the game's view without its world), then
+    // `scene` clipped to its viewport at the output's full resolution, then `over` wherever its pixels
+    // aren't kTransparentPixel. All three are in the frame's coordinates, placed as present() would.
+    static constexpr std::uint8_t kTransparentPixel = 0xFF;
+    void present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over);
+    // Output pixels per frame pixel, horizontally and vertically, for a frame of this size.
+    void frame_scale(int frame_w, int frame_h, float& sx, float& sy) const;
     // The window's drawable size in pixels (what a Canvas should be laid out for).
     void output_size(int& w, int& h) const;
     SDL_Window* window() const { return window_.get(); }
@@ -29,23 +45,35 @@ public:
     // Shows or hides the OS mouse pointer while it's over the window (hidden while the game's own
     // pointer is on screen). Outside the window it is unaffected.
     void show_system_cursor(bool show);
+    // Saves the next presented picture, as the window shows it, to a BMP file (UTF-8 path).
+    void request_screenshot(std::string path_utf8) { screenshot_ = std::move(path_utf8); }
 
 private:
+    // A Framebuffer on its way to the screen: converted to ARGB at its own size, then upscaled by whole
+    // factors (nearest-neighbor) for the final linear stretch.
+    struct Layer {
+        SdlPtr<SDL_Texture> frame;
+        SdlPtr<SDL_Texture> scaled;
+        int w = 0, h = 0;              // frame's size
+        int scale_x = 0, scale_y = 0;  // scaled's factors
+    };
+    SDL_Texture* upload(Layer& layer, const Framebuffer& fb, bool transparency, const SDL_FRect& dst);
+    SDL_FRect fit() const;  // the 4:3 picture rect in render output pixels
+    void finish_frame();    // SDL_RenderPresent, after a requested screenshot
+
     // Destroyed in reverse order: textures, then renderer, then window.
     SdlPtr<SDL_Window> window_;
     SdlPtr<SDL_Renderer> renderer_;
-    SdlPtr<SDL_Texture> frame_;   // Framebuffer converted to ARGB, at its size (frame_w_ x frame_h_)
-    SdlPtr<SDL_Texture> scaled_;  // frame_ upscaled by (scale_x_, scale_y_), nearest-neighbor
-    SdlPtr<SDL_Texture> canvas_;  // the last Canvas, at its own size
-    int frame_w_ = 0;
-    int frame_h_ = 0;
+    Layer base_;  // present()'s frame, and the layered view's `under`
+    Layer over_;  // the layered view's `over`
+    SdlPtr<SDL_Texture> canvas_;   // the last Canvas, at its own size
+    std::vector<float> scene_xy_;  // the scene's vertices in render output pixels
+    std::string screenshot_;       // request_screenshot()
     int canvas_w_ = 0;
     int canvas_h_ = 0;
     SDL_FRect picture_{};  // where the last frame or canvas went, in render output pixels
     int picture_w_ = 0;    // and its size in its own pixels (for window_to_frame)
     int picture_h_ = 0;
-    int scale_x_ = 0;
-    int scale_y_ = 0;
     bool system_cursor_shown_ = true;
 };
 

@@ -20,11 +20,23 @@ constexpr uint16_t kData = kDataSeg;
 constexpr uint16_t kDrawStart = 0x02DA;  // the 3D drawing section begins
 constexpr uint16_t kCapture = 0x0356;    // after the traffic update, before the cell lookup and world
 constexpr uint16_t kDrawEnd = 0x0374;    // world and view border drawn; HUD and mirror follow
+constexpr uint16_t kDrawWorld = 0x30C6;  // draw_world_cells (near call from the section)
 constexpr uint16_t kTrafficStep = 0xBCFB, kPedestrianStep = 0xBB72;  // simulation inside the section
 
 constexpr uint16_t kBackBufSeg = 0x0011;  // cs: segment the race view is drawn into (A000 / A200)
 constexpr uint16_t kHighway = 0x2AD4;     // DS: freeway mode (a separate renderer) when non-zero
 constexpr uint16_t kViewLeft = 0x315E, kViewTop = 0x315A, kViewRight = 0x3160, kViewBottom = 0x315C;
+constexpr uint16_t kMirrorOff = 0x2AC7;   // DS: byte, 0 while the rear-view mirror is drawn
+constexpr uint16_t kViewOffset = 0x2B87;  // DS: camera yaw offset, 0 ahead, +85 right, -85 left
+
+// The mirror's viewports (re/notes/03, "Viewports") for each view, and how far its frame reaches
+// to their left and right (measured). The mirror is drawn after the 3D view, all of it from the game's
+// own frame.
+struct Rect {
+    int x0, y0, x1, y1;  // inclusive
+};
+constexpr Rect kMirrorAhead{192, 0, 319, 35}, kMirrorRight{80, 96, 127, 119}, kMirrorLeft{200, 84, 272, 119};
+constexpr int kMirrorFrameX = 8;
 
 // The camera struct and the car structs share a layout: big-tile-local x/y (0..7FFFh) with the big
 // tile's row/column at +22h/+24h. Vehicles and pedestrians in the per-big-tile lists are entities
@@ -87,8 +99,9 @@ private:
     Ega& ega_;
 };
 
-SmoothRenderer::SmoothRenderer(host::Machine& machine)
+SmoothRenderer::SmoothRenderer(host::Machine& machine, bool world_layers)
     : machine_(machine),
+      world_layers_(world_layers),
       prev_(std::make_unique<Snapshot>()),
       cur_(std::make_unique<Snapshot>()),
       scratch_io_(std::make_unique<ScratchIo>(scratch_ega_)) {
@@ -99,6 +112,15 @@ SmoothRenderer::SmoothRenderer(host::Machine& machine)
     scratch_cpu_->set_code_hook(Cpu::linear(kCode, kTrafficStep), near_return);
     scratch_cpu_->set_code_hook(Cpu::linear(kCode, kPedestrianStep), near_return);
     scratch_cpu_->set_code_hook(Cpu::linear(kCode, kDrawEnd), [](Cpu& c) { c.request_stop(); });
+    if (world_layers_) {
+        // The world is drawn by the Enhanced renderer: take the memory it needs and skip the original's.
+        scratch_cpu_->set_code_hook(Cpu::linear(kCode, kDrawWorld), [this](Cpu& c) {
+            if (world_ram_) {
+                std::memcpy(world_ram_->data(), scratch_mem_.ram(), host::Memory::kSize);
+            }
+            c.regs.ip = c.pop16();
+        });
+    }
 
     Cpu& cpu = machine_.cpu();
     capture_watch_ = cpu.add_watch(Cpu::linear(kCode, kCapture), [this](Cpu&) { capture_frame(); });
@@ -227,25 +249,30 @@ bool SmoothRenderer::replay(double alpha, Ega::Frame& out) {
     return finished;
 }
 
-bool SmoothRenderer::render(uint64_t now_ns, Ega::Frame& out) {
-    const Snapshot& c = *cur_;
-    if (broken_ || c.frame == 0 || now_ns - c.t_ns > kStaleNs || c.data(kHighway) != 0) {
-        return false;
-    }
+int SmoothRenderer::shown_page() {
     machine_.render(shown_);
     const uint16_t start = machine_.ega().display_start();
     const int page = start == 0 ? 0 : start == 0x2000 ? 1 : -1;
-    if (shown_.width != 320 || page < 0 || !pure_[page].valid) {
+    return shown_.width == 320 && page >= 0 && pure_[page].valid ? page : -1;
+}
+
+// Where between the last two game frames to show: one game frame back, blended.
+double SmoothRenderer::blend_alpha(uint64_t now_ns) const {
+    const Snapshot& p = *prev_;
+    const Snapshot& c = *cur_;
+    if (!interpolation_ || p.frame == 0 || p.frame + 1 != c.frame || c.t_ns <= p.t_ns) {
+        return 1.0;
+    }
+    return std::clamp(static_cast<double>(now_ns - c.t_ns) / static_cast<double>(c.t_ns - p.t_ns), 0.0, 1.0);
+}
+
+bool SmoothRenderer::render(uint64_t now_ns, Ega::Frame& out) {
+    const Snapshot& c = *cur_;
+    if (world_layers_ || broken_ || c.frame == 0 || now_ns - c.t_ns > kStaleNs || c.data(kHighway) != 0) {
         return false;
     }
-
-    // Show the state one game frame back, blended between the last two frames.
-    double alpha = 1.0;
-    const Snapshot& p = *prev_;
-    if (p.frame != 0 && p.frame + 1 == c.frame && c.t_ns > p.t_ns) {
-        alpha = std::clamp(static_cast<double>(now_ns - c.t_ns) / static_cast<double>(c.t_ns - p.t_ns), 0.0, 1.0);
-    }
-    if (!replay(alpha, replay_image_)) {
+    const int page = shown_page();
+    if (page < 0 || !replay(blend_alpha(now_ns), replay_image_)) {
         return false;
     }
 
@@ -268,9 +295,51 @@ bool SmoothRenderer::render(uint64_t now_ns, Ega::Frame& out) {
     return true;
 }
 
+bool SmoothRenderer::render_layers(uint64_t now_ns, Layers& out) {
+    const Snapshot& c = *cur_;
+    if (!world_layers_ || broken_ || c.frame == 0 || now_ns - c.t_ns > kStaleNs || c.data(kHighway) != 0) {
+        return false;
+    }
+    const int page = shown_page();
+    if (page < 0) {
+        return false;
+    }
+    world_ram_ = &out.ram;
+    const bool replayed = replay(blend_alpha(now_ns), out.under);
+    world_ram_ = nullptr;
+    if (!replayed) {
+        return false;
+    }
+
+    // The displayed frame on top, except where it shows the original's own 3D view. The mirror stays
+    // whole: its picture often matches the 3D view behind it pixel for pixel (sky, road).
+    out.over = shown_;
+    const Ega::Frame& pure = pure_[page].image;
+    const int x0 = std::max(0, static_cast<int>(c.data(kViewLeft)));
+    const int x1 = std::min(shown_.width - 1, static_cast<int>(c.data(kViewRight)));
+    const int y0 = std::max(0, static_cast<int>(c.data(kViewTop)));
+    const int y1 = std::min(shown_.height - 1, static_cast<int>(c.data(kViewBottom)));
+    Rect mirror{-1, -1, -2, -2};
+    if ((c.data(kMirrorOff) & 0xFF) == 0) {
+        const int16_t offset = c.data(kViewOffset);
+        const Rect r = offset == 0 ? kMirrorAhead : offset > 0 ? kMirrorRight : kMirrorLeft;
+        mirror = {r.x0 - kMirrorFrameX, r.y0, r.x1 + kMirrorFrameX, r.y1};
+    }
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            const size_t i = static_cast<size_t>(y) * static_cast<size_t>(shown_.width) + static_cast<size_t>(x);
+            const bool in_mirror = x >= mirror.x0 && x <= mirror.x1 && y >= mirror.y0 && y <= mirror.y1;
+            if (!in_mirror && shown_.pixels[i] == pure.pixels[i]) {
+                out.over.pixels[i] = kTransparent;
+            }
+        }
+    }
+    return true;
+}
+
 int SmoothRenderer::self_check() {
     const Snapshot& c = *cur_;
-    if (broken_ || c.frame == 0) {
+    if (world_layers_ || broken_ || c.frame == 0) {
         return -1;
     }
     const uint16_t seg = c.word(kCode, kBackBufSeg);

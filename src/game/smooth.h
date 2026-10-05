@@ -26,7 +26,10 @@ namespace vette::game {
 
 class SmoothRenderer {
 public:
-    explicit SmoothRenderer(host::Machine& machine);
+    // With `world_layers`, the replays stop short of the original's world drawing and render_layers()
+    // hands over what an Enhanced renderer needs to draw the world itself; render() and self_check()
+    // are then unavailable.
+    explicit SmoothRenderer(host::Machine& machine, bool world_layers = false);
     ~SmoothRenderer();
     SmoothRenderer(const SmoothRenderer&) = delete;
     SmoothRenderer& operator=(const SmoothRenderer&) = delete;
@@ -35,6 +38,20 @@ public:
     // returns true. Returns false, leaving `out` alone, when the 3D race view isn't on screen (menus,
     // highway mode, a stalled game), so the caller shows the game's own frame.
     bool render(uint64_t now_ns, host::Ega::Frame& out);
+
+    // The race view in three layers, for an Enhanced renderer (world_layers only): `under`, then the
+    // world drawn from `ram`, then `over`. Returns false, like render(), when the race view isn't on
+    // screen.
+    static constexpr uint8_t kTransparent = 0xFF;
+    struct Layers {
+        host::Ega::Frame under;  // the replayed view without its world: sky, ground, horizon
+        host::Ega::Frame over;   // the displayed frame, kTransparent where the 3D view shows through
+        std::vector<uint8_t> ram = std::vector<uint8_t>(host::Memory::kSize);  // at draw_world_cells' entry
+    };
+    bool render_layers(uint64_t now_ns, Layers& out);
+
+    // Off: always show the latest game frame as it is (the Original frame rate), no blending.
+    void set_interpolation(bool on) { interpolation_ = on; }
 
     // Diagnostics: replays the latest game frame without interpolation and compares its 3D view
     // with the original's own drawing of that frame. Returns the number of differing pixels, or -1
@@ -54,10 +71,15 @@ private:
 
     void capture_frame();       // watch at 3009:0356
     void capture_pure_image();  // watch at 3009:0374
+    int shown_page();           // render the displayed frame into shown_; its page (0/1), or -1
+    double blend_alpha(uint64_t now_ns) const;
     bool replay(double alpha, host::Ega::Frame& out);
     void interpolate(double alpha);
 
     host::Machine& machine_;
+    const bool world_layers_;
+    bool interpolation_ = true;
+    std::vector<uint8_t>* world_ram_ = nullptr;  // where the replay's world hook copies the memory to
     host::Cpu::WatchId capture_watch_ = 0, pure_watch_ = 0;
     std::unique_ptr<Snapshot> prev_, cur_;
     struct PureImage {

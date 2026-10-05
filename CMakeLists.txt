@@ -37,14 +37,12 @@ add_library(vette_game STATIC ${VETTE_GAME_SOURCES})
 target_link_libraries(vette_game PUBLIC vette_host)
 vette_warnings(vette_game)
 
-# --- Enhanced layer (src/enhanced: world extraction, high-resolution renderer). In development: only
-# --- vette_world and vette_enhanced_tests link it until the game does. -----------------------------
+# --- Enhanced layer (src/enhanced: the city extracted from the running game, and the renderer that
+# --- draws it at any resolution and draw distance) ----------------------------------------------------
 file(GLOB VETTE_ENHANCED_SOURCES CONFIGURE_DEPENDS src/enhanced/*.cpp)
-if(VETTE_ENHANCED_SOURCES)
-    add_library(vette_enhanced STATIC ${VETTE_ENHANCED_SOURCES})
-    target_link_libraries(vette_enhanced PUBLIC vette_game)
-    vette_warnings(vette_enhanced)
-endif()
+add_library(vette_enhanced STATIC ${VETTE_ENHANCED_SOURCES})
+target_link_libraries(vette_enhanced PUBLIC vette_game)
+vette_warnings(vette_enhanced)
 
 # Headless runner: boots the hosted game, injects keys, saves screenshots (no SDL needed).
 add_executable(vette_run src/tools/vette_run.cpp)
@@ -56,12 +54,10 @@ add_executable(vette_fuzz src/tools/vette_fuzz.cpp)
 target_link_libraries(vette_fuzz PRIVATE vette_game)
 vette_warnings(vette_fuzz)
 
-# World extraction tool (dumps and validates the Enhanced world model), once it exists.
-if(TARGET vette_enhanced AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/vette_world.cpp)
-    add_executable(vette_world src/tools/vette_world.cpp)
-    target_link_libraries(vette_world PRIVATE vette_enhanced)
-    vette_warnings(vette_world)
-endif()
+# World extraction tool: dumps the Enhanced world model and validates it against the original.
+add_executable(vette_world src/tools/vette_world.cpp)
+target_link_libraries(vette_world PRIVATE vette_enhanced)
+vette_warnings(vette_world)
 
 # --- Game executable -----------------------------------------------------------------------------
 if(VETTE_BUILD_GAME)
@@ -110,7 +106,7 @@ if(VETTE_BUILD_GAME)
     endif()
     target_compile_definitions(vette2026 PRIVATE VETTE_VERSION="${PROJECT_VERSION}")
     target_include_directories(vette2026 PRIVATE src)
-    target_link_libraries(vette2026 PRIVATE vette_game)
+    target_link_libraries(vette2026 PRIVATE vette_enhanced)
     if(TARGET SDL3::SDL3-static)
         target_link_libraries(vette2026 PRIVATE SDL3::SDL3-static)
     else()
@@ -146,7 +142,7 @@ if(VETTE_BUILD_TESTS)
     vette_component_tests(devices src/host/pic.cpp src/host/pit.cpp src/host/speaker.cpp)
 
     file(GLOB VETTE_ENHANCED_TEST_SOURCES CONFIGURE_DEPENDS tests/enhanced_*.cpp)
-    if(TARGET vette_enhanced AND VETTE_ENHANCED_TEST_SOURCES)
+    if(VETTE_ENHANCED_TEST_SOURCES)
         add_executable(vette_enhanced_tests tests/test_main.cpp ${VETTE_ENHANCED_TEST_SOURCES})
         target_link_libraries(vette_enhanced_tests PRIVATE vette_enhanced)
         target_include_directories(vette_enhanced_tests PRIVATE tests)

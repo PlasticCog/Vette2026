@@ -297,6 +297,7 @@ void Tracer::install_hooks() {
             ev.angles[1] = static_cast<int16_t>(ds_word(addr::kObjAngles + 2));
             ev.angles[2] = static_cast<int16_t>(ds_word(addr::kObjAngles + 4));
         }
+        ev.outline_enable = rd8(addr::kDataSeg, 0xE0D8);  // the opponent clears it around its own draw
         record(ev);
     };
     struct ModelEntry {

@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
+#include "enhanced/scene.h"
 #include "ui/app_icon.h"
 
 namespace vette {
@@ -53,17 +55,35 @@ Presenter::Presenter(const char* title) {
     SDL_Log("Renderer: %s", SDL_GetRendererName(renderer));
 }
 
+// Largest 4:3 rect that fits the output, centered: both EGA modes filled a 4:3 CRT.
+SDL_FRect Presenter::fit() const {
+    int out_w = 0;
+    int out_h = 0;
+    SDL_GetCurrentRenderOutputSize(renderer_.get(), &out_w, &out_h);
+    const int w = std::min(out_w, out_h * 4 / 3);
+    const int h = std::min(out_h, out_w * 3 / 4);
+    return {static_cast<float>(out_w - w) / 2, static_cast<float>(out_h - h) / 2, static_cast<float>(w),
+            static_cast<float>(h)};
+}
+
+void Presenter::frame_scale(int frame_w, int frame_h, float& sx, float& sy) const {
+    const SDL_FRect dst = fit();
+    sx = dst.w / static_cast<float>(frame_w);
+    sy = dst.h / static_cast<float>(frame_h);
+}
+
 // Sharp bilinear: nearest-neighbor upscale by whole factors close to the output size, then a linear
 // filter for the remaining non-integer stretch. Pixels stay crisp, and only the edges between them
 // blend, so the uneven pixel aspect (2.4:1 at 640x200, 1.2:1 at 320x200) doesn't produce rows of
-// visibly different heights.
-void Presenter::present(const Framebuffer& fb) {
+// visibly different heights. With `transparency`, kTransparentPixel pixels are see-through
+// (premultiplied alpha, so the linear filter doesn't darken the edges).
+SDL_Texture* Presenter::upload(Layer& layer, const Framebuffer& fb, bool transparency, const SDL_FRect& dst) {
     SDL_Renderer* renderer = renderer_.get();
-    if (fb.width != frame_w_ || fb.height != frame_h_) {  // the game switched video modes
-        frame_ = create_texture(renderer, SDL_TEXTUREACCESS_STREAMING, fb.width, fb.height, SDL_SCALEMODE_NEAREST);
-        frame_w_ = fb.width;
-        frame_h_ = fb.height;
-        scale_x_ = scale_y_ = 0;
+    if (fb.width != layer.w || fb.height != layer.h) {  // the game switched video modes
+        layer.frame = create_texture(renderer, SDL_TEXTUREACCESS_STREAMING, fb.width, fb.height, SDL_SCALEMODE_NEAREST);
+        layer.w = fb.width;
+        layer.h = fb.height;
+        layer.scale_x = layer.scale_y = 0;
     }
 
     std::array<std::uint32_t, 16> argb{};
@@ -73,44 +93,84 @@ void Presenter::present(const Framebuffer& fb) {
     }
     void* pixels = nullptr;
     int pitch = 0;
-    if (!SDL_LockTexture(frame_.get(), nullptr, &pixels, &pitch))
+    if (!SDL_LockTexture(layer.frame.get(), nullptr, &pixels, &pitch))
         throw_sdl_error("SDL_LockTexture");
     for (int y = 0; y < fb.height; ++y) {
         auto* row = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(pixels) + y * pitch);
         const std::uint8_t* src = fb.pixels.data() + y * fb.width;
         for (int x = 0; x < fb.width; ++x)
-            row[x] = argb[src[x] & 0x0F];
+            row[x] = transparency && src[x] == kTransparentPixel ? 0 : argb[src[x] & 0x0F];
     }
-    SDL_UnlockTexture(frame_.get());
+    SDL_UnlockTexture(layer.frame.get());
 
-    // Largest 4:3 rect that fits the output, centered: both EGA modes filled a 4:3 CRT.
-    int out_w = 0;
-    int out_h = 0;
-    SDL_GetCurrentRenderOutputSize(renderer, &out_w, &out_h);
-    const int w = std::min(out_w, out_h * 4 / 3);
-    const int h = std::min(out_h, out_w * 3 / 4);
-    const SDL_FRect dst{static_cast<float>(out_w - w) / 2, static_cast<float>(out_h - h) / 2,
-                        static_cast<float>(w), static_cast<float>(h)};
-
-    const int ix = std::max(1, w / fb.width);
-    const int iy = std::max(1, h / fb.height);
-    if (ix != scale_x_ || iy != scale_y_) {
-        scaled_ = create_texture(renderer, SDL_TEXTUREACCESS_TARGET, fb.width * ix, fb.height * iy,
-                                 SDL_SCALEMODE_LINEAR);
-        scale_x_ = ix;
-        scale_y_ = iy;
+    const int ix = std::max(1, static_cast<int>(dst.w) / fb.width);
+    const int iy = std::max(1, static_cast<int>(dst.h) / fb.height);
+    if (ix != layer.scale_x || iy != layer.scale_y) {
+        layer.scaled = create_texture(renderer, SDL_TEXTUREACCESS_TARGET, fb.width * ix, fb.height * iy,
+                                      SDL_SCALEMODE_LINEAR);
+        if (transparency)
+            SDL_SetTextureBlendMode(layer.scaled.get(), SDL_BLENDMODE_BLEND_PREMULTIPLIED);
+        layer.scale_x = ix;
+        layer.scale_y = iy;
     }
-    SDL_SetRenderTarget(renderer, scaled_.get());
-    SDL_RenderTexture(renderer, frame_.get(), nullptr, nullptr);
+    SDL_SetRenderTarget(renderer, layer.scaled.get());
+    SDL_RenderTexture(renderer, layer.frame.get(), nullptr, nullptr);
     SDL_SetRenderTarget(renderer, nullptr);
+    return layer.scaled.get();
+}
 
+void Presenter::present(const Framebuffer& fb) {
+    SDL_Renderer* renderer = renderer_.get();
+    const SDL_FRect dst = fit();
+    SDL_Texture* picture = upload(base_, fb, false, dst);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
     SDL_RenderClear(renderer);
-    SDL_RenderTexture(renderer, scaled_.get(), nullptr, &dst);
-    SDL_RenderPresent(renderer);
+    SDL_RenderTexture(renderer, picture, nullptr, &dst);
+    finish_frame();
     picture_ = dst;
     picture_w_ = fb.width;
     picture_h_ = fb.height;
+}
+
+void Presenter::present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over) {
+    SDL_Renderer* renderer = renderer_.get();
+    const SDL_FRect dst = fit();
+    SDL_Texture* below = upload(base_, under, false, dst);
+    SDL_Texture* above = upload(over_, over, true, dst);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
+    SDL_RenderClear(renderer);
+    SDL_RenderTexture(renderer, below, nullptr, &dst);
+
+    // The scene's triangles, from frame coordinates to output pixels, clipped to the 3D viewport.
+    if (!scene.indices.empty()) {
+        const float sx = dst.w / static_cast<float>(under.width);
+        const float sy = dst.h / static_cast<float>(under.height);
+        scene_xy_.resize(scene.vertices.size() * 2);
+        for (std::size_t i = 0; i < scene.vertices.size(); ++i) {
+            scene_xy_[2 * i] = dst.x + scene.vertices[i].x * sx;
+            scene_xy_[2 * i + 1] = dst.y + scene.vertices[i].y * sy;
+        }
+        const auto edge = [](float v) { return static_cast<int>(std::lround(v)); };
+        const int x0 = edge(dst.x + static_cast<float>(scene.view_x0) * sx);
+        const int y0 = edge(dst.y + static_cast<float>(scene.view_y0) * sy);
+        const SDL_Rect clip{x0, y0, edge(dst.x + static_cast<float>(scene.view_x1) * sx) - x0,
+                            edge(dst.y + static_cast<float>(scene.view_y1) * sy) - y0};
+        SDL_SetRenderClipRect(renderer, &clip);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);  // screen-door faces are translucent
+        SDL_RenderGeometryRaw(renderer, nullptr, scene_xy_.data(), static_cast<int>(2 * sizeof(float)),
+                              reinterpret_cast<const SDL_FColor*>(&scene.vertices[0].r),
+                              static_cast<int>(sizeof(enhanced::SceneVertex)), nullptr, 0,
+                              static_cast<int>(scene.vertices.size()), scene.indices.data(),
+                              static_cast<int>(scene.indices.size()), static_cast<int>(sizeof(std::int32_t)));
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderClipRect(renderer, nullptr);
+    }
+
+    SDL_RenderTexture(renderer, above, nullptr, &dst);
+    finish_frame();
+    picture_ = dst;
+    picture_w_ = under.width;
+    picture_h_ = under.height;
 }
 
 void Presenter::present(const ui::Canvas& canvas) {
@@ -145,10 +205,22 @@ void Presenter::present(const ui::Canvas& canvas) {
                            SDL_ALPHA_OPAQUE);
     SDL_RenderClear(renderer);
     SDL_RenderTexture(renderer, canvas_.get(), nullptr, &dst);
-    SDL_RenderPresent(renderer);
+    finish_frame();
     picture_ = dst;
     picture_w_ = canvas.width;
     picture_h_ = canvas.height;
+}
+
+void Presenter::finish_frame() {
+    SDL_Renderer* renderer = renderer_.get();
+    if (!screenshot_.empty()) {
+        SDL_Surface* shot = SDL_RenderReadPixels(renderer, nullptr);
+        if (!shot || !SDL_SaveBMP(shot, screenshot_.c_str()))
+            SDL_LogWarn(SDL_LOG_CATEGORY_RENDER, "Screenshot %s: %s", screenshot_.c_str(), SDL_GetError());
+        SDL_DestroySurface(shot);
+        screenshot_.clear();
+    }
+    SDL_RenderPresent(renderer);
 }
 
 void Presenter::output_size(int& w, int& h) const { SDL_GetCurrentRenderOutputSize(renderer_.get(), &w, &h); }

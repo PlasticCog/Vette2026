@@ -23,13 +23,20 @@
 //                      rotate_local, model_to_world) instead of the original's fixed-point data
 // --dump-routine ADDR  print a routine's variants (parts, primitives, culling)
 // --recheck            extract again at the end of the run and check the result is the same world
+// --scene-compare A:B  build each race frame's Scene (src/enhanced/scene.h) with the original's window and
+//                      LOD (SceneOptions::original_window, the original's routines choosing variants),
+//                      rasterize it at 320x200 and compare it with the original's 3D view
+// --scene-bench A:B    time SceneBuilder::build() on each race frame (whole map and radius 8, for output at
+//                      --scene-scale)
+// --scene-shots T,...  original | radius 8 | whole map PNGs of the 3D view at --scene-scale (default 6)
 //
 // The README's race script reaches the race at ~37 s and drives north on the Great Highway:
 //   vette_world --map --validate 37:50 --key 13:39 --key 17:1C --key 21:1C --key 25:1C --key 30:1C
 //               --key 37:1E --key 37.3:02 --hold 37.5:49:48 --hold 38.5:39.3:4D
 // Right arrow at the course menu (--key 29:4D, before the --key 30:1C) picks course 2 (Vista Point,
-// the Golden Gate), twice (29:4D, 29.4:4D) course 3 (the Bay Bridge). F2/F3 (3C/3D) switch to the chase
-// and helicopter views, W (11) toggles window detail, B (30) buildings, F6 (40) the mirror.
+// the Golden Gate), twice (29:4D, 29.4:4D) course 3 (the Bay Bridge). F1/F2/F3 (3B/3C/3D) look left,
+// ahead and right from the car, F4 (3E) is the helicopter view (handlers 3009:092B/094C/090A/0A49),
+// W (11) toggles window detail, B (30) buildings, F6 (40) the mirror.
 // Whole-map check: --teleport 10000 with any of these scripts (all views must be identical).
 
 #include <algorithm>
@@ -45,7 +52,9 @@
 #include <string>
 #include <vector>
 
+#include "enhanced/scene.h"
 #include "enhanced/world.h"
+#include "enhanced/world_probe.h"
 #include "enhanced/world_reference.h"
 #include "game/options.h"
 #include "host/machine.h"
@@ -66,7 +75,7 @@ constexpr uint16_t kCode = 0x4009, kData = 0x224A;
 constexpr uint32_t kEga[16] = {0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
                                0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF};
 
-// --- PNG (stored deflate) ------------------------------------------------------------------------------
+// --- PNG -----------------------------------------------------------------------------------------------
 uint32_t crc32(const uint8_t* p, size_t n, uint32_t c = 0) {
     static uint32_t table[256];
     static bool init = false;
@@ -81,6 +90,93 @@ uint32_t crc32(const uint8_t* p, size_t n, uint32_t c = 0) {
     c = ~c;
     for (size_t i = 0; i < n; ++i) c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
     return ~c;
+}
+
+// Deflate with LZ77 (hash chains, 32 KB window) and the fixed Huffman codes: small PNGs of flat-shaded
+// pictures without a zlib dependency.
+std::vector<uint8_t> deflate_fixed(const std::vector<uint8_t>& in) {
+    std::vector<uint8_t> out;
+    uint32_t acc = 0;
+    int nbits = 0;
+    const auto bits = [&](uint32_t v, int count) {
+        acc |= v << nbits;
+        nbits += count;
+        while (nbits >= 8) {
+            out.push_back(static_cast<uint8_t>(acc));
+            acc >>= 8;
+            nbits -= 8;
+        }
+    };
+    const auto huff = [&](uint32_t code, int len) {  // Huffman codes go most significant bit first
+        uint32_t r = 0;
+        for (int i = 0; i < len; ++i) r |= ((code >> i) & 1u) << (len - 1 - i);
+        bits(r, len);
+    };
+    const auto lit = [&](int v) {
+        if (v < 144) huff(0x30u + static_cast<uint32_t>(v), 8);
+        else if (v < 256) huff(0x190u + static_cast<uint32_t>(v - 144), 9);
+        else if (v < 280) huff(static_cast<uint32_t>(v - 256), 7);
+        else huff(0xC0u + static_cast<uint32_t>(v - 280), 8);
+    };
+    static constexpr int kLenBase[29] = {3,  4,  5,  6,  7,  8,  9,  10, 11,  13,  15,  17,  19,  23, 27,
+                                         31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
+    static constexpr int kLenExtra[29] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
+    static constexpr int kDistBase[30] = {1,   2,   3,   4,   5,   7,    9,    13,   17,   25,   33,   49,   65,    97,    129,
+                                          193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
+    static constexpr int kDistExtra[30] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
+    bits(1, 1);  // final block
+    bits(1, 2);  // fixed Huffman
+    constexpr int kWindow = 32768, kHash = 1 << 15, kChain = 48;
+    std::vector<int32_t> head(kHash, -1), prev(kWindow, -1);
+    const auto hash3 = [&](size_t i) {
+        return static_cast<int>(((in[i] << 10) ^ (in[i + 1] << 5) ^ in[i + 2]) & (kHash - 1));
+    };
+    size_t i = 0;
+    const size_t n = in.size();
+    const auto insert = [&](size_t at) {
+        if (at + 2 >= n) return;
+        const int h = hash3(at);
+        prev[at % kWindow] = head[static_cast<size_t>(h)];
+        head[static_cast<size_t>(h)] = static_cast<int32_t>(at);
+    };
+    while (i < n) {
+        int best_len = 0, best_dist = 0;
+        if (i + 2 < n) {
+            int cand = head[static_cast<size_t>(hash3(i))];
+            for (int chain = 0; chain < kChain && cand >= 0 && i - static_cast<size_t>(cand) <= kWindow - 1; ++chain) {
+                const size_t c = static_cast<size_t>(cand);
+                int len = 0;
+                while (len < 258 && i + static_cast<size_t>(len) < n && in[c + static_cast<size_t>(len)] == in[i + static_cast<size_t>(len)]) ++len;
+                if (len > best_len) {
+                    best_len = len;
+                    best_dist = static_cast<int>(i - c);
+                    if (len == 258) break;
+                }
+                const int32_t p = prev[c % kWindow];
+                if (p >= cand) break;
+                cand = p;
+            }
+        }
+        if (best_len >= 3) {
+            int lc = 28;
+            while (kLenBase[lc] > best_len) --lc;
+            lit(257 + lc);
+            bits(static_cast<uint32_t>(best_len - kLenBase[lc]), kLenExtra[lc]);
+            int dc = 29;
+            while (kDistBase[dc] > best_dist) --dc;
+            huff(static_cast<uint32_t>(dc), 5);
+            bits(static_cast<uint32_t>(best_dist - kDistBase[dc]), kDistExtra[dc]);
+            for (int k = 0; k < best_len; ++k) insert(i + static_cast<size_t>(k));
+            i += static_cast<size_t>(best_len);
+        } else {
+            lit(in[i]);
+            insert(i);
+            ++i;
+        }
+    }
+    lit(256);
+    if (nbits > 0) out.push_back(static_cast<uint8_t>(acc));
+    return out;
 }
 
 bool write_png(const std::filesystem::path& path, int w, int h, const std::vector<uint32_t>& rgb) {
@@ -101,18 +197,8 @@ bool write_png(const std::filesystem::path& path, int w, int h, const std::vecto
         a = (a + v) % 65521;
         b = (b + a) % 65521;
     }
-    for (size_t off = 0; off < raw.size() || off == 0;) {
-        const size_t n = std::min<size_t>(65535, raw.size() - off);
-        const bool last = off + n >= raw.size();
-        z.push_back(last ? 1 : 0);
-        z.push_back(static_cast<uint8_t>(n));
-        z.push_back(static_cast<uint8_t>(n >> 8));
-        z.push_back(static_cast<uint8_t>(~n));
-        z.push_back(static_cast<uint8_t>(~n >> 8));
-        z.insert(z.end(), raw.begin() + static_cast<std::ptrdiff_t>(off), raw.begin() + static_cast<std::ptrdiff_t>(off + n));
-        off += n;
-        if (last) break;
-    }
+    const std::vector<uint8_t> d = deflate_fixed(raw);
+    z.insert(z.end(), d.begin(), d.end());
     const uint32_t adler = (b << 16) | a;
     for (int s = 24; s >= 0; s -= 8) z.push_back(static_cast<uint8_t>(adler >> s));
 
@@ -611,6 +697,399 @@ private:
     bool ready_ = false, done_ = false;
 };
 
+// --- Scene validation ----------------------------------------------------------------------------------------
+// A software rasterizer for en::Scene (what the Presenter's GPU does): pixel-centre sampling, the top-left
+// rule, scissored to the scene's view rect, painter's order, alpha blending.
+class SceneRaster {
+public:
+    // The scene scaled by `scale` output pixels per race-frame pixel, into `img` (w x h, RGB), whose
+    // origin is the race-frame point (ox, oy).
+    static void draw_rgb(const en::Scene& s, float scale, int w, int h, float ox, float oy, std::vector<uint32_t>& img) {
+        const int cx0 = std::max(0, static_cast<int>(std::lround((s.view_x0 - ox) * scale)));
+        const int cy0 = std::max(0, static_cast<int>(std::lround((s.view_y0 - oy) * scale)));
+        const int cx1 = std::min(w, static_cast<int>(std::lround((s.view_x1 - ox) * scale)));
+        const int cy1 = std::min(h, static_cast<int>(std::lround((s.view_y1 - oy) * scale)));
+        for (size_t t = 0; t + 2 < s.indices.size(); t += 3) {
+            const en::SceneVertex& a = s.vertices[static_cast<size_t>(s.indices[t])];
+            const en::SceneVertex& b = s.vertices[static_cast<size_t>(s.indices[t + 1])];
+            const en::SceneVertex& c = s.vertices[static_cast<size_t>(s.indices[t + 2])];
+            const uint32_t sr = static_cast<uint32_t>(std::lround(a.r * 255)), sg = static_cast<uint32_t>(std::lround(a.g * 255)),
+                           sb = static_cast<uint32_t>(std::lround(a.b * 255));
+            const float alpha = a.a;
+            triangle((a.x - ox) * scale, (a.y - oy) * scale, (b.x - ox) * scale, (b.y - oy) * scale, (c.x - ox) * scale,
+                     (c.y - oy) * scale, cx0, cy0, cx1, cy1, [&](int x, int y) {
+                         uint32_t& d = img[static_cast<size_t>(y * w + x)];
+                         if (alpha >= 1) {
+                             d = sr << 16 | sg << 8 | sb;
+                         } else {
+                             const auto mix = [&](uint32_t dst, uint32_t src) {
+                                 return static_cast<uint32_t>(std::lround(alpha * float(src) + (1 - alpha) * float(dst)));
+                             };
+                             d = mix(d >> 16 & 255, sr) << 16 | mix(d >> 8 & 255, sg) << 8 | mix(d & 255, sb);
+                         }
+                     });
+        }
+    }
+
+    // At 1x: per pixel, the set of EGA colours it may show (a dithered pair; screen-door adds the base
+    // colour to what was under it). `masks` starts as the background's colours.
+    static void draw_masks(const en::Scene& s, std::vector<uint16_t>& masks) {
+        for (size_t t = 0; t + 2 < s.indices.size(); t += 3) {
+            const en::SceneVertex& a = s.vertices[static_cast<size_t>(s.indices[t])];
+            const en::SceneVertex& b = s.vertices[static_cast<size_t>(s.indices[t + 1])];
+            const en::SceneVertex& c = s.vertices[static_cast<size_t>(s.indices[t + 2])];
+            const uint16_t m = colour_mask(a.r, a.g, a.b);
+            const bool door = a.a < 1;
+            triangle(a.x, a.y, b.x, b.y, c.x, c.y, s.view_x0, s.view_y0, s.view_x1, s.view_y1, [&](int x, int y) {
+                uint16_t& d = masks[static_cast<size_t>(y * 320 + x)];
+                d = door ? static_cast<uint16_t>(d | m) : m;
+            });
+        }
+    }
+
+    static uint16_t colour_mask(float r, float g, float b) {
+        uint16_t m = 0;
+        for (int raw = 0; raw < 256; ++raw) {
+            en::Colour c;
+            c.raw = static_cast<uint8_t>(raw);
+            const en::SceneColour sc = en::scene_colour(c);
+            if (sc.r == r && sc.g == g && sc.b == b) {
+                m = static_cast<uint16_t>(m | (1u << c.base()) | (c.dithered() ? 1u << c.second() : 0u));
+            }
+        }
+        return m;
+    }
+
+private:
+    template <typename Plot>
+    static void triangle(float ax, float ay, float bx, float by, float cx, float cy, int x0, int y0, int x1, int y1, Plot plot) {
+        const auto edge = [](float px, float py, float qx, float qy, float rx, float ry) {
+            return (qx - px) * (ry - py) - (qy - py) * (rx - px);
+        };
+        float area = edge(ax, ay, bx, by, cx, cy);
+        if (area == 0) return;
+        if (area < 0) {
+            std::swap(bx, cx);
+            std::swap(by, cy);
+        }
+        const int minx = std::max(x0, static_cast<int>(std::floor(std::min({ax, bx, cx}))));
+        const int maxx = std::min(x1 - 1, static_cast<int>(std::ceil(std::max({ax, bx, cx}))));
+        const int miny = std::max(y0, static_cast<int>(std::floor(std::min({ay, by, cy}))));
+        const int maxy = std::min(y1 - 1, static_cast<int>(std::ceil(std::max({ay, by, cy}))));
+        // Top-left rule for triangles with a positive edge function (clockwise on a y-down screen).
+        const auto top_left = [](float px, float py, float qx, float qy) { return qy < py || (qy == py && qx > px); };
+        const bool t0 = top_left(bx, by, cx, cy), t1 = top_left(cx, cy, ax, ay), t2 = top_left(ax, ay, bx, by);
+        for (int y = miny; y <= maxy; ++y) {
+            const float py = float(y) + 0.5f;
+            for (int x = minx; x <= maxx; ++x) {
+                const float px = float(x) + 0.5f;
+                const float w0 = edge(bx, by, cx, cy, px, py);
+                const float w1 = edge(cx, cy, ax, ay, px, py);
+                const float w2 = edge(ax, ay, bx, by, px, py);
+                if ((w0 > 0 || (w0 == 0 && t0)) && (w1 > 0 || (w1 == 0 && t1)) && (w2 > 0 || (w2 == 0 && t2))) plot(x, y);
+            }
+        }
+    }
+};
+
+// The hook of the comparison mode: picks each object's variant by running the original routine on a
+// copy of the frame, in draw order, as world_reference.h does.
+class OriginalChooser final : public en::SceneHook {
+public:
+    explicit OriginalChooser(const World& w) : world_(w) {}
+    void frame(const uint8_t* ram) {
+        if (!tracer_) {
+            tracer_ = std::make_unique<en::Tracer>(ram);
+        } else {
+            tracer_->load(ram);
+        }
+    }
+    int unmatched = 0;
+
+    const en::Variant* choose(const Object& o, std::vector<std::array<int16_t, 3>>& angles) override {
+        en::Tracer& t = *tracer_;
+        for (int i = 0; i < 3; ++i) {
+            t.wr16(kData, static_cast<uint16_t>(0x3220 + 2 * i), static_cast<uint16_t>(o.position[static_cast<size_t>(i)]));
+        }
+        if (o.sortable) t.wr16(kCode, 0x259E, o.sort_key);
+        t.wr8(kData, 0x35C3, o.facing);
+        t.wr8(kData, 0x35C4, o.own_cell ? 0xFF : 0);
+        t.run(o.routine, o.position, trace_);
+        const en::Routine* r = world_.routine(o.routine);
+        if (!r) return nullptr;
+        if (r->compound && trace_.events.empty()) return nullptr;  // drawn already this frame (DS:2AC0)
+        const uint64_t sig = trace_.signature();
+        for (const en::Variant& v : r->variants) {
+            if (v.signature != sig) continue;
+            for (const en::TraceEvent& e : trace_.events) {
+                if (e.op == en::TraceEvent::Op::Plain) angles.push_back(e.angles);
+            }
+            return &v;
+        }
+        ++unmatched;
+        return nullptr;
+    }
+
+private:
+    const World& world_;
+    std::unique_ptr<en::Tracer> tracer_;
+    en::Trace trace_;
+};
+
+// --scene-compare, --scene-shots, --scene-bench: SceneBuilder against the original, frame by frame.
+struct SceneCheck {
+    Machine& machine;
+    const World& world;
+    std::filesystem::path out_dir;
+    std::string label = "scene";
+    double from = -1, to = -1;           // compare window
+    std::vector<double> shots;           // emulated seconds
+    double bench_from = -1, bench_to = -1;
+    int scale = 6;
+
+    en::SceneBuilder builder{world};
+    OriginalChooser chooser{world};
+    en::Scene scene;
+    std::vector<uint8_t> ram;
+    Ega::Frame pre, post;
+    bool armed = false;
+    size_t next_shot = 0;
+    std::ofstream log;
+
+    struct Totals {
+        int frames = 0, identical = 0;
+        uint64_t pixels = 0, differing = 0, structural = 0;
+        double worst = 0;
+        int worst_frame = -1;
+        int unmatched = 0;
+    } cmp;
+    struct Bench {
+        int frames = 0;
+        double ms_map = 0, max_map = 0, ms_r8 = 0, max_r8 = 0;
+        uint64_t tris_map = 0, verts_map = 0, tris_r8 = 0, lines_map = 0, objects_map = 0, cells_map = 0, vehicles_map = 0;
+        int max_tris_map = 0;
+    } bench;
+
+    SceneCheck(Machine& m, const World& w) : machine(m), world(w) {}
+
+    double now() const { return static_cast<double>(machine.emulated_ns()) / 1e9; }
+    uint16_t back_page() {
+        const uint16_t seg = machine.memory().read16(Cpu::linear(kCode, 0x0011));
+        return static_cast<uint16_t>((seg - 0xA000) * 16);
+    }
+    bool wanted() const {
+        const double t = now();
+        return (t >= from && t <= to) || (t >= bench_from && t <= bench_to) || (next_shot < shots.size() && t >= shots[next_shot]);
+    }
+
+    void install() {
+        Cpu& cpu = machine.cpu();
+        cpu.add_watch(Cpu::linear(kCode, 0x30C6), [this](Cpu&) {
+            armed = false;
+            if (!wanted() || machine.memory().read8(Cpu::linear(kData, 0x18)) != 0) return;
+            ram.assign(machine.memory().ram(), machine.memory().ram() + vette::host::Memory::kSize);
+            machine.ega().render_page(back_page(), pre);
+            armed = true;
+        });
+        cpu.add_watch(Cpu::linear(kCode, 0x0371), [this](Cpu&) {
+            if (!armed) return;
+            armed = false;
+            machine.ega().render_page(back_page(), post);
+            const double t = now();
+            if (t >= from && t <= to) compare();
+            if (t >= bench_from && t <= bench_to) time_builds();
+            if (next_shot < shots.size() && t >= shots[next_shot]) {
+                shot(next_shot);
+                while (next_shot < shots.size() && shots[next_shot] <= t) ++next_shot;
+            }
+        });
+    }
+
+    void compare() {
+        if (pre.width != 320) return;
+        en::SceneOptions o;
+        o.original_window = true;
+        o.hook = &chooser;
+        o.line_width = 1;
+        o.min_line_length = 0;
+        chooser.frame(ram.data());
+        const int unmatched_before = chooser.unmatched;
+        builder.build(ram.data(), o, scene);
+        std::vector<uint16_t> masks(320 * 200);
+        for (size_t i = 0; i < masks.size(); ++i) masks[i] = static_cast<uint16_t>(1u << (pre.pixels[i] & 15));
+        SceneRaster::draw_masks(scene, masks);
+        uint64_t diff = 0, structural = 0, total = 0;
+        std::vector<uint8_t> bad(320 * 200, 0);
+        for (int y = scene.view_y0; y < scene.view_y1; ++y) {
+            for (int x = scene.view_x0; x < scene.view_x1; ++x) {
+                const size_t i = static_cast<size_t>(y * 320 + x);
+                ++total;
+                const uint8_t p = post.pixels[i] & 15;
+                if (masks[i] & (1u << p)) continue;
+                ++diff;
+                bad[i] = 1;
+                // Structural: nothing within a pixel explains it, either way.
+                bool near_ok = false;
+                for (int dy = -1; dy <= 1 && !near_ok; ++dy) {
+                    for (int dx = -1; dx <= 1 && !near_ok; ++dx) {
+                        const int xx = x + dx, yy = y + dy;
+                        if (xx < scene.view_x0 || yy < scene.view_y0 || xx >= scene.view_x1 || yy >= scene.view_y1) continue;
+                        const size_t j = static_cast<size_t>(yy * 320 + xx);
+                        near_ok = (masks[j] & (1u << p)) || (masks[i] & (1u << (post.pixels[j] & 15)));
+                    }
+                }
+                if (!near_ok) {
+                    ++structural;
+                    bad[i] = 2;
+                }
+            }
+        }
+        const int frame = cmp.frames++;
+        cmp.pixels += total;
+        cmp.differing += diff;
+        cmp.structural += structural;
+        cmp.identical += diff == 0 ? 1 : 0;
+        cmp.unmatched += chooser.unmatched - unmatched_before;
+        const double pct = total ? 100.0 * static_cast<double>(diff) / static_cast<double>(total) : 0;
+        const double spct = total ? 100.0 * static_cast<double>(structural) / static_cast<double>(total) : 0;
+        if (spct > cmp.worst) {
+            cmp.worst = spct;
+            cmp.worst_frame = frame;
+        }
+        if (log) {
+            char buf[256];
+            std::snprintf(buf, sizeof buf,
+                          "compare %4d t=%7.3f cam %d %d %d yaw %d pitch %d roll %d triangles %5d  differ %5llu (%.2f%%)  "
+                          "structural %4llu (%.3f%%)\n",
+                          frame, now(), ram_s16(0x2C71), ram_s16(0x2C73), ram_s16(0x2C75), ram_s16(0x2C77), ram_s16(0x2C79),
+                          ram_s16(0x2C7B), scene.stats.triangles, static_cast<unsigned long long>(diff), pct,
+                          static_cast<unsigned long long>(structural), spct);
+            log << buf;
+        }
+        if (spct > 0.25 || frame % 50 == 0) {
+            // Original | scene (1x) | differences: red structural, yellow edge.
+            std::vector<uint32_t> mine(320 * 200);
+            for (size_t i = 0; i < mine.size(); ++i) mine[i] = kEga[pre.pixels[i] & 15];
+            SceneRaster::draw_rgb(scene, 1, 320, 200, 0, 0, mine);
+            const int x0 = scene.view_x0, y0 = scene.view_y0, w = scene.view_x1 - x0, h = scene.view_y1 - y0, s = 2;
+            const int W = 3 * w * s + 8, H = h * s;
+            std::vector<uint32_t> img(static_cast<size_t>(W * H), 0x202020);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const size_t i = static_cast<size_t>((y + y0) * 320 + x + x0);
+                    const uint32_t a = kEga[post.pixels[i] & 15];
+                    const uint32_t g = ((a >> 16 & 255) + (a >> 8 & 255) + (a & 255)) / 6;
+                    const uint32_t d = bad[i] == 2 ? 0xFF2020 : bad[i] == 1 ? 0xE0C020 : (g << 16 | g << 8 | g);
+                    for (int dy = 0; dy < s; ++dy) {
+                        for (int dx = 0; dx < s; ++dx) {
+                            const size_t row = static_cast<size_t>((y * s + dy) * W);
+                            img[row + static_cast<size_t>(x * s + dx)] = a;
+                            img[row + static_cast<size_t>(w * s + 4 + x * s + dx)] = mine[i];
+                            img[row + static_cast<size_t>(2 * (w * s + 4) + x * s + dx)] = d;
+                        }
+                    }
+                }
+            }
+            char name[96];
+            std::snprintf(name, sizeof name, "%s_compare%04d.png", label.c_str(), frame);
+            write_png(out_dir / name, W, H, img);
+        }
+    }
+
+    void time_builds() {
+        en::SceneOptions o;
+        o.pixel_w = o.pixel_h = static_cast<float>(scale);  // as drawn at the PNGs' resolution
+        builder.build(ram.data(), o, scene);  // warm
+        double best = 1e9;
+        for (int k = 0; k < 5; ++k) {
+            builder.build(ram.data(), o, scene);
+            best = std::min(best, scene.stats.milliseconds);
+        }
+        ++bench.frames;
+        bench.ms_map += best;
+        bench.max_map = std::max(bench.max_map, best);
+        bench.tris_map += static_cast<uint64_t>(scene.stats.triangles);
+        bench.max_tris_map = std::max(bench.max_tris_map, scene.stats.triangles);
+        bench.verts_map += scene.vertices.size();
+        bench.lines_map += static_cast<uint64_t>(scene.stats.lines);
+        bench.objects_map += static_cast<uint64_t>(scene.stats.objects);
+        bench.cells_map += static_cast<uint64_t>(scene.stats.cells);
+        bench.vehicles_map += static_cast<uint64_t>(scene.stats.vehicles);
+        o.radius = 8;
+        best = 1e9;
+        for (int k = 0; k < 5; ++k) {
+            builder.build(ram.data(), o, scene);
+            best = std::min(best, scene.stats.milliseconds);
+        }
+        bench.ms_r8 += best;
+        bench.max_r8 = std::max(bench.max_r8, best);
+        bench.tris_r8 += static_cast<uint64_t>(scene.stats.triangles);
+    }
+
+    // Original | radius 8 | whole map, each the 3D view at `scale` x.
+    void shot(size_t index) {
+        if (pre.width != 320) return;
+        const int x0 = ram_s16(0x315E), y0 = ram_s16(0x315A), x1 = ram_s16(0x3160) + 1, y1 = ram_s16(0x315C) + 1;
+        const int w = (x1 - x0) * scale, h = (y1 - y0) * scale;
+        std::vector<uint32_t> img(static_cast<size_t>(w) * static_cast<size_t>(h) * 3, 0);
+        const auto upscale = [&](const Ega::Frame& f, size_t at) {
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    img[at + static_cast<size_t>(y * w + x)] = kEga[f.pixels[static_cast<size_t>((y0 + y / scale) * 320 + x0 + x / scale)] & 15];
+                }
+            }
+        };
+        upscale(post, 0);
+        const size_t plane = static_cast<size_t>(w) * static_cast<size_t>(h);
+        int tris[2] = {0, 0};
+        double ms[2] = {0, 0};
+        for (int k = 0; k < 2; ++k) {
+            upscale(pre, plane * static_cast<size_t>(k + 1));
+            en::SceneOptions o;
+            o.radius = k == 0 ? 8 : en::kMapCells;
+            o.pixel_w = o.pixel_h = static_cast<float>(scale);
+            builder.build(ram.data(), o, scene);
+            tris[k] = scene.stats.triangles;
+            ms[k] = scene.stats.milliseconds;
+            std::vector<uint32_t> part(img.begin() + static_cast<std::ptrdiff_t>(plane * static_cast<size_t>(k + 1)),
+                                       img.begin() + static_cast<std::ptrdiff_t>(plane * static_cast<size_t>(k + 2)));
+            SceneRaster::draw_rgb(scene, static_cast<float>(scale), w, h, static_cast<float>(x0), static_cast<float>(y0), part);
+            std::copy(part.begin(), part.end(), img.begin() + static_cast<std::ptrdiff_t>(plane * static_cast<size_t>(k + 1)));
+        }
+        char name[96];
+        std::snprintf(name, sizeof name, "%s_shot%zu_t%.1f.png", label.c_str(), index, now());
+        write_png(out_dir / name, w, h * 3, img);
+        std::printf("scene shot %s: radius 8 %d triangles %.2f ms, whole map %d triangles %.2f ms\n", name, tris[0], ms[0],
+                    tris[1], ms[1]);
+    }
+
+    int ram_s16(uint16_t off) const {
+        const size_t a = (static_cast<size_t>(kData) << 4) + off;
+        return static_cast<int16_t>(ram[a] | ram[a + 1] << 8);
+    }
+
+    void report() {
+        if (cmp.frames) {
+            std::printf("scene compare %s: %d frames (original window, original LOD), %d identical, %.3f%% of view pixels "
+                        "differ, %.4f%% structurally (no match within 1 px; worst frame %d: %.3f%%), %d objects without "
+                        "a matching variant\n",
+                        label.c_str(), cmp.frames, cmp.identical,
+                        100.0 * static_cast<double>(cmp.differing) / static_cast<double>(std::max<uint64_t>(cmp.pixels, 1)),
+                        100.0 * static_cast<double>(cmp.structural) / static_cast<double>(std::max<uint64_t>(cmp.pixels, 1)),
+                        cmp.worst_frame, cmp.worst, cmp.unmatched);
+        }
+        if (bench.frames) {
+            const double n = bench.frames;
+            std::printf("scene bench %s: %d frames; whole map %.2f ms avg, %.2f max, %.0f triangles avg (max %d), %.0f vertices, "
+                        "%.0f line quads, %.0f objects, %.0f cells, %.1f vehicles; radius 8 %.2f ms avg, %.2f max, %.0f triangles\n",
+                        label.c_str(), bench.frames, bench.ms_map / n, bench.max_map, double(bench.tris_map) / n,
+                        bench.max_tris_map, double(bench.verts_map) / n, double(bench.lines_map) / n,
+                        double(bench.objects_map) / n, double(bench.cells_map) / n, double(bench.vehicles_map) / n,
+                        bench.ms_r8 / n, bench.max_r8, double(bench.tris_r8) / n);
+        }
+    }
+};
+
 // Whether two extractions agree (the world must not depend on when it is extracted).
 std::string compare_worlds(const World& a, const World& b) {
     if (a.big_rows != b.big_rows || a.big_cols != b.big_cols) return "map size";
@@ -677,6 +1156,9 @@ int main(int argc, char* argv[]) {
     uint32_t seed = 1989;
     bool recheck = false;
     std::string label = "drive";
+    double scene_from = -1, scene_to = -1, bench_from = -1, bench_to = -1;
+    std::vector<double> scene_shots;
+    int scene_scale = 6;
     struct KeyEvent {
         uint64_t at_ms;
         uint8_t scancode;
@@ -705,6 +1187,22 @@ int main(int argc, char* argv[]) {
             png_every = std::atoi(argv[++i]);
         } else if (a == "--png-over" && v) {
             png_over = std::atof(argv[++i]);
+        } else if ((a == "--scene-compare" || a == "--scene-bench") && v) {
+            const std::string r = argv[++i];
+            const size_t c = r.find(':');
+            if (c == std::string::npos) return usage();
+            (a == "--scene-compare" ? scene_from : bench_from) = std::atof(r.substr(0, c).c_str());
+            (a == "--scene-compare" ? scene_to : bench_to) = std::atof(r.substr(c + 1).c_str());
+        } else if (a == "--scene-shots" && v) {
+            std::string r = argv[++i];
+            for (size_t p0 = 0; p0 <= r.size();) {
+                const size_t p1 = std::min(r.find(',', p0), r.size());
+                scene_shots.push_back(std::atof(r.substr(p0, p1 - p0).c_str()));
+                p0 = p1 + 1;
+            }
+            std::sort(scene_shots.begin(), scene_shots.end());
+        } else if (a == "--scene-scale" && v) {
+            scene_scale = std::max(1, std::atoi(argv[++i]));
         } else if (a == "--recheck") {
             recheck = true;
         } else if (a == "--float") {
@@ -878,7 +1376,8 @@ int main(int argc, char* argv[]) {
         std::printf("map_topdown.png written (%.0f ms)\n",
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
-    if (val_from < 0 && teleports == 0) {
+    const bool scene_mode = scene_from >= 0 || bench_from >= 0 || !scene_shots.empty();
+    if (val_from < 0 && teleports == 0 && !scene_mode) {
         return 0;
     }
 
@@ -913,6 +1412,20 @@ int main(int argc, char* argv[]) {
         for (const auto& n : t.notes) std::printf("  note: %s\n", n.c_str());
     };
 
+    SceneCheck sc(machine, world);
+    sc.out_dir = out_dir;
+    sc.label = label;
+    sc.from = scene_from;
+    sc.to = scene_to;
+    sc.bench_from = bench_from;
+    sc.bench_to = bench_to;
+    sc.shots = scene_shots;
+    sc.scale = scene_scale;
+    if (scene_mode) {
+        sc.log.open(out_dir / (label + "_scene.txt"));
+        sc.install();
+    }
+
     Validator val(machine, world);
     setup(val, label);
     val.from = val_from;
@@ -932,7 +1445,8 @@ int main(int argc, char* argv[]) {
         });
     }
 
-    const double end_s = std::max(val_to, teleports > 0 ? teleport_at : 0.0) + 0.5;
+    double end_s = std::max(val_to, teleports > 0 ? teleport_at : 0.0) + 0.5;
+    end_s = std::max({end_s, scene_to + 0.5, bench_to + 0.5, scene_shots.empty() ? 0.0 : scene_shots.back() + 1.0});
     const uint64_t end_ms = static_cast<uint64_t>((seconds > 0 ? seconds : end_s) * 1000);
     size_t next = 0;
     for (; ms < end_ms && !machine.stopped() && !(teleports > 0 && val_from < 0 && teleporter.ready()); ++ms) {
@@ -941,6 +1455,7 @@ int main(int argc, char* argv[]) {
     }
     val.log.close();
     if (val_from >= 0) summary(val, "validation", "frames");
+    if (scene_mode) sc.report();
     if (recheck) {
         World again;
         if (!en::extract_world(machine, again, error)) {

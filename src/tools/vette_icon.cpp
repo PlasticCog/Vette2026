@@ -1,12 +1,15 @@
-// Writes the program icon (src/ui/app_icon.cpp) as a Windows .ico, which the build compiles into
-// vette2026.exe's resources. Every size is a 32-bit image with an all-opaque mask.
-// Usage: vette_icon <out.ico>
+// Writes the program icon (src/ui/app_icon.cpp) for the build: a Windows .ico, compiled into
+// vette2026.exe's resources (every size a 32-bit image with an all-opaque mask), or a macOS .icns for
+// the app bundle (PNG images). The extension picks the format.
+// Usage: vette_icon <out.ico | out.icns>
 
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <string_view>
 #include <vector>
 
+#include "assets/png.h"
 #include "ui/app_icon.h"
 
 namespace {
@@ -47,13 +50,7 @@ std::vector<std::uint8_t> icon_image(int size) {
     return out;
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::fprintf(stderr, "Usage: vette_icon <out.ico>\n");
-        return 2;
-    }
+std::vector<std::uint8_t> ico() {
     std::vector<std::vector<std::uint8_t>> images;
     for (const int size : kSizes)
         images.push_back(icon_image(size));
@@ -78,9 +75,49 @@ int main(int argc, char** argv) {
     }
     for (const auto& image : images)
         ico.insert(ico.end(), image.begin(), image.end());
+    return ico;
+}
 
+// The .icns container: big-endian 'icns' + length, then (type, length, PNG) per image. The "@2x"
+// types are the next size up, for retina displays.
+std::vector<std::uint8_t> icns() {
+    struct Entry {
+        const char* type;
+        int size;
+    };
+    constexpr Entry kEntries[] = {{"icp4", 16},  {"icp5", 32},  {"ic11", 32},  {"icp6", 64},
+                                  {"ic12", 64},  {"ic07", 128}, {"ic08", 256}, {"ic13", 256},
+                                  {"ic09", 512}, {"ic14", 512}, {"ic10", 1024}};
+    const auto be32 = [](std::vector<std::uint8_t>& out, std::uint32_t v) {
+        for (int s = 24; s >= 0; s -= 8)
+            out.push_back(static_cast<std::uint8_t>(v >> s));
+    };
+    std::vector<std::uint8_t> body;
+    for (const Entry& e : kEntries) {
+        const std::vector<std::uint32_t> pixels = vette::ui::app_icon(e.size);
+        const std::vector<std::uint8_t> png = vette::assets::encode_png(e.size, e.size, pixels.data(), true);
+        body.insert(body.end(), e.type, e.type + 4);
+        be32(body, static_cast<std::uint32_t>(png.size() + 8));
+        body.insert(body.end(), png.begin(), png.end());
+    }
+    std::vector<std::uint8_t> out = {'i', 'c', 'n', 's'};
+    be32(out, static_cast<std::uint32_t>(body.size() + 8));
+    out.insert(out.end(), body.begin(), body.end());
+    return out;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        std::fprintf(stderr, "Usage: vette_icon <out.ico | out.icns>\n");
+        return 2;
+    }
+    const std::string_view path = argv[1];
+    const bool mac = path.size() >= 5 && path.substr(path.size() - 5) == ".icns";
+    const std::vector<std::uint8_t> data = mac ? icns() : ico();
     std::ofstream file(argv[1], std::ios::binary);
-    file.write(reinterpret_cast<const char*>(ico.data()), static_cast<std::streamsize>(ico.size()));
+    file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
     if (!file) {
         std::fprintf(stderr, "vette_icon: couldn't write %s\n", argv[1]);
         return 1;

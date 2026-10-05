@@ -34,6 +34,17 @@ cmake --preset linux
 cmake --build --preset linux-release
 ```
 
+**macOS** (Xcode command line tools, CMake and Ninja; builds `VETTE! 2026.app`):
+```
+cmake --preset macos
+cmake --build --preset macos-release
+```
+
+**Downloads.** Every push is built for Windows, Linux and macOS by GitHub Actions (`.github/workflows/`),
+and tagged versions are published on the Releases page. Put the `Game` folder next to the program (or
+next to `VETTE! 2026.app`), or choose its location in the launch menu. The macOS app isn't notarized:
+the first time, right-click it and choose Open.
+
 Run with `--game <dir>` to point at a different game folder. `--dump-frame out.bmp` renders the title
 screen to a file without opening a window, as a quick check that your game files are found.
 

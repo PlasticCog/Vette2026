@@ -25,12 +25,24 @@
         "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
       },
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+    {
+      "name": "macos",
+      "displayName": "macOS (Apple Clang, Ninja)",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/macos",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
     }
   ],
   "buildPresets": [
     { "name": "windows-msvc-debug", "configurePreset": "windows-msvc", "configuration": "Debug" },
     { "name": "windows-msvc-release", "configurePreset": "windows-msvc", "configuration": "Release" },
     { "name": "linux-debug", "configurePreset": "linux", "configuration": "Debug" },
-    { "name": "linux-release", "configurePreset": "linux", "configuration": "Release" }
+    { "name": "linux-release", "configurePreset": "linux", "configuration": "Release" },
+    { "name": "macos-debug", "configurePreset": "macos", "configuration": "Debug" },
+    { "name": "macos-release", "configurePreset": "macos", "configuration": "Release" }
   ]
 }

@@ -1,0 +1,133 @@
+# Builds VETTE! 2026 for Windows, Linux and macOS, runs the tests, and packages each build.
+# A tag v* also collects the packages into a draft GitHub release (published by hand).
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-2022
+          - name: linux-x64
+            os: ubuntu-22.04  # an older glibc, so the binary runs on more distributions
+          - name: macos-universal
+            os: macos-14
+    env:
+      BUILD: build/release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package name
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="${GITHUB_SHA::7}"; fi
+          echo "PACKAGE=vette2026-${version}-${{ matrix.name }}" >> "$GITHUB_ENV"
+
+      - name: Linux build dependencies (SDL3)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev \
+            libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libdrm-dev \
+            libgbm-dev libegl1-mesa-dev libgl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev
+
+      - name: macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: bash
+        run: |
+          extra=()
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            extra+=("-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc")
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            extra+=("-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0")
+          fi
+          # SDL3 is always built from source and linked statically: the packages need nothing installed.
+          cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_DISABLE_FIND_PACKAGE_SDL3=ON "${extra[@]}"
+
+      - name: Build
+        run: cmake --build ${{ env.BUILD }} --parallel
+
+      - name: Test
+        shell: bash
+        run: |
+          # Tests that need the original game files skip themselves; none are in the repository.
+          "$BUILD/vette_tests"
+
+      - name: Package
+        shell: bash
+        run: |
+          dist="dist/$PACKAGE"
+          mkdir -p "$dist/Game" "$dist/licenses"
+          cp README.md "$dist/"
+          cp Game/README.md "$dist/Game/"
+          cp "$BUILD/_deps/ymfm-src/LICENSE" "$dist/licenses/ymfm.txt"
+          cp "$BUILD/_deps/sdl3-src/LICENSE.txt" "$dist/licenses/SDL3.txt"
+          cp THIRD_PARTY_NOTICES.md "$dist/licenses/"
+          case "$RUNNER_OS" in
+            Windows) cp "$BUILD/vette2026.exe" "$dist/" ;;
+            Linux)   cp "$BUILD/vette2026" "$dist/" && chmod +x "$dist/vette2026" ;;
+            macOS)
+              cp -R "$BUILD/VETTE! 2026.app" "$dist/"
+              # Ad-hoc signature over the finished bundle (arm64 code must be signed to run at all).
+              codesign --force --deep --sign - "$dist/VETTE! 2026.app" ;;
+          esac
+          for tool in vette_sfx; do
+            for f in "$BUILD/$tool" "$BUILD/$tool.exe"; do [[ -f "$f" ]] && cp "$f" "$dist/"; done
+          done
+          cd dist
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            tar -czf "$PACKAGE.tar.gz" "$PACKAGE"
+          elif [[ "$RUNNER_OS" == "Windows" ]]; then
+            7z a -tzip "$PACKAGE.zip" "$PACKAGE" > /dev/null
+          else
+            ditto -c -k --keepParent "$PACKAGE" "$PACKAGE.zip"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: packages/*
+          generate_release_notes: true

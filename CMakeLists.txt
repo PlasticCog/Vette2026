@@ -72,6 +72,7 @@ file(GLOB YMFM_SOURCES ${ymfm_SOURCE_DIR}/src/*.cpp)
 add_library(ymfm STATIC ${YMFM_SOURCES})
 target_include_directories(ymfm SYSTEM PUBLIC ${ymfm_SOURCE_DIR}/src)
 set_target_properties(ymfm PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_options(ymfm PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/W0,-w>)  # third-party
 
 file(GLOB VETTE_SOUND_SOURCES CONFIGURE_DEPENDS src/sound/*.cpp)
 add_library(vette_sound STATIC ${VETTE_SOUND_SOURCES})
@@ -91,7 +92,7 @@ vette_tool(vette_run vette_game vette_core)
 # Differential fuzzer: calls each native port with random inputs under Verify mode.
 vette_tool(vette_fuzz vette_game)
 # World extraction tool: dumps the Enhanced world model and validates it against the original.
-vette_tool(vette_world vette_enhanced)
+vette_tool(vette_world vette_enhanced vette_core)
 # The other versions' files: Mac resources and sounds, PC-98 disk files and FM sound, art.
 vette_tool(vette_mac vette_sound)
 vette_tool(vette_pc98 vette_sound)
@@ -130,12 +131,31 @@ if(VETTE_BUILD_GAME)
         src/ui/canvas.cpp
         src/ui/launcher.cpp
     )
-    # Windows: the icon goes into the exe's resources (Explorer, taskbar, and SDL uses it for the window).
-    # It's written at build time from src/ui/app_icon.cpp, so there's one copy of the picture.
-    if(WIN32 AND NOT CMAKE_CROSSCOMPILING)
+    # The program icon is written at build time from src/ui/app_icon.cpp, so there's one copy of the
+    # picture: Windows compiles it into the exe's resources (Explorer, taskbar, and SDL uses it for the
+    # window); macOS puts it in the app bundle.
+    if((WIN32 OR APPLE) AND NOT CMAKE_CROSSCOMPILING)
         add_executable(vette_icon src/tools/vette_icon.cpp src/ui/app_icon.cpp)
         target_include_directories(vette_icon PRIVATE src)
+        target_link_libraries(vette_icon PRIVATE vette_core)
         vette_warnings(vette_icon)
+    endif()
+    if(APPLE AND NOT CMAKE_CROSSCOMPILING)
+        set(VETTE_ICNS ${CMAKE_CURRENT_BINARY_DIR}/vette2026.icns)
+        add_custom_command(OUTPUT ${VETTE_ICNS} COMMAND vette_icon ${VETTE_ICNS} DEPENDS vette_icon VERBATIM
+                           COMMENT "Writing vette2026.icns")
+        target_sources(vette2026 PRIVATE ${VETTE_ICNS})
+        set_source_files_properties(${VETTE_ICNS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+        set_target_properties(vette2026 PROPERTIES
+            MACOSX_BUNDLE TRUE
+            OUTPUT_NAME "VETTE! 2026"
+            MACOSX_BUNDLE_BUNDLE_NAME "VETTE! 2026"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.plasticcog.vette2026"
+            MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+            MACOSX_BUNDLE_ICON_FILE vette2026.icns)
+    endif()
+    if(WIN32 AND NOT CMAKE_CROSSCOMPILING)
         set(VETTE_ICO ${CMAKE_CURRENT_BINARY_DIR}/vette2026.ico)
         set(VETTE_RC ${CMAKE_CURRENT_BINARY_DIR}/vette2026.rc)
         add_custom_command(OUTPUT ${VETTE_ICO} COMMAND vette_icon ${VETTE_ICO} DEPENDS vette_icon VERBATIM

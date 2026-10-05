@@ -20,6 +20,7 @@
 // Environment: VETTE_SST_DIR overrides the data directory; VETTE_SST_ONLY=00,F6.6 limits the run to
 // those files; VETTE_SST_SHOW=n prints up to n failure details per file (default 3).
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -105,9 +106,9 @@ bool load_file(const fs::path& path, std::vector<SstTest>& tests, uint16_t& flag
     if (!f) return false;
     const std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     Reader r(data);
-    char magic[4];
-    for (char& ch : magic) ch = static_cast<char>(r.get<uint8_t>());
-    if (std::memcmp(magic, "VSS1", 4) != 0) return false;
+    std::array<uint8_t, 4> magic{};
+    for (size_t k = 0; k < magic.size(); ++k) magic[k] = r.get<uint8_t>();
+    if (magic != std::array<uint8_t, 4>{'V', 'S', 'S', '1'}) return false;
     const uint32_t count = r.get<uint32_t>();
     flags_mask = r.get<uint16_t>();
     r.get<uint8_t>();  // status

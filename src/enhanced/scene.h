@@ -43,6 +43,7 @@ struct Scene {
         int lines = 0;         // line segments (2 triangles each, included in `triangles`)
         int lines_dropped = 0; // shorter than SceneOptions::min_line_length
         int models = 0;        // segment-245A model instances (static and vehicles)
+        int slices = 0;        // freeway road slices drawn (highway mode)
     } stats;
 
     void clear() {
@@ -59,10 +60,17 @@ struct SceneOptions {
     int radius = kMapCells;
     // Output pixels per race-frame pixel, horizontally and vertically (for line widths).
     float pixel_w = 1, pixel_h = 1;
-    float line_width = 1.5f;  // output pixels, the thinnest a line gets
-    // Lines (lane markings, outlines) are this wide in world units, in perspective: one race-frame
-    // pixel at most, like the original's, tapering to line_width at range.
-    float line_world_width = 4;
+    // Lines (outlines, barrier edges, posts, cables, model polylines) are drawn on screen, line_world_width
+    // world units wide in perspective, at most one race-frame pixel (the original's weight close up) and
+    // at least line_width output pixels or a quarter of a race-frame pixel, whichever is more.
+    float line_width = 1.5f;
+    float line_world_width = 2.5f;
+    // Markings painted on the ground (the horizontal lines at the ground level of the ground layer's
+    // objects, of the bridges' pieces and of the freeway's slices: lane dashes, centre and kerb lines,
+    // crossings) are flat stripes this wide in world units (1 unit is about 3 inches), lying on the road
+    // and foreshortened with it. Where a stripe projects thinner than an output pixel it is drawn as a
+    // line as well.
+    float marking_width = 1.25f;
 
     // Added by the SceneBuilder implementation:
     // Line segments that project shorter than this (output pixels) are left out: at long range the
@@ -80,6 +88,12 @@ struct SceneOptions {
     // let `hook` pick each object's variant the way the original's routine does.
     bool original_window = false;
     SceneHook* hook = nullptr;
+
+    // The rear-view mirror (draw_mirror_view 3009:0666) instead of the main view, from the same frame:
+    // the camera turned round (yaw +180, or +-95 while looking sideways, by DS:2B87), pitch negated,
+    // the picture mirrored left to right, in the mirror's own viewport (DS:35A3 / 3587 / 3595), over a
+    // sky of its own (the original fills it with sky and ground, without the horizon panorama).
+    bool mirror = false;
 };
 
 // Validation only: chooses each static object's variant as the original would (vette_world runs the
@@ -118,6 +132,12 @@ public:
     // Builds the 3D view of one frame into `out` (cleared first). `ram`: the machine's 1 MB memory at
     // draw_world_cells' entry (3009:30C6) of that frame. The camera, angles, game flags and the live
     // vehicles and pedestrians are read from it; nothing is written.
+    //
+    // In highway mode (DS:2AD4 = FF, the named freeways) `ram` is the memory at the frame loop's highway
+    // branch (3009:0342), before highway_frame (775E) runs. The view is then the freeway: its road
+    // slices built from the route's segment list (the original's ring of 32 slices, continued to the
+    // draw distance in both directions), the highway cars (DS:82F4) and, in external views, the
+    // player's car. The city is drawn as well once the end of the road is in sight (DS:8411).
     void build(const uint8_t* ram, const SceneOptions& options, Scene& out);
 
 private:

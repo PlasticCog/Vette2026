@@ -425,3 +425,269 @@ TEST(enhanced_scene_build_unrotated_model) {
     CHECK(close(y0, 60 - 246 * 256.0 / 4096));
     CHECK(close(y1, 60 + 10 * 256.0 / 4096));
 }
+
+namespace {
+
+// The vertices drawn in a colour: their x and y ranges.
+struct Extent {
+    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+    int n = 0;
+};
+Extent extent(const Scene& s, const SceneColour& c) {
+    Extent e;
+    for (const SceneVertex& v : s.vertices) {
+        if (!close(v.r, c.r) || !close(v.g, c.g) || !close(v.b, c.b)) continue;
+        e.x0 = std::min(e.x0, v.x);
+        e.x1 = std::max(e.x1, v.x);
+        e.y0 = std::min(e.y0, v.y);
+        e.y1 = std::max(e.y1, v.y);
+        ++e.n;
+    }
+    return e;
+}
+
+void mirror_viewports(SyntheticWorld& sw) {
+    // DS:35A3 / 3587 / 3595: x_left, y_top, x_right, y_bottom, centre_y, centre_x, height.
+    const uint16_t ahead[7] = {192, 0, 319, 35, 18, 256, 36}, right[7] = {80, 96, 127, 119, 108, 104, 120};
+    for (int k = 0; k < 7; ++k) {
+        sw.w16(static_cast<uint16_t>(0x35A3 + 2 * k), ahead[k]);
+        sw.w16(static_cast<uint16_t>(0x3587 + 2 * k), right[k]);
+    }
+}
+
+} // namespace
+
+TEST(enhanced_scene_mirror) {
+    // The camera faces north; the cyan half-wall (east half) stands 4096 units behind it. Looking back
+    // (yaw 180) east is on the left; the mirror flips it to the right of the mirror's centre (256, 18).
+    SyntheticWorld sw;
+    mirror_viewports(sw);
+    sw.place(38, 40, 1, {{0x1003, 1024, 1024, 0}}, {});
+    SceneBuilder builder(sw.world);
+    Scene scene;
+    SceneOptions o;
+    o.ground = false;
+    o.mirror = true;
+    builder.build(sw.ram.data(), o, scene);
+    CHECK_EQ(scene.view_x0, 192);
+    CHECK_EQ(scene.view_y0, 0);
+    CHECK_EQ(scene.view_x1, 320);
+    CHECK_EQ(scene.view_y1, 36);
+    CHECK_EQ(first_triangle(scene, ega_colour(11)), 0);  // its own sky first
+    const Extent e = extent(scene, ega_colour(3));
+    CHECK_EQ(e.n, 4);
+    CHECK(close(e.x0, 256));
+    CHECK(close(e.x1, 288));
+    CHECK(close(e.y0, 18 - 246 * 256.0 / 4096));
+    CHECK(close(e.y1, 18 + 10 * 256.0 / 4096));
+
+    // Looking right (view offset +85, camera yaw 85): the mirror turns +95 more and uses 3587.
+    sw.w16(addr::kCamera + 6, 85);
+    sw.w16(addr::kViewOffset, 0x55);
+    builder.build(sw.ram.data(), o, scene);
+    CHECK_EQ(scene.view_x0, 80);
+    CHECK_EQ(scene.view_y0, 96);
+    const Extent r = extent(scene, ega_colour(3));
+    CHECK_EQ(r.n, 4);
+    CHECK(close(r.x0, 104));
+    CHECK(close(r.x1, 136));
+    CHECK(close(r.y1, 108 + 10 * 256.0 / 4096));
+}
+
+namespace {
+
+// Highway mode on the synthetic world: one slice type (a straight 128-unit slice of road, 256 wide
+// across, grey) for every type, a route of 40 straight slices, and the ring along +y from (4000h, 4000h).
+void freeway(SyntheticWorld& sw) {
+    sw.ram[(uint32_t{addr::kDataSeg} << 4) + addr::kHighway] = 0xFF;
+    const uint16_t record = 0xA100, polys = 0xA120, poly = 0xA130, block = 0xA160, route = 0xA200;
+    for (int t = 0; t < 11; ++t) {
+        sw.w16(static_cast<uint16_t>(0x7A72 + 2 * t), record);
+        sw.w16(static_cast<uint16_t>(0x7A88 + 2 * t), record);
+    }
+    sw.w16(record, 8);
+    sw.w16(record + 2, polys);
+    sw.w16(record + 4, block);
+    sw.w16(record + 6, 0xFFFF);
+    sw.w16(record + 8, 0);
+    sw.w16(polys, poly);
+    sw.ram[(uint32_t{addr::kDataSeg} << 4) + polys + 2] = 8;
+    sw.w16(polys + 3, 0xFFFF);
+    sw.w16(poly, 8);
+    for (int k = 0; k <= 8; ++k) sw.w16(static_cast<uint16_t>(poly + 2 + 2 * k), static_cast<uint16_t>(4 * (k % 8)));
+    sw.w16(static_cast<uint16_t>(poly + 20), 0xFFFF);
+    const int16_t verts[8][3] = {{0, 0, 0}, {64, 0, 0}, {128, 0, 0}, {128, 0, 256}, {64, 0, 256}, {0, 0, 256}, {-16, 0, 256}, {-16, 0, 0}};
+    for (int k = 0; k < 8; ++k) {
+        for (int j = 0; j < 3; ++j) sw.w16(static_cast<uint16_t>(block + 6 + 6 * k + 2 * j), static_cast<uint16_t>(verts[k][j]));
+    }
+    sw.w16(route, 40 << 8);  // type 0, 40 slices
+    sw.w16(route + 2, 0);
+    sw.w16(route + 4, 0xFFFF);
+    sw.w16(0x8154, route);
+    for (int k = 0; k < 32; ++k) {
+        sw.w16(static_cast<uint16_t>(0x8234 + 6 * k), 0x4000);
+        sw.w16(static_cast<uint16_t>(0x8236 + 6 * k), static_cast<uint16_t>(0x4000 + 128 * k));
+        sw.w16(static_cast<uint16_t>(0x8238 + 6 * k), 0);
+    }
+    sw.w16(0x804A, 0x4000);
+    sw.w16(0x804C, 0x4000);
+    // On the road's centre line, 300 units along, facing along it (east).
+    sw.w16(addr::kCamera, 0x4080);
+    sw.w16(addr::kCamera + 2, 0x4000 + 300);
+    sw.w16(addr::kCamera + 6, 90);
+}
+
+} // namespace
+
+TEST(enhanced_scene_freeway) {
+    SyntheticWorld sw;
+    freeway(sw);
+    SceneBuilder builder(sw.world);
+    Scene scene;
+    SceneOptions o;
+    o.ground = false;
+    builder.build(sw.ram.data(), o, scene);
+    // The slices ahead of the camera, past the ring's 32 to the route's end; the road symmetric about
+    // the centre, reaching down to the view's bottom and up to the horizon.
+    CHECK(scene.stats.slices >= 36 && scene.stats.slices <= 39);
+    CHECK_EQ(scene.stats.cells, 0);
+    const Extent road = extent(scene, ega_colour(8));
+    CHECK(road.n > 0);
+    CHECK(road.y0 > 60 && road.y0 < 61);
+    CHECK(road.y1 > 119);
+    CHECK(close(road.x0 + road.x1, 320, 1e-2));
+
+    // The same view after highway_frame re-centred its frame (the ring still in the old one): the
+    // current slice (DS:804A) and the camera moved alike, the ring not.
+    const std::vector<SceneVertex> before = scene.vertices;
+    sw.w16(0x804A, 0x4000 - 0x800);
+    sw.w16(0x804C, 0x4000 + 0x300);
+    sw.w16(addr::kCamera, 0x4080 - 0x800);
+    sw.w16(addr::kCamera + 2, 0x4000 + 300 + 0x300);
+    builder.build(sw.ram.data(), o, scene);
+    CHECK_EQ(scene.vertices.size(), before.size());
+    bool same = scene.vertices.size() == before.size();
+    for (size_t i = 0; same && i < before.size(); ++i) {
+        same = close(scene.vertices[i].x, before[i].x, 1e-2) && close(scene.vertices[i].y, before[i].y, 1e-2);
+    }
+    CHECK(same);
+
+    // In the mirror, the slices behind (up to the route's start) are the ones drawn.
+    mirror_viewports(sw);
+    o.mirror = true;
+    builder.build(sw.ram.data(), o, scene);
+    CHECK(scene.stats.slices >= 2 && scene.stats.slices <= 4);
+}
+
+namespace {
+
+// The last triangle drawn over a race-frame point, or -1.
+int top_triangle(const Scene& s, float px, float py) {
+    int top = -1;
+    for (size_t t = 0; t + 2 < s.indices.size(); t += 3) {
+        const SceneVertex& a = s.vertices[static_cast<size_t>(s.indices[t])];
+        const SceneVertex& b = s.vertices[static_cast<size_t>(s.indices[t + 1])];
+        const SceneVertex& c = s.vertices[static_cast<size_t>(s.indices[t + 2])];
+        const float d1 = (px - b.x) * (a.y - b.y) - (a.x - b.x) * (py - b.y);
+        const float d2 = (px - c.x) * (b.y - c.y) - (b.x - c.x) * (py - c.y);
+        const float d3 = (px - a.x) * (c.y - a.y) - (c.x - a.x) * (py - a.y);
+        const bool neg = d1 < 0 || d2 < 0 || d3 < 0, pos = d1 > 0 || d2 > 0 || d3 > 0;
+        if (!(neg && pos)) top = static_cast<int>(t / 3);
+    }
+    return top;
+}
+
+} // namespace
+
+TEST(enhanced_scene_compound_painter_order) {
+    // A bridge's side wall (a compound piece, 64 high) runs north for 8 cells, 300 units left of the camera,
+    // from 4 cells behind it; a tall green quad stands in a cell ahead and further left. The wall must
+    // cover the green where they overlap, although the wall is anchored in a cell farther away than the
+    // green's: the compound is drawn cell by cell, each part with the cell it lies in.
+    SyntheticWorld sw;
+    const auto packed = [](uint16_t address, std::vector<Vec3i> verts, uint8_t colour) {
+        Routine r;
+        r.address = address;
+        Variant& v = r.variants.emplace_back();
+        Part& p = v.parts.emplace_back();
+        p.source = Part::Source::Packed;
+        p.verts = std::move(verts);
+        p.indices = {0, 1, 2, 3};
+        Prim prim;
+        prim.kind = Prim::Kind::Polygon;
+        prim.colour.raw = colour;
+        prim.count = 4;
+        p.prims.push_back(prim);
+        v.primitives = 1;
+        return r;
+    };
+    Routine bridge;
+    bridge.address = 0x3000;
+    bridge.compound = true;
+    bridge.variants.emplace_back().calls.push_back({0x3001, {0, 0, 0}});
+    sw.world.routines.push_back(std::move(bridge));
+    sw.world.routines.push_back(packed(0x3001, {{0, 0, 0}, {16384, 0, 0}, {16384, 0, 64}, {0, 0, 64}}, 5));
+    sw.world.routines.push_back(packed(0x3002, {{-1024, 0, 0}, {1024, 0, 0}, {1024, 0, 1024}, {-1024, 0, 1024}}, 2));
+    CompoundInstance ci;
+    ci.routine = 0x3000;
+    ci.position = {36 * 2048, 40 * 2048 + 1024 - 300, 0};
+    sw.world.compounds.push_back(ci);
+    sw.place(42, 39, 1, {{0x3002, 1024, 1024 - 1500 + 2048, 0}}, {});
+    SceneBuilder builder(sw.world);
+    Scene scene;
+    SceneOptions o;
+    o.ground = false;
+    builder.build(sw.ram.data(), o, scene);
+    const int t = top_triangle(scene, 66, 50);
+    CHECK(t >= 0);
+    if (t >= 0) {
+        const SceneVertex& v = scene.vertices[static_cast<size_t>(scene.indices[static_cast<size_t>(t) * 3])];
+        CHECK(close(v.r, ega_colour(5).r) && close(v.b, ega_colour(5).b));
+    }
+    // ... and the green shows above the wall.
+    const int above = top_triangle(scene, 66, 20);
+    CHECK(above >= 0);
+    if (above >= 0) {
+        const SceneVertex& v = scene.vertices[static_cast<size_t>(scene.indices[static_cast<size_t>(above) * 3])];
+        CHECK(close(v.g, ega_colour(2).g) && close(v.r, 0));
+    }
+}
+
+TEST(enhanced_scene_ground_markings_lie_flat) {
+    // A lane line on the road (a ground-layer line), 100 units right of the camera, from 200 to 1500
+    // units ahead: a stripe marking_width wide lying on the road, so it narrows with distance as the
+    // road does (1.25 * 256 / 200 = 1.6 race pixels near, 0.21 far), not a constant-width line.
+    SyntheticWorld sw;
+    Routine line;
+    line.address = 0x3003;
+    Variant& v = line.variants.emplace_back();
+    Part& p = v.parts.emplace_back();
+    p.source = Part::Source::Packed;
+    p.verts = {{200, 100, 0}, {1500, 100, 0}};
+    p.indices = {0, 1};
+    Prim prim;
+    prim.kind = Prim::Kind::Line;
+    prim.colour.raw = 15;
+    prim.count = 2;
+    p.prims.push_back(prim);
+    v.primitives = 1;
+    sw.world.routines.push_back(std::move(line));
+    sw.place(40, 40, 1, {{0x3003, 1024, 1024, 0}}, {});
+    SceneBuilder builder(sw.world);
+    Scene scene;
+    SceneOptions o;
+    o.ground = false;
+    o.pixel_w = o.pixel_h = 6;
+    builder.build(sw.ram.data(), o, scene);
+    std::vector<SceneVertex> white;
+    for (const SceneVertex& sv : scene.vertices) {
+        if (close(sv.r, 1) && close(sv.g, 1) && close(sv.b, 1)) white.push_back(sv);
+    }
+    CHECK_EQ(white.size(), size_t{4});
+    if (white.size() == 4) {
+        std::sort(white.begin(), white.end(), [](const SceneVertex& a, const SceneVertex& b) { return a.y < b.y; });
+        const float far = std::fabs(white[0].x - white[1].x), near = std::fabs(white[2].x - white[3].x);
+        CHECK(close(near, 1.25 * 256 / 200, 0.05));
+        CHECK(close(far, 1.25 * 256 / 1500, 0.05));
+    }
+}

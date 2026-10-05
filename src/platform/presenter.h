@@ -31,16 +31,19 @@ public:
     void present(const Framebuffer& fb);
     void present(const ui::Canvas& canvas);
     // The race view with the Enhanced 3D view: `under` (the game's view without its world), then
-    // `scene` clipped to its viewport at the output's full resolution, then `over` wherever its pixels
-    // aren't kTransparentPixel. All three are in the frame's coordinates, placed as present() would.
+    // `scene` clipped to its viewport at the output's full resolution, then `inset` (the rear-view
+    // mirror's scene, if any) clipped to its own viewport, then `over` wherever its pixels aren't
+    // kTransparentPixel. All are in the frame's coordinates, placed as present() would.
     static constexpr std::uint8_t kTransparentPixel = 0xFF;
-    void present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over);
+    void present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over,
+                 const enhanced::Scene* inset = nullptr);
     // A frame with the PC-98's or the Mac's art in place of the DOS pictures (graphics/composite.h):
     // the backdrop or the DOS pixels under the art, the art at the output's resolution, then the DOS
     // pixels kept on top and the pieces moved into the art's layout. With `under` and `scene`, the
     // Enhanced 3D view is drawn first and the composite (made from its `over`) on top of it.
     void present(const graphics::Composite& composite);
-    void present(const Framebuffer& under, const enhanced::Scene& scene, const graphics::Composite& composite);
+    void present(const Framebuffer& under, const enhanced::Scene& scene, const graphics::Composite& composite,
+                 const enhanced::Scene* inset = nullptr);
     // Output pixels per frame pixel, horizontally and vertically, for a frame of this size.
     void frame_scale(int frame_w, int frame_h, float& sx, float& sy) const;
     // The window's drawable size in pixels (what a Canvas should be laid out for).
@@ -72,7 +75,9 @@ private:
     SDL_Texture* upload(Layer& layer, const Framebuffer& fb, bool transparency, const SDL_FRect& dst);
     SDL_Texture* upload(Layer& layer, const std::uint8_t* pixels, int w, int h,
                         const std::array<std::uint32_t, 16>& argb, bool transparency, const SDL_FRect& dst);
-    void draw_scene(const Framebuffer& under, const enhanced::Scene& scene, const SDL_FRect& dst);
+    void draw_scene(const Framebuffer& under, const enhanced::Scene& scene, const enhanced::Scene* inset,
+                    const SDL_FRect& dst);
+    void draw_triangles(const enhanced::Scene& scene, int frame_w, int frame_h, const SDL_FRect& dst);
     void draw_composite(const graphics::Composite& c, const SDL_FRect& dst);
     SDL_Texture* art_texture(const graphics::Image& image);
     SDL_FRect fit() const;  // the 4:3 picture rect in render output pixels

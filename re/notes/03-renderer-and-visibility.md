@@ -201,7 +201,13 @@ Object routines compare |camera − object| per axis (`cdq; xor; shr; adc` abs i
   (DS:35C3) or |Δacross| ≥ 0x400 → flat quad (26B0). Else |Δalong| < 0x800 → near model, < 0x1000 → mid model,
   otherwise flat quad. 766E/76B2: 0x400/0x800 tiers.
 - Bridge/large-structure parts: 2B36/2B59 draw if |Δx| < 0x2000; 2C85, 2CB9, 2D1F, 2D4C, 2D95, 2DB6 if |Δy| < 0x1800
-  (plus camera-above/below tests on z); 2DD7 switches model at |Δy| 0xC00.
+  (plus camera-above/below tests on z); 2DD7 switches model at |Δy| 0xC00. The side tests matter at any distance:
+  in the Yerba Buena tunnel the ceiling piece is a road deck with lane marks seen from above and beams seen from below,
+  and some side pieces draw nothing from one side. The SceneBuilder runs these routines (compound pieces only) with
+  the camera moved to within 480 units on each axis, same side, so the side tests decide and the distance tests
+  give full detail. Bridge pieces also span many cells (decks, side walls, cables): the SceneBuilder cuts them along
+  the cell grid so the far-to-near cell walk stays a painter's order (vette_world `--bridge-check` sweeps both
+  bridges against the original's own views). **confirmed**
 - Sorted-object LOD by `cs:259E`: 3790/37A2/37B4/37C6 detailed model if key < 0x800, else 3811. Vehicle model choice
   at B9F6 (model table in segment 245A at 6FF8+8·type): near if key < 0x800, else far.
 
@@ -236,6 +242,19 @@ Yaw +180 (or ±95 in the side views), pitch negated. The matrix column 0 is nega
 Viewport 35A3/3587/3595. Sky/ground only (`5A2E`, **no horizon panorama**), then `30C6`. It runs **after** the
 simulation step, with the camera position from the start of the frame. DS:2C77/2C79 are left modified until the next
 frame recomputes them. **confirmed**
+- Exactly (0686-06D8): view offset DS:2B87 = +55h → yaw + 95 (mod 360), viewport 3587; −55h → yaw − 95, 3595;
+  otherwise yaw − 180, 35A3. DS:2AC0 (compound drawn) is cleared, so the bridges are drawn again in the mirror.
+  In highway mode `78E2` replaces `30C6`: the ring's first 8 slices (7 down to 0) and the highway cars (keys from
+  4021:1358, then 7F09). The mirror is forced on while DS:2AD8 ≤ 3. **confirmed**
+- With DS:18 set, `30C6` leaves out the two far cells of its window (30F9-3123): 4 cells. **confirmed**
+- The mirror's frame (`6439`, after the world, 075F): opaque rectangles latch-copied from off-screen VRAM by
+  4160:07F4 (DI = offset in the page, 40 bytes a row; BH bytes wide; BP rows). Ahead (648A): x 184-191 × y 0-35 and
+  x 192-319 × y 30-35 (it covers the viewport's bottom 6 rows). Right (64B9, tables 3C4B/3C51/3C57/3C5D): 72-87 ×
+  96-119, 88-135 × 96-98, 128-135 × 96-119. Left (645D, tables 3C36/3C3C/3C42/3C48): 192-199 × 84-119, 200-263 × 84-87,
+  264-279 × 84-119. **confirmed**
+- Validation (vette_world `--scene-compare` with the mirror on, F6): the SceneBuilder's mirror (camera derived from
+  the main pass's memory, mirrored projection, the 4-cell window) against the original's mirror image at 075F:
+  Bay Bridge 0.04 %, README drive 0.37 % of its pixels structurally different.
 
 ## Sky, ground and horizon (`draw_sky_ground_horizon` 3009:5A35)
 - `horizon_line` 59B3: projects (0, 25000·sin(pitch) + cam_z, 25000) with 4160:086B. The row is clamped to the viewport,
@@ -280,14 +299,49 @@ along an axis) keeps any entity from being drawn twice in one frame.
   (and the CPU class default) can change traffic binding and collision timing. **likely**: verify with the oracle.
 
 ## Highway mode (DS:2AD4 = FF)
-On the named freeways and bridges the city walk is skipped (0342–034E: only drawn again once DS:8411 marks the
-end of the road). `highway_frame` 775E, which is simulation and drawing together, builds a ring of **32 road slices** ahead
+On the named freeways the city walk is skipped (0342–034E: only drawn again once DS:8411 marks the
+end of the road). `highway_frame` 775E, which is simulation and drawing together, builds a ring of **32 road slices**
 (7A0E: slice types from the highway's segment list; slices 6–18 take their model from DS:7A72, the others from
-DS:7A88, **likely** a detail band). It draws them far to near (77A1 loop, slice 31→0; per-slice data in segment 2243
+DS:7A88). It draws them far to near (77A1 loop, slice 31→0; per-slice data in segment 2243
 from offset 0382h). `highway_draw_cars` 7F09 then draws up to 11 highway cars depth-sorted (`sort_sortables` 4686; a
 negative key stops the loop) with the segment-245A models (B9D6). Sky/ground/horizon is still `draw_sky_ground_horizon`.
-So the highway draw distance is **32 slices** (slice length TBD). **confirmed** (structure); details TBD.
 775E also steers the player along the lane (7B92–7BCF writes DS:2D3B), so it cannot be skipped by a native renderer.
+In the frame loop the highway branch jumps from 0342 to 03A1 (past the traffic step, 30C6 and 0374), then 03AF
+(`highway_enter` on the first frame), 03B4 (775E), 03B7 (view border), 0402 (7F09). **confirmed**
+
+The freeway geometry (all **confirmed**; the SceneBuilder rebuilds it natively, and vette_world's comparison
+against the original's frames shows 0.002 % of the view's pixels structurally different):
+- Route `[8156]` 0..8 names the road (strings from DS:3BA8, 12 bytes each: doyle dr., 480, 280, presidio, central
+  skyway, embarcadero fwy, hwy 1, doyle dr., 80). None is a bridge: the Golden Gate and Bay Bridge are city cells
+  (compounds). Segment list `[8154]` = DS:7560[id] + 2: `{b slice type 0..10, b slices, w heading at its start}`
+  .. FFFF.
+- Slice records (10 bytes): DS:7A72[type] detailed, DS:7A88[type] plain: `{w vertices (21 / 8), w polygon list,
+  w block, w line list (FFFF: none), w heading change per slice}`. Both records of a type share the block: 3 words
+  (a point 7AE3 steers by), then the vertices `{along, down, across}` in model axes (x east, y down, z north
+  before the heading's rotation): the road is 128 long (from −16, overlapping the previous slice) and 256 across;
+  vertices 8-14 are the lane marks' ends, 15-20 the rail tops 8 up. Polygons: one grey (8) road quad, fill_poly_list
+  format. Lines (draw_line_list 405E format `{b, b n, n × {b i·4, b i·4}}`): the lane dashes (64 of each 128) and
+  the rails' posts and tops, white. The heading changes by type: 0 straight, 1/2 ±8°, 3/4 ±4°, 5/6 ±3°, 7/8 ±2°,
+  9/10 ±1° per slice; the blocks bend the slice accordingly.
+- The ring DS:8234 (32 × `{x, y, heading}`): slice k+1 = slice k + its type's vertex 2 rotated by its heading
+  (7CEA, `model_to_world` order), heading += the type's step. It starts at the current slice `[8158]`/`[815C]` =
+  DS:804A (x, y, z = 804E, heading 8050); 775E keeps the ring's start in 8232/8230. The player is at ring slice 8
+  (842C), so the original shows 23 slices (about 3000 units) ahead.
+- Slice n of a segment n slices long is the next segment's first (7A0E and 7D19 agree). 7D19 (via 7BF9, inside the
+  ring build) advances 815C/8158 and moves 804A/804C by the slice's delta (DS:806E table); at a segment change
+  775E re-centres (78B8): the player and 804A move by 804A − 4000h. The ring and the cars are then still in the
+  previous frame until the next 775E: a renderer working from memory before 775E moves them by DS:804A − ring[d],
+  d = slices from the ring's start to the current slice.
+- Highway cars DS:82F4 (11 × 16h, active DS:8420): drawn at `{+4 x, +6 y}`, z = byte DS:8222[type], yaw = `+0C`
+  heading + 270, model = type (`+13`). Sort keys DS:340A (FFFF: not drawn; 4021:1190 sets them). Outside the car
+  (DS:2ACF) 775E draws the player's car (28D3) after the slices.
+- Entering (4021:0ED1): the player is put at (40A0h, 4000h, z 7) heading 90 in the freeway's own frame, which is
+  not the city's: the routes don't follow the city's map (route 3 enters at cell 27,2 and its exit record DS:75B4[3]
+  is 18 cells north, while its slices end 25000 units south of their start). At the end, 785B moves the player by
+  the exit record's offset into the city (no rotation: the freeway frame's axes are the city's).
+- On-ramp boxes (collision handler 1A12-1AD8; vette_world `--freeway-boxes`): route 4 cell (16,24), 6 (17,14),
+  8 (18,38), 2 (18,49 and 50,17; not on course 2), 1 (25,42), 3 (27,2), 5 (28,39), 7 (47,1; not on course 1),
+  0 (47,2; not on course 1). Course 3 held straight west reaches route 2 ("280") at cell (18,49) after about 290 s.
 
 ## How to lift each limit without changing the simulation
 1. Split the original pass into (a) a **visibility pass** that runs the exact original window, matching, cell binding

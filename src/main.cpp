@@ -9,6 +9,7 @@
 #include "enhanced/world.h"
 #include "game/options.h"
 #include "game/smooth.h"
+#include "game/x86.h"
 #include "graphics/art_files.h"
 #include "graphics/substitution.h"
 #include "host/machine.h"
@@ -86,6 +87,9 @@ constexpr const char* kUsage =
     "  --key T:SC, --hold A:B:SC   press scan code SC (hex, set 1) at second T for 100 ms, or hold it\n"
     "                       from second A to B, as vette_run does\n"
     "  --shot T             save the window's picture at second T to shot_T.bmp (repeatable)\n"
+    "  --poke T:OFF:VAL     write VAL to the game's data segment at offset OFF (hex) at second T: a byte\n"
+    "                       for two hex digits, else a word (e.g. a freeway on the next frame:\n"
+    "                       --poke 39:2AD4:03 --poke 39:8156:0003)\n"
     "  --quit-after T       close at second T\n"
     "  --wav <file>         record the sound to a WAV file (16-bit mono)\n"
     "  --mute               make the sound (for --wav) but don't play it\n"
@@ -112,6 +116,13 @@ struct ScriptedKey {
     std::uint8_t scancode;
 };
 
+// A scripted write to the game's data (--poke).
+struct ScriptedPoke {
+    std::uint64_t at_ns;
+    std::uint16_t offset, value;
+    bool byte;
+};
+
 // Command-line overrides of the saved settings (unset = use the setting).
 struct Options {
     std::optional<std::filesystem::path> game_dir;
@@ -127,6 +138,7 @@ struct Options {
     std::optional<Settings::Music> music;
     std::optional<Settings::Graphics> graphics;
     std::vector<ScriptedKey> keys;
+    std::vector<ScriptedPoke> pokes;     // sorted by time
     std::vector<std::uint64_t> shots;    // emulated ns, sorted
     std::optional<std::uint64_t> quit_after;  // emulated ns
     std::optional<std::string> wav;           // UTF-8 path
@@ -241,6 +253,18 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const auto sc = static_cast<std::uint8_t>(std::strtoul(v.substr(c2 + 1).c_str(), nullptr, 16) & 0x7F);
             opts.keys.push_back({from, sc});
             opts.keys.push_back({to, static_cast<std::uint8_t>(sc | 0x80)});
+        } else if (arg == "--poke" && has_value) {
+            const std::string v = argv[++i];
+            const std::size_t c1 = v.find(':');
+            const std::size_t c2 = c1 == std::string::npos ? c1 : v.find(':', c1 + 1);
+            if (c2 == std::string::npos) {
+                std::fprintf(stderr, "--poke needs T:OFF:VAL\n");
+                return std::nullopt;
+            }
+            const auto at = static_cast<std::uint64_t>(std::atof(v.substr(0, c1).c_str()) * static_cast<double>(kNsPerSecond));
+            const auto offset = static_cast<std::uint16_t>(std::strtoul(v.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 16));
+            const auto value = static_cast<std::uint16_t>(std::strtoul(v.substr(c2 + 1).c_str(), nullptr, 16));
+            opts.pokes.push_back({at, offset, value, v.size() - c2 - 1 <= 2});
         } else if (arg == "--draw-distance" && has_value && (std::string_view(argv[i + 1]) == "original" ||
                                                             std::string_view(argv[i + 1]) == "extended" ||
                                                             std::string_view(argv[i + 1]) == "maximum")) {
@@ -252,6 +276,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const bool needs_value = arg == "--game" || arg == "--dump-frame" || arg == "--cpu-hz" ||
                                      arg == "--fps" || arg == "--pc" || arg == "--draw-distance" ||
                                      arg == "--key" || arg == "--hold" || arg == "--shot" || arg == "--quit-after" ||
+                                     arg == "--poke" ||
                                      arg == "--wav" || arg == "--effects" || arg == "--music" ||
                                      arg == "--graphics";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
@@ -261,6 +286,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
     }
     std::stable_sort(opts.keys.begin(), opts.keys.end(),
                      [](const ScriptedKey& a, const ScriptedKey& b) { return a.at_ns < b.at_ns; });
+    std::stable_sort(opts.pokes.begin(), opts.pokes.end(),
+                     [](const ScriptedPoke& a, const ScriptedPoke& b) { return a.at_ns < b.at_ns; });
     std::sort(opts.shots.begin(), opts.shots.end());
     return opts;
 }
@@ -362,6 +389,7 @@ struct EnhancedView {
     bool failed = false;
     game::SmoothRenderer::Layers layers;
     enhanced::Scene scene;
+    enhanced::Scene mirror;  // the rear-view mirror's, while it's on
     Framebuffer under, over;
     std::uint64_t frames = 0;
     double build_ms = 0;
@@ -383,8 +411,9 @@ struct EnhancedView {
         }
     }
 
-    // The race view in layers, with the world drawn from the extracted city. False when the race view
-    // isn't on screen (or the city isn't ready): the caller shows the game's own frame.
+    // The race view in layers, with the world drawn from the extracted city (or, in highway mode, the
+    // freeway built from the game's route data), and the rear-view mirror's view while it's on. False
+    // when the race view isn't on screen (or the city isn't ready): the caller shows the game's own frame.
     bool render(host::Machine& machine, game::SmoothRenderer& smooth, const Presenter& presenter) {
         if (!builder || !smooth.render_layers(machine.emulated_ns(), layers))
             return false;
@@ -392,12 +421,18 @@ struct EnhancedView {
         options.radius = radius;
         presenter.frame_scale(layers.under.width, layers.under.height, options.pixel_w, options.pixel_h);
         builder->build(layers.ram.data(), options, scene);
-        ++frames;
         build_ms += scene.stats.milliseconds;
+        if (layers.mirror) {
+            options.mirror = true;
+            builder->build(layers.ram.data(), options, mirror);
+            build_ms += mirror.stats.milliseconds;
+        }
+        ++frames;
         copy_frame(layers.under, under);
         copy_frame(layers.over, over);
         return true;
     }
+    const enhanced::Scene* inset() const { return layers.mirror ? &mirror : nullptr; }
 };
 
 // The game's sound put together from the player's choices (sound/game_audio.h): the effects from the
@@ -542,6 +577,7 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
                game::SmoothRenderer* smooth, EnhancedView* view, GameSound* game_sound, Artwork* art,
                const Options& script) {
     std::size_t next_key = 0;
+    std::size_t next_poke = 0;
     std::size_t next_shot = 0;
     std::optional<WavWriter> wav;
     if (script.wav)
@@ -623,6 +659,14 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
         const std::uint64_t t = machine.emulated_ns();
         for (; next_key < script.keys.size() && script.keys[next_key].at_ns <= t; ++next_key)
             machine.key(script.keys[next_key].scancode);
+        for (; next_poke < script.pokes.size() && script.pokes[next_poke].at_ns <= t; ++next_poke) {
+            const ScriptedPoke& pk = script.pokes[next_poke];
+            const std::uint32_t at = host::Cpu::linear(game::kDataSeg, pk.offset);
+            if (pk.byte)
+                machine.memory().write8(at, static_cast<std::uint8_t>(pk.value));
+            else
+                machine.memory().write16(at, pk.value);
+        }
         if (script.quit_after && t >= *script.quit_after)
             return;
         for (; next_shot < script.shots.size() && script.shots[next_shot] <= t; ++next_shot) {
@@ -669,9 +713,9 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
         }
         const bool replaced = art && art->compose(top);
         if (layered && replaced)
-            presenter.present(view->under, view->scene, art->composite);
+            presenter.present(view->under, view->scene, art->composite, view->inset());
         else if (layered)
-            presenter.present(view->under, view->scene, view->over);
+            presenter.present(view->under, view->scene, view->over, view->inset());
         else if (replaced)
             presenter.present(art->composite);
         else
@@ -836,6 +880,9 @@ int run(int argc, char** argv) {
             }
         }
 
+        // Another version's art may lay the dash out differently: the mirror then stays the game's own.
+        if (smooth && art)
+            smooth->set_mirror_inset(false);
         main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad, smooth ? &*smooth : nullptr, view.get(),
                   game_sound.get(), art.get(), *opts);
         if (art && art->frames)

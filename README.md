@@ -78,10 +78,12 @@ display's full resolution, with the whole city in view to the horizon. **Extende
 around the car. The city is taken from your own copy of the game when it starts (about 0.1 s): every
 building, road and landmark with its most detailed model, and the cars and pedestrians where the game
 has them. It is drawn in the original's back-to-front order, so things hide each other just as they do
-in the original. The dash, rear-view mirror and messages are still the game's own. `--draw-distance
-original|extended|maximum` overrides the setting for one run. Not yet covered: the mirror and the
-freeway sections show the original's view, and the painted skyline behind the city stays, so far
-buildings stand in front of their painted copies.
+in the original. The rear-view mirrors and the freeway sections are drawn the same way (the freeway
+road reaches further ahead than the original's 32 slices). Road markings are painted flat on the road;
+edges and cables stay crisp lines. The dash and messages are still the game's own. `--draw-distance
+original|extended|maximum` overrides the setting for one run. The painted skyline behind the city
+stays, so far buildings stand in front of their painted copies; with PC-98 or Mac graphics the mirror
+is the original's.
 
 **Sound effects and music.** The original only had the PC speaker. VETTE! 2026 can instead play its
 sounds on an emulated **AdLib** card (the Enhanced preset; DOS VETTE! never supported one), or use the

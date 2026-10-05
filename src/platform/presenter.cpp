@@ -142,15 +142,36 @@ void Presenter::present(const Framebuffer& fb) {
     picture_h_ = fb.height;
 }
 
-// The Enhanced 3D view: the game's view without its world, then the scene's triangles, from frame
-// coordinates to output pixels, clipped to the 3D viewport.
-void Presenter::draw_scene(const Framebuffer& under, const enhanced::Scene& scene, const SDL_FRect& dst) {
+// The Enhanced 3D view: the game's view without its world, then the scene's triangles (and the
+// mirror's), from frame coordinates to output pixels, each clipped to its viewport.
+void Presenter::draw_scene(const Framebuffer& under, const enhanced::Scene& scene, const enhanced::Scene* inset,
+                           const SDL_FRect& dst) {
     SDL_Renderer* renderer = renderer_.get();
     SDL_RenderTexture(renderer, upload(base_, under, false, dst), nullptr, &dst);
+    draw_triangles(scene, under.width, under.height, dst);
+    if (inset) {
+        // Nothing of the main view may show in the mirror: its viewport is filled first (with its sky,
+        // the colour of its first triangles), then its scene goes on top.
+        const float sx = dst.w / static_cast<float>(under.width);
+        const float sy = dst.h / static_cast<float>(under.height);
+        const float x0 = std::round(dst.x + static_cast<float>(inset->view_x0) * sx);
+        const float y0 = std::round(dst.y + static_cast<float>(inset->view_y0) * sy);
+        const SDL_FRect rect{x0, y0, std::round(dst.x + static_cast<float>(inset->view_x1) * sx) - x0,
+                             std::round(dst.y + static_cast<float>(inset->view_y1) * sy) - y0};
+        const enhanced::SceneVertex sky = inset->vertices.empty() ? enhanced::SceneVertex{0, 0, 0x55 / 255.0f, 1, 1, 1}
+                                                                  : inset->vertices.front();
+        SDL_SetRenderDrawColorFloat(renderer, sky.r, sky.g, sky.b, 1);
+        SDL_RenderFillRect(renderer, &rect);
+        draw_triangles(*inset, under.width, under.height, dst);
+    }
+}
+
+void Presenter::draw_triangles(const enhanced::Scene& scene, int frame_w, int frame_h, const SDL_FRect& dst) {
+    SDL_Renderer* renderer = renderer_.get();
     if (scene.indices.empty())
         return;
-    const float sx = dst.w / static_cast<float>(under.width);
-    const float sy = dst.h / static_cast<float>(under.height);
+    const float sx = dst.w / static_cast<float>(frame_w);
+    const float sy = dst.h / static_cast<float>(frame_h);
     scene_xy_.resize(scene.vertices.size() * 2);
     for (std::size_t i = 0; i < scene.vertices.size(); ++i) {
         scene_xy_[2 * i] = dst.x + scene.vertices[i].x * sx;
@@ -172,12 +193,13 @@ void Presenter::draw_scene(const Framebuffer& under, const enhanced::Scene& scen
     SDL_SetRenderClipRect(renderer, nullptr);
 }
 
-void Presenter::present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over) {
+void Presenter::present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over,
+                        const enhanced::Scene* inset) {
     SDL_Renderer* renderer = renderer_.get();
     const SDL_FRect dst = fit();
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
     SDL_RenderClear(renderer);
-    draw_scene(under, scene, dst);
+    draw_scene(under, scene, inset, dst);
     SDL_RenderTexture(renderer, upload(over_, over, true, dst), nullptr, &dst);
     finish_frame();
     picture_ = dst;
@@ -254,12 +276,13 @@ void Presenter::present(const graphics::Composite& composite) {
     picture_h_ = composite.frame_h;
 }
 
-void Presenter::present(const Framebuffer& under, const enhanced::Scene& scene, const graphics::Composite& composite) {
+void Presenter::present(const Framebuffer& under, const enhanced::Scene& scene, const graphics::Composite& composite,
+                        const enhanced::Scene* inset) {
     SDL_Renderer* renderer = renderer_.get();
     const SDL_FRect dst = fit();
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
     SDL_RenderClear(renderer);
-    draw_scene(under, scene, dst);
+    draw_scene(under, scene, inset, dst);
     draw_composite(composite, dst);
     finish_frame();
     picture_ = dst;

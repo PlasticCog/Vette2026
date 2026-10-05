@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "enhanced/scene.h"
+#include "graphics/composite.h"
 #include "ui/app_icon.h"
 
 namespace vette {
@@ -77,46 +78,55 @@ void Presenter::frame_scale(int frame_w, int frame_h, float& sx, float& sy) cons
 // blend, so the uneven pixel aspect (2.4:1 at 640x200, 1.2:1 at 320x200) doesn't produce rows of
 // visibly different heights. With `transparency`, kTransparentPixel pixels are see-through
 // (premultiplied alpha, so the linear filter doesn't darken the edges).
-SDL_Texture* Presenter::upload(Layer& layer, const Framebuffer& fb, bool transparency, const SDL_FRect& dst) {
+SDL_Texture* Presenter::upload(Layer& layer, const std::uint8_t* src_pixels, int w, int h,
+                               const std::array<std::uint32_t, 16>& argb, bool transparency, const SDL_FRect& dst) {
     SDL_Renderer* renderer = renderer_.get();
-    if (fb.width != layer.w || fb.height != layer.h) {  // the game switched video modes
-        layer.frame = create_texture(renderer, SDL_TEXTUREACCESS_STREAMING, fb.width, fb.height, SDL_SCALEMODE_NEAREST);
-        layer.w = fb.width;
-        layer.h = fb.height;
+    if (w != layer.w || h != layer.h) {  // the game switched video modes
+        layer.frame = create_texture(renderer, SDL_TEXTUREACCESS_STREAMING, w, h, SDL_SCALEMODE_NEAREST);
+        if (transparency)
+            SDL_SetTextureBlendMode(layer.frame.get(), SDL_BLENDMODE_BLEND_PREMULTIPLIED);
+        layer.w = w;
+        layer.h = h;
         layer.scale_x = layer.scale_y = 0;
     }
 
-    std::array<std::uint32_t, 16> argb{};
-    for (std::size_t i = 0; i < argb.size(); ++i) {
-        const Rgb c = fb.palette[i];
-        argb[i] = 0xFF000000u | std::uint32_t{c.r} << 16 | std::uint32_t{c.g} << 8 | c.b;
-    }
     void* pixels = nullptr;
     int pitch = 0;
     if (!SDL_LockTexture(layer.frame.get(), nullptr, &pixels, &pitch))
         throw_sdl_error("SDL_LockTexture");
-    for (int y = 0; y < fb.height; ++y) {
+    for (int y = 0; y < h; ++y) {
         auto* row = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(pixels) + y * pitch);
-        const std::uint8_t* src = fb.pixels.data() + y * fb.width;
-        for (int x = 0; x < fb.width; ++x)
+        const std::uint8_t* src = src_pixels + y * w;
+        for (int x = 0; x < w; ++x)
             row[x] = transparency && src[x] == kTransparentPixel ? 0 : argb[src[x] & 0x0F];
     }
     SDL_UnlockTexture(layer.frame.get());
 
-    const int ix = std::max(1, static_cast<int>(dst.w) / fb.width);
-    const int iy = std::max(1, static_cast<int>(dst.h) / fb.height);
+    const int ix = std::max(1, static_cast<int>(dst.w) / w);
+    const int iy = std::max(1, static_cast<int>(dst.h) / h);
     if (ix != layer.scale_x || iy != layer.scale_y) {
-        layer.scaled = create_texture(renderer, SDL_TEXTUREACCESS_TARGET, fb.width * ix, fb.height * iy,
-                                      SDL_SCALEMODE_LINEAR);
+        layer.scaled = create_texture(renderer, SDL_TEXTUREACCESS_TARGET, w * ix, h * iy, SDL_SCALEMODE_LINEAR);
         if (transparency)
             SDL_SetTextureBlendMode(layer.scaled.get(), SDL_BLENDMODE_BLEND_PREMULTIPLIED);
         layer.scale_x = ix;
         layer.scale_y = iy;
     }
     SDL_SetRenderTarget(renderer, layer.scaled.get());
+    SDL_SetTextureBlendMode(layer.frame.get(), SDL_BLENDMODE_NONE);  // copied as is, alpha included
     SDL_RenderTexture(renderer, layer.frame.get(), nullptr, nullptr);
+    if (transparency)
+        SDL_SetTextureBlendMode(layer.frame.get(), SDL_BLENDMODE_BLEND_PREMULTIPLIED);
     SDL_SetRenderTarget(renderer, nullptr);
     return layer.scaled.get();
+}
+
+SDL_Texture* Presenter::upload(Layer& layer, const Framebuffer& fb, bool transparency, const SDL_FRect& dst) {
+    std::array<std::uint32_t, 16> argb{};
+    for (std::size_t i = 0; i < argb.size(); ++i) {
+        const Rgb c = fb.palette[i];
+        argb[i] = 0xFF000000u | std::uint32_t{c.r} << 16 | std::uint32_t{c.g} << 8 | c.b;
+    }
+    return upload(layer, fb.pixels.data(), fb.width, fb.height, argb, transparency, dst);
 }
 
 void Presenter::present(const Framebuffer& fb) {
@@ -132,41 +142,125 @@ void Presenter::present(const Framebuffer& fb) {
     picture_h_ = fb.height;
 }
 
+// The Enhanced 3D view: the game's view without its world, then the scene's triangles, from frame
+// coordinates to output pixels, clipped to the 3D viewport.
+void Presenter::draw_scene(const Framebuffer& under, const enhanced::Scene& scene, const SDL_FRect& dst) {
+    SDL_Renderer* renderer = renderer_.get();
+    SDL_RenderTexture(renderer, upload(base_, under, false, dst), nullptr, &dst);
+    if (scene.indices.empty())
+        return;
+    const float sx = dst.w / static_cast<float>(under.width);
+    const float sy = dst.h / static_cast<float>(under.height);
+    scene_xy_.resize(scene.vertices.size() * 2);
+    for (std::size_t i = 0; i < scene.vertices.size(); ++i) {
+        scene_xy_[2 * i] = dst.x + scene.vertices[i].x * sx;
+        scene_xy_[2 * i + 1] = dst.y + scene.vertices[i].y * sy;
+    }
+    const auto edge = [](float v) { return static_cast<int>(std::lround(v)); };
+    const int x0 = edge(dst.x + static_cast<float>(scene.view_x0) * sx);
+    const int y0 = edge(dst.y + static_cast<float>(scene.view_y0) * sy);
+    const SDL_Rect clip{x0, y0, edge(dst.x + static_cast<float>(scene.view_x1) * sx) - x0,
+                        edge(dst.y + static_cast<float>(scene.view_y1) * sy) - y0};
+    SDL_SetRenderClipRect(renderer, &clip);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);  // screen-door faces are translucent
+    SDL_RenderGeometryRaw(renderer, nullptr, scene_xy_.data(), static_cast<int>(2 * sizeof(float)),
+                          reinterpret_cast<const SDL_FColor*>(&scene.vertices[0].r),
+                          static_cast<int>(sizeof(enhanced::SceneVertex)), nullptr, 0,
+                          static_cast<int>(scene.vertices.size()), scene.indices.data(),
+                          static_cast<int>(scene.indices.size()), static_cast<int>(sizeof(std::int32_t)));
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    SDL_SetRenderClipRect(renderer, nullptr);
+}
+
 void Presenter::present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over) {
     SDL_Renderer* renderer = renderer_.get();
     const SDL_FRect dst = fit();
-    SDL_Texture* below = upload(base_, under, false, dst);
-    SDL_Texture* above = upload(over_, over, true, dst);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
     SDL_RenderClear(renderer);
-    SDL_RenderTexture(renderer, below, nullptr, &dst);
+    draw_scene(under, scene, dst);
+    SDL_RenderTexture(renderer, upload(over_, over, true, dst), nullptr, &dst);
+    finish_frame();
+    picture_ = dst;
+    picture_w_ = under.width;
+    picture_h_ = under.height;
+}
 
-    // The scene's triangles, from frame coordinates to output pixels, clipped to the 3D viewport.
-    if (!scene.indices.empty()) {
-        const float sx = dst.w / static_cast<float>(under.width);
-        const float sy = dst.h / static_cast<float>(under.height);
-        scene_xy_.resize(scene.vertices.size() * 2);
-        for (std::size_t i = 0; i < scene.vertices.size(); ++i) {
-            scene_xy_[2 * i] = dst.x + scene.vertices[i].x * sx;
-            scene_xy_[2 * i + 1] = dst.y + scene.vertices[i].y * sy;
-        }
-        const auto edge = [](float v) { return static_cast<int>(std::lround(v)); };
-        const int x0 = edge(dst.x + static_cast<float>(scene.view_x0) * sx);
-        const int y0 = edge(dst.y + static_cast<float>(scene.view_y0) * sy);
-        const SDL_Rect clip{x0, y0, edge(dst.x + static_cast<float>(scene.view_x1) * sx) - x0,
-                            edge(dst.y + static_cast<float>(scene.view_y1) * sy) - y0};
-        SDL_SetRenderClipRect(renderer, &clip);
-        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);  // screen-door faces are translucent
-        SDL_RenderGeometryRaw(renderer, nullptr, scene_xy_.data(), static_cast<int>(2 * sizeof(float)),
-                              reinterpret_cast<const SDL_FColor*>(&scene.vertices[0].r),
-                              static_cast<int>(sizeof(enhanced::SceneVertex)), nullptr, 0,
-                              static_cast<int>(scene.vertices.size()), scene.indices.data(),
-                              static_cast<int>(scene.indices.size()), static_cast<int>(sizeof(std::int32_t)));
-        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
-        SDL_SetRenderClipRect(renderer, nullptr);
+// The art's images are made once (they live as long as the Substitution); a texture each.
+SDL_Texture* Presenter::art_texture(const graphics::Image& image) {
+    SdlPtr<SDL_Texture>& t = art_[&image];
+    if (!t) {
+        t.reset(SDL_CreateTexture(renderer_.get(), SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, image.width,
+                                  image.height));
+        if (!t)
+            throw_sdl_error("SDL_CreateTexture");
+        SDL_UpdateTexture(t.get(), nullptr, image.pixels.data(), image.width * 4);
+        SDL_SetTextureBlendMode(t.get(), SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(t.get(), SDL_SCALEMODE_LINEAR);
     }
+    return t.get();
+}
 
-    SDL_RenderTexture(renderer, above, nullptr, &dst);
+void Presenter::draw_composite(const graphics::Composite& c, const SDL_FRect& dst) {
+    SDL_Renderer* renderer = renderer_.get();
+    std::array<std::uint32_t, 16> argb{};
+    for (std::size_t i = 0; i < argb.size(); ++i)
+        argb[i] = 0xFF000000u | c.palette[i];
+    const float sx = dst.w / static_cast<float>(c.frame_w);
+    const float sy = dst.h / static_cast<float>(c.frame_h);
+    const auto out = [&](const graphics::FRect& r) {
+        return SDL_FRect{dst.x + r.x * sx, dst.y + r.y * sy, r.w * sx, r.h * sy};
+    };
+
+    if (c.base.empty()) {  // a full-screen replacement: its letterbox bars
+        SDL_SetRenderDrawColor(renderer, static_cast<std::uint8_t>(c.backdrop >> 16),
+                               static_cast<std::uint8_t>(c.backdrop >> 8), static_cast<std::uint8_t>(c.backdrop),
+                               SDL_ALPHA_OPAQUE);
+        SDL_RenderFillRect(renderer, &dst);
+    } else {
+        SDL_RenderTexture(renderer, upload(art_base_, c.base.data(), c.frame_w, c.frame_h, argb, true, dst), nullptr,
+                          &dst);
+    }
+    for (const graphics::Composite::Layer& l : c.layers) {
+        if (!l.image || l.image->empty())
+            continue;
+        const SDL_FRect src{static_cast<float>(l.src.x), static_cast<float>(l.src.y), static_cast<float>(l.src.w),
+                            static_cast<float>(l.src.h)};
+        const SDL_FRect to = out(l.dst);
+        SDL_RenderTexture(renderer, art_texture(*l.image), &src, &to);
+    }
+    if (!c.over.empty())
+        SDL_RenderTexture(renderer, upload(art_over_, c.over.data(), c.frame_w, c.frame_h, argb, true, dst), nullptr,
+                          &dst);
+    if (!c.pieces.empty() && !c.moved.empty()) {
+        upload(art_moved_, c.moved.data(), c.frame_w, c.frame_h, argb, true, dst);
+        for (const graphics::Composite::Piece& piece : c.pieces) {
+            const SDL_FRect src{static_cast<float>(piece.src.x), static_cast<float>(piece.src.y),
+                                static_cast<float>(piece.src.w), static_cast<float>(piece.src.h)};
+            const SDL_FRect to = out(piece.dst);
+            SDL_RenderTexture(renderer, art_moved_.frame.get(), &src, &to);  // sharp: the frame-sized texture
+        }
+    }
+}
+
+void Presenter::present(const graphics::Composite& composite) {
+    SDL_Renderer* renderer = renderer_.get();
+    const SDL_FRect dst = fit();
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
+    SDL_RenderClear(renderer);
+    draw_composite(composite, dst);
+    finish_frame();
+    picture_ = dst;
+    picture_w_ = composite.frame_w;
+    picture_h_ = composite.frame_h;
+}
+
+void Presenter::present(const Framebuffer& under, const enhanced::Scene& scene, const graphics::Composite& composite) {
+    SDL_Renderer* renderer = renderer_.get();
+    const SDL_FRect dst = fit();
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
+    SDL_RenderClear(renderer);
+    draw_scene(under, scene, dst);
+    draw_composite(composite, dst);
     finish_frame();
     picture_ = dst;
     picture_w_ = under.width;

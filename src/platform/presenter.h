@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -11,6 +13,10 @@
 
 namespace vette::enhanced {
 struct Scene;
+}
+namespace vette::graphics {
+struct Composite;
+struct Image;
 }
 
 namespace vette {
@@ -29,6 +35,12 @@ public:
     // aren't kTransparentPixel. All three are in the frame's coordinates, placed as present() would.
     static constexpr std::uint8_t kTransparentPixel = 0xFF;
     void present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over);
+    // A frame with the PC-98's or the Mac's art in place of the DOS pictures (graphics/composite.h):
+    // the backdrop or the DOS pixels under the art, the art at the output's resolution, then the DOS
+    // pixels kept on top and the pieces moved into the art's layout. With `under` and `scene`, the
+    // Enhanced 3D view is drawn first and the composite (made from its `over`) on top of it.
+    void present(const graphics::Composite& composite);
+    void present(const Framebuffer& under, const enhanced::Scene& scene, const graphics::Composite& composite);
     // Output pixels per frame pixel, horizontally and vertically, for a frame of this size.
     void frame_scale(int frame_w, int frame_h, float& sx, float& sy) const;
     // The window's drawable size in pixels (what a Canvas should be laid out for).
@@ -58,6 +70,11 @@ private:
         int scale_x = 0, scale_y = 0;  // scaled's factors
     };
     SDL_Texture* upload(Layer& layer, const Framebuffer& fb, bool transparency, const SDL_FRect& dst);
+    SDL_Texture* upload(Layer& layer, const std::uint8_t* pixels, int w, int h,
+                        const std::array<std::uint32_t, 16>& argb, bool transparency, const SDL_FRect& dst);
+    void draw_scene(const Framebuffer& under, const enhanced::Scene& scene, const SDL_FRect& dst);
+    void draw_composite(const graphics::Composite& c, const SDL_FRect& dst);
+    SDL_Texture* art_texture(const graphics::Image& image);
     SDL_FRect fit() const;  // the 4:3 picture rect in render output pixels
     void finish_frame();    // SDL_RenderPresent, after a requested screenshot
 
@@ -66,6 +83,8 @@ private:
     SdlPtr<SDL_Renderer> renderer_;
     Layer base_;  // present()'s frame, and the layered view's `under`
     Layer over_;  // the layered view's `over`
+    Layer art_base_, art_over_, art_moved_;  // a Composite's DOS pixels
+    std::unordered_map<const graphics::Image*, SdlPtr<SDL_Texture>> art_;  // its art, by image
     SdlPtr<SDL_Texture> canvas_;   // the last Canvas, at its own size
     std::vector<float> scene_xy_;  // the scene's vertices in render output pixels
     std::string screenshot_;       // request_screenshot()

@@ -162,8 +162,10 @@ std::string_view help(int row, const Settings& s) {
         return s.graphics == Settings::Graphics::Dos
                    ? "The DOS version's EGA screens, as in 1989."
                    : s.graphics == Settings::Graphics::Pc98
-                         ? "The PC-98 version's 640x400 art (Japanese text). Needs its files in Game/PC98."
-                         : "The Macintosh version's colour screens. Needs its files in Game/Mac.";
+                         ? "The PC-98 version's art: its colours, and sharper race pictures and opponent screen. "
+                           "Needs its files in Game/PC98."
+                         : "The Macintosh version's colour art for the title, garage, opponents, dashboard and crash "
+                           "pictures. Needs its files in Game/Mac.";
     case kEffects:
         switch (s.effects) {
         case Settings::Effects::Off: return "No sound effects.";

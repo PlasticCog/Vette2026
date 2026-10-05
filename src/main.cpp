@@ -9,6 +9,8 @@
 #include "enhanced/world.h"
 #include "game/options.h"
 #include "game/smooth.h"
+#include "graphics/art_files.h"
+#include "graphics/substitution.h"
 #include "host/machine.h"
 #include "platform/audio.h"
 #include "platform/framebuffer.h"
@@ -29,6 +31,7 @@
 #include <SDL3/SDL_main.h>  // UTF-8 argv on Windows
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -53,6 +56,7 @@ constexpr const char* kUsage =
     "Usage: vette2026 [--[no-]launcher] [--game <dir>] [--fps smooth|original] [--pc fast|286]\n"
     "                 [--draw-distance original|extended|maximum] [--cpu-hz <n>] [--[no-]joystick]\n"
     "                 [--effects off|speaker|adlib|mac] [--music off|original|pc98] [--no-sound]\n"
+    "                 [--graphics dos|pc98|mac]\n"
     "                 [--manual-check] [--dump-frame <file.bmp>]\n"
     "Settings come from the launch menu (saved in settings.ini); these flags override them for one run.\n"
     "  --launcher           show the launch menu even if it's switched off (--no-launcher: skip it)\n"
@@ -73,6 +77,8 @@ constexpr const char* kUsage =
     "                       version's digitized sounds (Game/Mac); off\n"
     "  --music original     (default) the title and winner tunes on the effects' device; pc98: the PC-98\n"
     "                       version's FM songs (Game/PC98); off. --no-sound: no effects, no music\n"
+    "  --graphics dos       (default) the DOS screens; pc98 or mac: that version's art in their place\n"
+    "                       (from Game/PC98 or Game/Mac)\n"
     "  --manual-check       show the original's manual-lookup question before the first race\n"
     "                       (skipped by default; this version accepts any answer anyway)\n"
     "  --dump-frame <file>  write the title screen to a 640x200 BMP and exit, without a window\n"
@@ -119,6 +125,7 @@ struct Options {
     std::optional<bool> launcher;
     std::optional<Settings::Effects> effects;
     std::optional<Settings::Music> music;
+    std::optional<Settings::Graphics> graphics;
     std::vector<ScriptedKey> keys;
     std::vector<std::uint64_t> shots;    // emulated ns, sorted
     std::optional<std::uint64_t> quit_after;  // emulated ns
@@ -141,6 +148,8 @@ struct Options {
             s.effects = *effects;
         if (music)
             s.music = *music;
+        if (graphics)
+            s.graphics = *graphics;
     }
 };
 
@@ -178,6 +187,15 @@ std::optional<Options> parse_args(int argc, char** argv) {
                 return std::nullopt;
             }
             opts.effects = static_cast<Settings::Effects>(it - std::begin(kNames));
+        } else if (arg == "--graphics" && has_value) {
+            const std::string_view v = argv[++i];
+            static constexpr std::string_view kNames[] = {"dos", "pc98", "mac"};
+            const auto it = std::find(std::begin(kNames), std::end(kNames), v);
+            if (it == std::end(kNames)) {
+                std::fprintf(stderr, "--graphics: dos, pc98 or mac\n");
+                return std::nullopt;
+            }
+            opts.graphics = static_cast<Settings::Graphics>(it - std::begin(kNames));
         } else if (arg == "--music" && has_value) {
             const std::string_view v = argv[++i];
             static constexpr std::string_view kNames[] = {"off", "original", "pc98"};
@@ -234,7 +252,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const bool needs_value = arg == "--game" || arg == "--dump-frame" || arg == "--cpu-hz" ||
                                      arg == "--fps" || arg == "--pc" || arg == "--draw-distance" ||
                                      arg == "--key" || arg == "--hold" || arg == "--shot" || arg == "--quit-after" ||
-                                     arg == "--wav" || arg == "--effects" || arg == "--music";
+                                     arg == "--wav" || arg == "--effects" || arg == "--music" ||
+                                     arg == "--graphics";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
                          argv[i], kUsage);
             return std::nullopt;
@@ -310,6 +329,30 @@ constexpr std::uint64_t kExtractFromNs = kNsPerSecond;  // emulated time; earlie
 constexpr std::uint64_t kExtractRetryNs = kNsPerSecond / 2;
 constexpr std::uint64_t kExtractUntilNs = 10 * kNsPerSecond;
 static_assert(Presenter::kTransparentPixel == game::SmoothRenderer::kTransparent);
+
+// The Graphics option: the PC-98's or the Mac's art in place of the DOS pictures it recognises on
+// screen (graphics/substitution.h); every other frame is shown as the game drew it.
+struct Artwork {
+    std::unique_ptr<graphics::Substitution> substitution;
+    graphics::Composite composite;
+    std::array<std::uint32_t, 16> palette{};
+    std::uint64_t frames = 0;
+    double compose_ms = 0;
+
+    // A composite for this frame (the game's frame, or the Enhanced view's `over`), if one applies.
+    bool compose(const Framebuffer& fb) {
+        if (fb.width == 0)
+            return false;
+        for (std::size_t i = 0; i < palette.size(); ++i)
+            palette[i] = std::uint32_t{fb.palette[i].r} << 16 | std::uint32_t{fb.palette[i].g} << 8 | fb.palette[i].b;
+        const std::uint64_t start = SDL_GetTicksNS();
+        const bool replaced =
+            substitution->compose({fb.pixels.data(), fb.width, fb.height, &palette}, composite);
+        compose_ms += static_cast<double>(SDL_GetTicksNS() - start) / 1e6;
+        ++frames;
+        return replaced;
+    }
+};
 
 struct EnhancedView {
     int radius = enhanced::kMapCells;
@@ -496,7 +539,8 @@ std::unique_ptr<sound::SfxBackend> pc98_music(const GameDir& game, host::Machine
 // (optional, with `smooth` in world-layers mode) draws its world with the Enhanced renderer. `script`:
 // the testing options (keys, screenshots, quit time).
 void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Gamepad& gamepad,
-               game::SmoothRenderer* smooth, EnhancedView* view, GameSound* game_sound, const Options& script) {
+               game::SmoothRenderer* smooth, EnhancedView* view, GameSound* game_sound, Artwork* art,
+               const Options& script) {
     std::size_t next_key = 0;
     std::size_t next_shot = 0;
     std::optional<WavWriter> wav;
@@ -623,8 +667,13 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
             SDL_Delay(10);  // VSync doesn't pace a hidden window
             continue;
         }
-        if (layered)
+        const bool replaced = art && art->compose(top);
+        if (layered && replaced)
+            presenter.present(view->under, view->scene, art->composite);
+        else if (layered)
             presenter.present(view->under, view->scene, view->over);
+        else if (replaced)
+            presenter.present(art->composite);
         else
             presenter.present(fb);
         ++presented.frames;
@@ -760,8 +809,32 @@ int run(int argc, char** argv) {
         SDL_Log("Sound effects: %s; music: %s%s", kEffects[static_cast<int>(settings.effects)],
                 kMusic[static_cast<int>(settings.music)], audio || silent ? "" : " (not played)");
 
+        // Graphics: the PC-98's or the Mac's art, from the player's copies in Game/PC98 and Game/Mac.
+        std::unique_ptr<Artwork> art;
+        if (settings.graphics != Settings::Graphics::Dos) {
+            const graphics::Art which =
+                settings.graphics == Settings::Graphics::Pc98 ? graphics::Art::Pc98 : graphics::Art::Mac;
+            std::vector<std::string> notes;
+            const graphics::ArtFiles files = graphics::ArtFiles::from_game_dir(game->root(), &notes);
+            auto substitution = std::make_unique<graphics::Substitution>(which, files);
+            for (const std::string& w : substitution->warnings())
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Graphics: %s", w.c_str());
+            if (substitution->available().empty()) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Graphics: no %s art found; the DOS screens are shown",
+                            graphics::art_name(which));
+            } else {
+                substitution->set_program_memory(machine.memory().ram());
+                art = std::make_unique<Artwork>();
+                art->substitution = std::move(substitution);
+                SDL_Log("Graphics: %s art for %u screens", graphics::art_name(which),
+                        static_cast<unsigned>(art->substitution->available().size()));
+            }
+        }
+
         main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad, smooth ? &*smooth : nullptr, view.get(),
-                  game_sound.get(), *opts);
+                  game_sound.get(), art.get(), *opts);
+        if (art && art->frames)
+            SDL_Log("Graphics: %.2f ms per frame to compose", art->compose_ms / static_cast<double>(art->frames));
         if (smooth && smooth->stats().replays)
             SDL_Log("Smooth: %llu game frames, %llu display frames, %.2f ms per replay",
                     static_cast<unsigned long long>(smooth->stats().game_frames),

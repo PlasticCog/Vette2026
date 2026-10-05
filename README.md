@@ -81,6 +81,24 @@ original|extended|maximum` overrides the setting for one run. Not yet covered: t
 freeway sections show the original's view, and the painted skyline behind the city stays, so far
 buildings stand in front of their painted copies.
 
+**Sound effects and music.** The original only had the PC speaker. VETTE! 2026 can instead play its
+sounds on an emulated **AdLib** card (the Enhanced preset; DOS VETTE! never supported one), or use the
+**Macintosh** version's digitized sounds. The **music** can be the original's tunes, or the **PC-98**
+version's FM soundtrack (its YM2203 chip, emulated). That soundtrack adds music to the menus and the
+loser's screen, where DOS is silent. With AdLib or the Mac sounds, the engine keeps running under a skid
+or the siren, where the original's single speaker voice cut it off. The Mac and PC-98 options need those
+versions' files (see [`Game/`](Game/README.md)). `--effects` and `--music` override the settings for one
+run.
+
+**Sound editor.** `vette_sfx` edits the AdLib sounds: every sound's FM instrument and pitch, with the
+original PC-speaker version (read from your own copy of the game) to compare. A game that's running
+picks up a saved change within a second.
+
+**Graphics.** With **PC-98** or **Mac** graphics, VETTE! 2026 recognises the DOS pictures on screen
+(title, garage, opponent selection, dashboard, crash pictures) and shows the other version's art in
+their place, at your display's resolution. Everything the game draws over them (text, gauges,
+selections) stays on top or moves into the new layout. The game itself runs unchanged.
+
 **PC speed.** By default the emulated PC is fast enough that the game runs at its own built-in limit of
 30 fps, as it did on fast 386/486 PCs; the game then also enables its rear-view mirror and building
 windows. `--pc 286` emulates a 12 MHz PC/AT of 1989 (about 12-17 fps); `--cpu-hz <n>` sets any clock.

@@ -22,6 +22,8 @@ constexpr Choice<Settings::FrameRate, 2> kFrameRate{"frame_rate", {"smooth", "or
 constexpr Choice<Settings::Pc, 2> kPc{"pc", {"fast", "286"}};
 constexpr Choice<Settings::DrawDistance, 3> kDrawDistance{"draw_distance", {"original", "extended", "maximum"}};
 constexpr Choice<Settings::Joystick, 3> kJoystick{"joystick", {"auto", "on", "off"}};
+constexpr Choice<Settings::Sound, 5> kSound{"sound", {"off", "speaker", "adlib", "pc98", "mac"}};
+constexpr Choice<Settings::Graphics, 3> kGraphics{"graphics", {"dos", "pc98", "mac"}};
 constexpr std::array<std::string_view, 2> kManualCheck{"skip", "show"};
 constexpr std::array<std::string_view, 2> kDisplay{"window", "fullscreen"};
 constexpr std::array<std::string_view, 2> kOnOff{"off", "on"};
@@ -67,11 +69,13 @@ void Settings::apply(Preset p) {
         frame_rate = FrameRate::Original;
         pc = Pc::At286;
         draw_distance = DrawDistance::Original;
+        sound = Sound::Speaker;
         manual_check = true;
     } else if (p == Preset::Enhanced) {
         frame_rate = FrameRate::Smooth;
         pc = Pc::Fast;
         draw_distance = DrawDistance::Maximum;
+        sound = Sound::AdLib;
         manual_check = false;
     }
 }
@@ -85,7 +89,8 @@ std::string Settings::serialize() const {
     out << "manual_check = " << kManualCheck[manual_check] << "\n";
     out << kJoystick.key << " = " << kJoystick.names[static_cast<size_t>(joystick)] << "\n";
     out << "display = " << kDisplay[fullscreen] << "\n";
-    out << "sound = " << kOnOff[sound] << "\n";
+    out << kSound.key << " = " << kSound.names[static_cast<size_t>(sound)] << "\n";
+    out << kGraphics.key << " = " << kGraphics.names[static_cast<size_t>(graphics)] << "\n";
     out << "launcher = " << kOnOff[show_launcher] << "\n";
     out << "game_folder = " << game_folder << "\n";
     return out.str();
@@ -108,7 +113,10 @@ Settings Settings::parse(const std::string& text) {
         read(kJoystick, key, value, s.joystick);
         read_bool("manual_check", kManualCheck, key, value, s.manual_check);
         read_bool("display", kDisplay, key, value, s.fullscreen);
-        read_bool("sound", kOnOff, key, value, s.sound);
+        read(kSound, key, value, s.sound);
+        read(kGraphics, key, value, s.graphics);
+        if (key == "sound" && value == "on")  // before the sound sources: the speaker
+            s.sound = Sound::Speaker;
         read_bool("launcher", kOnOff, key, value, s.show_launcher);
         if (key == "game_folder")
             s.game_folder = std::string(value);  // everything after the first '=', trimmed

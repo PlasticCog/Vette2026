@@ -34,7 +34,7 @@ struct SfxVoice {
 struct EngineVoice {
     bool enabled = true;
     OplPatch patch;
-    float ratio = 0.5f;   // the voice's pitch as a multiple of the original engine note
+    float ratio = 1;      // the voice's pitch as a multiple of the original engine note
     float transpose = 0;  // semitones on top
     int volume = 70;      // percent
 

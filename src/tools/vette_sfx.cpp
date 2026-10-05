@@ -19,7 +19,11 @@
 #include <string>
 #include <vector>
 
+#include "core/game_dir.h"
 #include "core/path_utf8.h"
+#include "core/settings.h"
+#include "game/sound_events.h"
+#include "host/machine.h"
 #include "platform/audio.h"
 #include "platform/presenter.h"
 #include "platform/sdl_util.h"
@@ -42,20 +46,98 @@ using sound::SpeakerProgram;
 constexpr int kRate = 48000;
 constexpr const char* kTitle = "VETTE! 2026 Sound Editor";
 
-// A sound in the list: its bank id, and the original's PC-speaker program when known.
+// A sound in the list: its bank id and name, and the original's PC-speaker sound when known: notes,
+// or for the noise sounds (crashes, gear grind) the speaker clicks.
 struct Entry {
     std::string id;
+    std::string label;
     std::optional<SpeakerProgram> original;
+    std::vector<game::SoundEvents::Pulse> clicks;
 };
+
+const char* label(game::Sfx sfx) {
+    switch (sfx) {
+    case game::Sfx::Engine: return "Engine";
+    case game::Sfx::GarageRev: return "Garage rev";
+    case game::Sfx::Skid: return "Skid";
+    case game::Sfx::Siren: return "Police siren";
+    case game::Sfx::TitleTune: return "Title tune";
+    case game::Sfx::WinTune: return "Winner's tune";
+    case game::Sfx::Crash: return "Crash";
+    case game::Sfx::CrashCar: return "Crash into a car";
+    case game::Sfx::CrashRail: return "Crash: guard rail";
+    case game::Sfx::HitPedestrian: return "Hit a pedestrian";
+    case game::Sfx::GearGrind: return "Gear grind";
+    case game::Sfx::Count: break;
+    }
+    return "";
+}
+
+// The original's sounds, read from the player's own VETTE.EXE: it's booted headlessly until it has
+// unpacked itself, then every sound's program is read from its memory (game/sound_events.h).
+std::vector<Entry> load_originals(std::string& note) {
+    std::vector<Entry> entries;
+    for (int i = 0; i < static_cast<int>(game::Sfx::Count); ++i) {
+        const auto sfx = static_cast<game::Sfx>(i);
+        if (sfx != game::Sfx::Engine)
+            entries.push_back({game::sfx_name(sfx), label(sfx), std::nullopt, {}});
+    }
+    char* pref = SDL_GetPrefPath("VETTE2026", "config");
+    const Settings settings = pref ? load_settings(path_from_utf8(pref) / "settings.ini") : Settings{};
+    SDL_free(pref);
+    GameDirSearch search;
+    if (!settings.game_folder.empty())
+        search = find_game_dir(path_from_utf8(settings.game_folder));
+    if (!search.dir)
+        search = find_game_dir(std::nullopt);
+    if (!search.dir) {
+        note = "The DOS game wasn't found, so its original sounds can't be played (O).";
+        return entries;
+    }
+    host::MachineConfig config;
+    config.game_dir = search.dir->root();
+    config.save_dir = std::filesystem::temp_directory_path() / "vette2026_sfx";  // never the player's saves
+    config.audio_rate = kRate;
+    config.cpu_hz = 140'000'000;
+    host::Machine machine(config);
+    std::string error;
+    if (!machine.boot(error)) {
+        note = "Couldn't start VETTE.EXE (" + error + "), so its original sounds can't be played.";
+        return entries;
+    }
+    game::SoundEvents events(machine);
+    machine.run_for(1'500'000'000);  // past the unpacking, well before the title
+    for (Entry& e : entries) {
+        const game::SoundEvents::Program prog = events.program(*game::sfx_from_name(e.id));
+        if (!prog.steps.empty()) {
+            SpeakerProgram sp;
+            for (const auto& step : prog.steps)
+                sp.steps.push_back({step.ticks, step.hz});
+            sp.loop_to = prog.loop_to;
+            e.original = std::move(sp);
+        }
+        e.clicks = prog.pulses;
+    }
+    return entries;
+}
 
 // The original sound as the PC speaker played it: a square wave stepping through the program.
 class SpeakerPreview {
 public:
     void play(const SpeakerProgram& p) {
+        pulses_.clear();
         program_ = p;
         step_ = 0;
         left_ = p.steps.empty() ? 0 : p.steps[0].ticks / SpeakerProgram::kTickHz;
         active_ = !p.steps.empty();
+    }
+    // A noise sound: the speaker cone pushed out for `on` microseconds, then back for `off`, click by click.
+    void clicks(const std::vector<game::SoundEvents::Pulse>& pulses) {
+        pulses_ = pulses;
+        pulse_ = 0;
+        pulse_t_ = 0;
+        active_ = !pulses.empty();
+        program_.steps.clear();
     }
     void tone(float hz) {  // a held note (the engine)
         program_ = SpeakerProgram{{{1, hz}}, 0};
@@ -66,6 +148,21 @@ public:
 
     void render(float* out, int frames) {
         const double dt = 1.0 / kRate;
+        if (!pulses_.empty() && program_.steps.empty()) {
+            for (int i = 0; i < frames && active_; ++i) {
+                const auto& p = pulses_[pulse_];
+                const double us = pulse_t_ * 1e6;
+                smooth_ += ((us < p.on_us ? 0.18f : -0.18f) - smooth_) * 0.35f;
+                out[i] += smooth_;
+                pulse_t_ += dt;
+                if (pulse_t_ * 1e6 >= p.on_us + p.off_us) {
+                    pulse_t_ = 0;
+                    if (++pulse_ >= pulses_.size())
+                        active_ = false;
+                }
+            }
+            return;
+        }
         for (int i = 0; i < frames && active_; ++i) {
             const float hz = program_.steps[step_].hz;
             float v = 0;
@@ -92,6 +189,9 @@ public:
 
 private:
     SpeakerProgram program_;
+    std::vector<game::SoundEvents::Pulse> pulses_;
+    size_t pulse_ = 0;
+    double pulse_t_ = 0;
     size_t step_ = 0;
     double left_ = 0, phase_ = 0;
     float smooth_ = 0;
@@ -182,7 +282,11 @@ class Editor {
 public:
     Editor(Presenter& presenter, std::filesystem::path bank_path)
         : presenter_(presenter), bank_path_(std::move(bank_path)), adlib_(kRate) {
+        std::string note;
+        entries_ = load_originals(note);
         load();
+        if (!note.empty())
+            status_ = note;
     }
 
     int run() {
@@ -227,7 +331,7 @@ private:
     bool engine_selected() const { return selected_ == 0; }
     bool fallback_selected() const { return selected_ == 1; }
     std::string list_label(size_t i) const {
-        return i == 0 ? "Engine" : i == 1 ? "(Any other sound)" : entries_[i - 2].id;
+        return i == 0 ? "Engine" : i == 1 ? "(Any other sound)" : entries_[i - 2].label;
     }
     size_t list_size() const { return entries_.size() + 2; }
     const Entry* entry() const { return selected_ >= 2 ? &entries_[selected_ - 2] : nullptr; }
@@ -252,10 +356,6 @@ private:
             status_ = "New bank (built-in sounds). S saves it to " + path_to_utf8(bank_path_);
         }
         saved_ = bank_;
-        // Every sound the bank names. (The full list, with the original's own notes, comes from the game.)
-        entries_.clear();
-        for (const auto& [id, voice] : bank_.sounds)
-            entries_.push_back({id, std::nullopt});
         adlib_.set_bank(bank_);
     }
 
@@ -313,6 +413,8 @@ private:
                 speaker_.stop();
             else if (program)
                 speaker_.play(*program);
+            else if (entry() && !entry()->clicks.empty())
+                speaker_.clicks(entry()->clicks);
             else
                 status_ = "The original isn't known for this sound.";
             return;
@@ -515,7 +617,7 @@ private:
     bool in_fields_ = false;
     bool quit_armed_ = false;
     bool engine_on_ = false;
-    float engine_hz_ = 110;
+    float engine_hz_ = 40;
 };
 
 int run(int argc, char** argv) {

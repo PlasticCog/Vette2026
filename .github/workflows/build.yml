@@ -91,13 +91,14 @@ jobs:
             Windows) cp "$BUILD/vette2026.exe" "$dist/" ;;
             Linux)   cp "$BUILD/vette2026" "$dist/" && chmod +x "$dist/vette2026" ;;
             macOS)
-              cp -R "$BUILD/VETTE! 2026.app" "$dist/"
-              # Ad-hoc signature over the finished bundle (arm64 code must be signed to run at all).
-              codesign --force --deep --sign - "$dist/VETTE! 2026.app" ;;
+              for app in "VETTE! 2026.app" "VETTE! 2026 Sound Editor.app"; do
+                cp -R "$BUILD/$app" "$dist/"
+                # Ad-hoc signature over the finished bundle (arm64 code must be signed to run at all).
+                codesign --force --deep --sign - "$dist/$app"
+              done ;;
           esac
-          for tool in vette_sfx; do
-            for f in "$BUILD/$tool" "$BUILD/$tool.exe"; do [[ -f "$f" ]] && cp "$f" "$dist/"; done
-          done
+          # The sound editor (macOS: the bundle above).
+          for f in "$BUILD/vette_sfx" "$BUILD/vette_sfx.exe"; do [[ -f "$f" ]] && cp "$f" "$dist/"; done
           cd dist
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             tar -czf "$PACKAGE.tar.gz" "$PACKAGE"

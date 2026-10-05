@@ -14,6 +14,9 @@
 #include "platform/keymap.h"
 #include "platform/mouse_pointer.h"
 #include "platform/presenter.h"
+#include "sound/game_audio.h"
+#include "sound/sfx_backend.h"
+#include "sound/sfx_bank.h"
 #include "ui/launcher.h"
 
 #include <SDL3/SDL.h>
@@ -25,7 +28,9 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -40,7 +45,7 @@ constexpr const char* kAppName = "VETTE! 2026";
 constexpr const char* kUsage =
     "Usage: vette2026 [--[no-]launcher] [--game <dir>] [--fps smooth|original] [--pc fast|286]\n"
     "                 [--draw-distance original|extended|maximum] [--cpu-hz <n>] [--[no-]joystick]\n"
-    "                 [--[no-]sound] [--manual-check] [--dump-frame <file.bmp>]\n"
+    "                 [--sound off|speaker|adlib|pc98|mac] [--manual-check] [--dump-frame <file.bmp>]\n"
     "Settings come from the launch menu (saved in settings.ini); these flags override them for one run.\n"
     "  --launcher           show the launch menu even if it's switched off (--no-launcher: skip it)\n"
     "  --game <dir>         folder with the DOS VETTE! files (default: search for Game/)\n"
@@ -55,7 +60,9 @@ constexpr const char* kUsage =
     "                       own 320x200 view, about two blocks ahead\n"
     "  --joystick           give the PC a joystick even if no gamepad is connected yet\n"
     "  --no-joystick        no joystick, even with a gamepad connected\n"
-    "  --no-sound           no sound (--sound: sound on)\n"
+    "  --sound adlib        (default) the sounds on an emulated AdLib FM card (bank: adlib.ini, edited\n"
+    "                       with vette_sfx); speaker: the original PC speaker; pc98: the PC-98 version's\n"
+    "                       FM sound; mac: the Macintosh version's digitized sounds; off (or --no-sound)\n"
     "  --manual-check       show the original's manual-lookup question before the first race\n"
     "                       (skipped by default; this version accepts any answer anyway)\n"
     "  --dump-frame <file>  write the title screen to a 640x200 BMP and exit, without a window\n"
@@ -64,6 +71,8 @@ constexpr const char* kUsage =
     "                       from second A to B, as vette_run does\n"
     "  --shot T             save the window's picture at second T to shot_T.bmp (repeatable)\n"
     "  --quit-after T       close at second T\n"
+    "  --wav <file>         record the sound to a WAV file (16-bit mono)\n"
+    "  --mute               make the sound (for --wav) but don't play it\n"
     "\n"
     "F11 or Alt+Enter toggles fullscreen. Every other key, Esc included, goes to the game.\n"
     "A gamepad connected at launch becomes the PC's analog joystick. DOS games look for one only\n"
@@ -98,10 +107,12 @@ struct Options {
     std::optional<bool> joystick;
     std::optional<bool> manual_check;
     std::optional<bool> launcher;
-    std::optional<bool> sound;
+    std::optional<Settings::Sound> sound;
     std::vector<ScriptedKey> keys;
     std::vector<std::uint64_t> shots;    // emulated ns, sorted
-    std::optional<std::uint64_t> quit_after;  // emulated ns  // sorted by time
+    std::optional<std::uint64_t> quit_after;  // emulated ns
+    std::optional<std::string> wav;           // UTF-8 path
+    bool mute = false;  // sorted by time
     bool help = false;
 
     void apply_to(Settings& s) const {
@@ -138,8 +149,21 @@ std::optional<Options> parse_args(int argc, char** argv) {
                 opts.shots.push_back(ns);
             else
                 opts.quit_after = ns;
-        } else if (arg == "--sound" || arg == "--no-sound") {
-            opts.sound = arg == "--sound";
+        } else if (arg == "--wav" && has_value) {
+            opts.wav = argv[++i];
+        } else if (arg == "--mute") {
+            opts.mute = true;
+        } else if (arg == "--no-sound") {
+            opts.sound = Settings::Sound::Off;
+        } else if (arg == "--sound" && has_value) {
+            const std::string_view v = argv[++i];
+            static constexpr std::string_view kNames[] = {"off", "speaker", "adlib", "pc98", "mac"};
+            const auto it = std::find(std::begin(kNames), std::end(kNames), v);
+            if (it == std::end(kNames)) {
+                std::fprintf(stderr, "--sound: off, speaker, adlib, pc98 or mac\n");
+                return std::nullopt;
+            }
+            opts.sound = static_cast<Settings::Sound>(it - std::begin(kNames));
         } else if (arg == "--launcher" || arg == "--no-launcher") {
             opts.launcher = arg == "--launcher";
         } else if (arg == "--game" && has_value) {
@@ -186,7 +210,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
         } else {
             const bool needs_value = arg == "--game" || arg == "--dump-frame" || arg == "--cpu-hz" ||
                                      arg == "--fps" || arg == "--pc" || arg == "--draw-distance" ||
-                                     arg == "--key" || arg == "--hold" || arg == "--shot" || arg == "--quit-after";
+                                     arg == "--key" || arg == "--hold" || arg == "--shot" || arg == "--quit-after" ||
+                                     arg == "--wav" || arg == "--sound";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
                          argv[i], kUsage);
             return std::nullopt;
@@ -309,14 +334,94 @@ struct EnhancedView {
     }
 };
 
+// The game's sound from a replacement source (AdLib; the PC-98 and Mac versions' sound to come), driven
+// by its sound events, in place of the emulated PC speaker. The AdLib bank is read from adlib.ini in the
+// settings folder, again whenever it changes (saved from the sound editor while the game runs).
+constexpr float kReplacementGain = 2.5f;  // a single FM voice at full volume against the speaker's level
+
+struct GameSound {
+    sound::AdlibBackend adlib{kAudioRate};
+    std::unique_ptr<sound::GameAudio> audio;
+    std::filesystem::path bank_file;
+    std::filesystem::file_time_type bank_time{};
+    std::uint64_t next_check_ns = 0;
+    std::vector<float> mix;
+
+    GameSound(host::Machine& machine, std::filesystem::path bank)
+        : audio(std::make_unique<sound::GameAudio>(machine, kAudioRate, adlib, nullptr)), bank_file(std::move(bank)) {
+        load_bank();
+    }
+
+    void load_bank() {
+        std::error_code ec;
+        bank_time = std::filesystem::last_write_time(bank_file, ec);
+        std::ifstream f(bank_file, std::ios::binary);
+        if (!f) {
+            adlib.adlib().set_bank(sound::SfxBank::defaults());
+            return;
+        }
+        std::stringstream text;
+        text << f.rdbuf();
+        adlib.adlib().set_bank(sound::SfxBank::parse(text.str()));
+        SDL_Log("AdLib sound bank: %s", path_to_utf8(bank_file).c_str());
+    }
+
+    // Replaces one stretch of the speaker's samples (emulated time from t0) with the replacement's.
+    void process(std::uint64_t t0_ns, std::vector<std::int16_t>& samples) {
+        if (SDL_GetTicksNS() >= next_check_ns) {
+            next_check_ns = SDL_GetTicksNS() + kNsPerSecond;
+            std::error_code ec;
+            const auto t = std::filesystem::last_write_time(bank_file, ec);
+            if (!ec && t != bank_time)
+                load_bank();
+        }
+        audio->render(t0_ns, static_cast<int>(samples.size()), mix);
+        for (std::size_t i = 0; i < samples.size(); ++i)
+            samples[i] = static_cast<std::int16_t>(std::clamp(mix[i] * kReplacementGain, -1.0f, 1.0f) * 32767.0f);
+    }
+};
+
+// --wav: the sound as played, to a 16-bit mono WAV (the header is completed on close).
+class WavWriter {
+public:
+    explicit WavWriter(const std::string& path_utf8) : file_(path_from_utf8(path_utf8), std::ios::binary) {
+        file_.write(std::string(44, '\0').data(), 44);
+    }
+    ~WavWriter() {
+        const auto u32 = [](std::uint32_t v) {
+            return std::string{static_cast<char>(v), static_cast<char>(v >> 8), static_cast<char>(v >> 16),
+                               static_cast<char>(v >> 24)};
+        };
+        const auto u16 = [](std::uint16_t v) { return std::string{static_cast<char>(v), static_cast<char>(v >> 8)}; };
+        const std::string header = "RIFF" + u32(36 + bytes_) + "WAVEfmt " + u32(16) + u16(1) + u16(1) + u32(kAudioRate) +
+                                   u32(kAudioRate * 2) + u16(2) + u16(16) + "data" + u32(bytes_);
+        file_.seekp(0);
+        file_.write(header.data(), static_cast<std::streamsize>(header.size()));
+    }
+    void write(const std::vector<std::int16_t>& samples) {
+        for (const std::int16_t v : samples) {
+            const char b[2] = {static_cast<char>(v), static_cast<char>(static_cast<std::uint16_t>(v) >> 8)};
+            file_.write(b, 2);
+        }
+        bytes_ += static_cast<std::uint32_t>(samples.size() * 2);
+    }
+
+private:
+    std::ofstream file_;
+    std::uint32_t bytes_ = 0;
+};
+
 // Runs the hosted game until the window closes or VETTE.EXE exits.
 // `smooth` (optional) draws the race view at the display's refresh rate (game/smooth.h), and `view`
 // (optional, with `smooth` in world-layers mode) draws its world with the Enhanced renderer. `script`:
 // the testing options (keys, screenshots, quit time).
 void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Gamepad& gamepad,
-               game::SmoothRenderer* smooth, EnhancedView* view, const Options& script) {
+               game::SmoothRenderer* smooth, EnhancedView* view, GameSound* game_sound, const Options& script) {
     std::size_t next_key = 0;
     std::size_t next_shot = 0;
+    std::optional<WavWriter> wav;
+    if (script.wav)
+        wav.emplace(*script.wav);
     struct FrameCount {
         std::uint64_t frames = 0;
         std::uint64_t start_ns = SDL_GetTicksNS();
@@ -402,6 +507,7 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
             presenter.request_screenshot(name);
         }
         const std::uint64_t now = SDL_GetTicksNS();
+        const std::uint64_t t0 = machine.emulated_ns();
         machine.run_for(std::min(now - last, kMaxStepNs));
         last = now;
         if (!machine.fault().empty())
@@ -411,6 +517,10 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
 
         samples.clear();
         machine.take_audio(samples);
+        if (game_sound)
+            game_sound->process(t0, samples);
+        if (wav)
+            wav->write(samples);
         if (audio)
             audio->push(samples);
 
@@ -501,7 +611,7 @@ int run(int argc, char** argv) {
         identify_vette_exe(game->read("VETTE.EXE"));
 
         std::optional<AudioOut> audio;
-        if (!settings.sound) {
+        if (settings.sound == Settings::Sound::Off) {
             SDL_Log("Sound: off");
         } else if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
             try {
@@ -551,8 +661,20 @@ int run(int argc, char** argv) {
                 !enhanced_view ? "original" : view->radius == kExtendedRadius ? "extended" : "maximum",
                 static_cast<double>(config.cpu_hz) / 1e6);
 
+        // Sound: the emulated PC speaker, or a replacement driven by the game's sound events.
+        if (opts->mute)
+            audio.reset();
+        std::unique_ptr<GameSound> game_sound;
+        if (settings.sound != Settings::Sound::Off && settings.sound != Settings::Sound::Speaker) {
+            if (settings.sound != Settings::Sound::AdLib)
+                SDL_Log("The PC-98 and Mac sound isn't ready yet: AdLib plays instead.");
+            game_sound = std::make_unique<GameSound>(machine, settings_dir() / "adlib.ini");
+        }
+        SDL_Log("Sound: %s%s", settings.sound == Settings::Sound::Off ? "off" : game_sound ? "AdLib (YM3812)" : "PC speaker",
+                audio || settings.sound == Settings::Sound::Off ? "" : " (not played)");
+
         main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad, smooth ? &*smooth : nullptr, view.get(),
-                  *opts);
+                  game_sound.get(), *opts);
         if (smooth && smooth->stats().replays)
             SDL_Log("Smooth: %llu game frames, %llu display frames, %.2f ms per replay",
                     static_cast<unsigned long long>(smooth->stats().game_frames),

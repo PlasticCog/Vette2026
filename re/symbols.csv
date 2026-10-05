@@ -420,3 +420,48 @@ addr,name,kind,comment
 3009:4788,banner_finish_c1,func,Draws finish banner (block 6015) only when course==1 and sets [38D7]. 4798/47A8 = courses 2/3.
 3009:47B8,banner_start_c1,func,Draws start banner (block 5F19) only when course==1. 47C8/47D8 = courses 2/3.
 3009:36D4,cell_off_n2_w,label,draw_cell call with CX=0x0FD0 (not 0x1000): +2 north cells are drawn 0x30 units too close (also 36F0).
+# --- Sound (re/notes/07-sound.md) --------------------------------------------------------------
+3009:926C,snd_request,data,"b; race sound requests: bit1 skid (vehicle_move 1774), bit2 siren (police_step 1479), bit3 engine (frame loop 0156); bit0 one-shot lock (unused beeps)."
+3009:926D,snd_current,data,"b; request bit of the program playing (2 skid, 4 siren, 8 engine, 1 beep); 0 once a sequence ends."
+3009:926E,engine_noise_on,data,b; engine note on/off (E key).
+3009:9273,snd_engine_last_speed,data,w; engine_speed at the previous snd_engine_set_target.
+3009:927E,snd_seq_skid,data,"Skid warble: 501/462/481/501 Hz for 3/2/3/2 ticks, loop."
+3009:9292,snd_seq_siren,data,"Siren: 659.6 Hz then 523.3 Hz, 28 ticks each, loop."
+3009:929E,snd_seq_unused,data,36.4 Hz for 3 ticks in a loop; never played.
+3009:92A8,snd_engine_divisor,data,"w; the engine note's divisor (inside snd_seq_engine), slid by snd_engine_pitch_tick between 1400h and B000h."
+3009:92AE,snd_seq_beep_lo,data,659.6 Hz for 20 ticks; only snd_beep_lo (unused).
+3009:92B4,snd_seq_beep_hi,data,880.6 Hz for 10 ticks; only snd_beep_hi (unused).
+3009:92C4,snd_seq_win,data,"Win fanfare: 15 entries, 401-tick loop (results screen)."
+3009:9304,snd_seq_title,data,"Title tune: 9 notes, 640 ticks, once."
+3009:932A,snd_engine_resync_table,data,10 w; engine note divisor by engine_speed/8 (snd_engine_resync).
+3009:9470,snd_play_title,func,Plays snd_seq_title if sound_enabled == 1; else snd_stop.
+3009:9483,snd_play_siren,func,
+3009:948A,snd_play_skid,func,
+3009:9491,snd_play_idle,func,Plays snd_seq_idle. No caller.
+3009:9498,snd_noise_crash,func,"Crash noise: 26 speaker clicks, on rand&7FF LOOPs then off 3100..5600 LOOPs; CPU-timed (0.12 s at 12 MHz). Only if sound_enabled == 1."
+3009:94C9,snd_noise_grind,func,"Gear grind: 41 clicks, on r = rand&3FF LOOPs then off r+10 (35 ms at 12 MHz). Only if sound_enabled == 1."
+3009:94FC,snd_request_dispatch,func,"Once per race frame (0165): plays the highest snd_request: skid > siren > engine."
+3009:9578,snd_play_win,func,
+3009:9588,snd_engine_resync,func,"Sound or engine noise back on: snd_engine_last_speed = engine_speed, divisor from snd_engine_resync_table."
+3009:95A4,snd_beep_lo,func,Plays snd_seq_beep_lo with the one-shot lock. No caller.
+3009:95C0,snd_beep_hi,func,Plays snd_seq_beep_hi with the one-shot lock. No caller.
+3009:8D62,random_seed,data,w
+3009:8D64,random_pit,func,"CX = (PIT ch0 count + random_seed) ror 3, also stored in random_seed; AX kept."
+3009:8A22,garage_screen,func,"Car-select screen: arrows pick the car, Space garage_rev, S sound, Esc options_menu, Enter continues."
+3009:8BAF,garage_rev,func,"Space in the garage: engine note at divisor 1300h (245 Hz) until the exhaust animation sets cs:8DB2 = 1."
+3009:098C,key_reverse,func,"R: if moving, neutral + gear grind (+ drivetrain_damage); else reverse."
+3009:0AFC,key_options,func,Esc in the race: options_menu.
+3009:0BC7,key_pause,func,P: snd_stop and pause.
+3009:0C0D,key_sound_toggle,func,S: sound_enabled ^= 1 (snd_stop / snd_engine_resync). Also from the garage.
+3009:0C1D,key_engine_noise_toggle,func,E: engine_noise_on ^= 1 (snd_stop / snd_engine_resync).
+3009:23EC,drivetrain_damage,func,"PRO only: drivetrain damage DS:2C4F 1, 2, 4.. and a HUD message (likely). After a missed shift."
+3009:C532,title_screen,func,Title animation and tune; S toggles the sound; any other key or a button ends it.
+3009:C9E2,race_end,func,"Race over: race-over picture by DS:2AFF, or (finished first) results screen with the win tune."
+3009:CE9B,results_win_picture,func,Victory picture and win tune until a key or 5 s.
+3009:DDED,race_message_picture,func,snd_stop then the race-over picture selected by DS:2AFF.
+3009:E635,options_menu,func,"Mutes the sound (sound_enabled saved in cs:E5FC, restored at EB0C)."
+3009:E5FC,options_saved_sound,data,b; sound_enabled while options_menu runs.
+3009:9968,wait_key_5s,func,"Waits for a key, a joystick button or 91 BIOS ticks (5 s); CF = key."
+3009:7D6A,highway_rail_check,func,"Highway lane out of 1..4: back into the lane, speed loss, crash noise (7EC5)."
+3009:7F79,far_snd_noise_crash,func,Far thunk (RETF) to snd_noise_crash for segment 4021.
+124A:2AFF,race_end_picture,data,"b; race-over picture: 0 finished first (win), 1-4 an opponent won (likely), 5 wrecked (likely), 6 into the bay."

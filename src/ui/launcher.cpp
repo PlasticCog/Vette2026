@@ -1,10 +1,12 @@
 #include "ui/launcher.h"
 
 #include <SDL3/SDL.h>
-#include <cstddef>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstddef>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -24,7 +26,7 @@ namespace vette::ui {
 namespace {
 
 enum Row {
-    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kManualCheck, kJoystick, kDisplay, kSound, kLauncher,
+    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kGraphics, kSound, kManualCheck, kJoystick, kDisplay, kLauncher,
     kPlay, kQuit, kRows
 };
 
@@ -42,6 +44,7 @@ const char* label(int row) {
     case kManualCheck: return "Manual check";
     case kJoystick: return "Joystick";
     case kDisplay: return "Display";
+    case kGraphics: return "Graphics";
     case kSound: return "Sound";
     case kLauncher: return "This screen";
     case kPlay: return "Play";
@@ -49,7 +52,39 @@ const char* label(int row) {
     }
 }
 
-std::string value(int row, const Settings& s, const std::optional<GameDir>& game) {
+// The other versions' files, in subfolders of the game folder (Game/PC98, Game/Mac).
+struct Extras {
+    bool pc98 = false;
+    bool mac = false;
+};
+
+bool has_subfolder(const std::filesystem::path& root, std::string_view name) {
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string n = path_to_utf8(it->path().filename());
+        if (it->is_directory(ec) && n.size() == name.size() &&
+            std::equal(n.begin(), n.end(), name.begin(), [](char a, char b) { return std::tolower(a) == std::tolower(b); }))
+            return true;
+    }
+    return false;
+}
+
+Extras find_extras(const std::optional<GameDir>& game) {
+    if (!game)
+        return {};
+    return {has_subfolder(game->root(), "PC98"), has_subfolder(game->root(), "Mac")};
+}
+
+// A choice that needs another version's files, when they aren't there.
+bool missing(int row, const Settings& s, const Extras& x) {
+    if (row == kGraphics)
+        return (s.graphics == Settings::Graphics::Pc98 && !x.pc98) || (s.graphics == Settings::Graphics::Mac && !x.mac);
+    if (row == kSound)
+        return (s.sound == Settings::Sound::Pc98 && !x.pc98) || (s.sound == Settings::Sound::Mac && !x.mac);
+    return false;
+}
+
+std::string value(int row, const Settings& s, const std::optional<GameDir>& game, const Extras& x) {
     switch (row) {
     case kFolder: return game ? path_to_utf8(game->root()) : "Not found - Enter to choose";
     case kPreset:
@@ -66,7 +101,18 @@ std::string value(int row, const Settings& s, const std::optional<GameDir>& game
     case kJoystick:
         return s.joystick == Settings::Joystick::Auto ? "Auto" : s.joystick == Settings::Joystick::On ? "On" : "Off";
     case kDisplay: return s.fullscreen ? "Full screen" : "Window";
-    case kSound: return s.sound ? "On (PC speaker)" : "Off";
+    case kGraphics: {
+        const std::string v = s.graphics == Settings::Graphics::Dos    ? "DOS (original)"
+                              : s.graphics == Settings::Graphics::Pc98 ? "PC-98"
+                                                                       : "Macintosh";
+        return missing(row, s, x) ? v + " - files missing" : v;
+    }
+    case kSound: {
+        static constexpr const char* kNames[] = {"Off", "PC speaker (original)", "AdLib (FM)", "PC-98 (YM2203 FM)",
+                                                 "Macintosh (digitized)"};
+        const std::string v = kNames[static_cast<int>(s.sound)];
+        return missing(row, s, x) ? v + " - files missing" : v;
+    }
     case kLauncher: return s.show_launcher ? "Show at start" : "Skip at start";
     default: return "";
     }
@@ -105,7 +151,25 @@ std::string_view help(int row, const Settings& s) {
         return "Auto: a gamepad connected at startup becomes the PC's joystick. On: always there. Off: none "
                "(the pad still works in menus).";
     case kDisplay: return "F11 or Alt+Enter switches at any time.";
-    case kSound: return "The original's PC speaker sound.";
+    case kGraphics:
+        return s.graphics == Settings::Graphics::Dos
+                   ? "The DOS version's EGA screens, as in 1989."
+                   : s.graphics == Settings::Graphics::Pc98
+                         ? "The PC-98 version's 640x400 art (Japanese text). Needs its files in Game/PC98."
+                         : "The Macintosh version's colour screens. Needs its files in Game/Mac.";
+    case kSound:
+        switch (s.sound) {
+        case Settings::Sound::Off: return "No sound.";
+        case Settings::Sound::Speaker: return "The original's PC speaker sound.";
+        case Settings::Sound::AdLib:
+            return "An AdLib FM sound card, which the original never supported: each sound on its own instrument. "
+                   "vette_sfx edits them.";
+        case Settings::Sound::Pc98:
+            return "The PC-98 version's YM2203 FM sound. Needs its files in Game/PC98; AdLib plays what it lacks.";
+        case Settings::Sound::Mac:
+            return "The Macintosh version's digitized sounds. Needs its files in Game/Mac; AdLib plays what it lacks.";
+        }
+        return "";
     case kLauncher:
         return "Skip: the game starts straight away next time. Run vette2026 --launcher to see this screen "
                "again.";
@@ -236,7 +300,8 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             s.fullscreen = !s.fullscreen;
             presenter.set_fullscreen(s.fullscreen);
             break;
-        case kSound: s.sound = !s.sound; break;
+        case kGraphics: s.graphics = static_cast<Settings::Graphics>((static_cast<int>(s.graphics) + dir + 3) % 3); break;
+        case kSound: s.sound = static_cast<Settings::Sound>((static_cast<int>(s.sound) + dir + 5) % 5); break;
         case kLauncher: s.show_launcher = !s.show_launcher; break;
         default: break;
         }
@@ -381,6 +446,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
         // Options and actions.
         const int value_x = m + kValueColumn * kGlyph;
         const size_t value_chars = static_cast<size_t>(std::max(0, (canvas.width - value_x - m) / kGlyph - 4));
+        const Extras extras = find_extras(game);
         for (int row = 0; row < kRows; ++row) {
             const int y = lay.row_y(row);
             const bool sel = row == selected;
@@ -391,10 +457,10 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
                 continue;
             }
             canvas.text(m, y, label(row), sel ? kGold : kLabel);
-            std::string v = fit_left(value(row, s, game), value_chars);
+            std::string v = fit_left(value(row, s, game, extras), value_chars);
             if (row != kFolder)
                 v = "< " + v + " >";
-            canvas.text(value_x, y, v, row == kFolder && !game ? kBad : kValue);
+            canvas.text(value_x, y, v, (row == kFolder && !game) || missing(row, s, extras) ? kBad : kValue);
         }
 
         // Status, help and key hints.

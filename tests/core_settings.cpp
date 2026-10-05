@@ -18,12 +18,14 @@ TEST(settings_presets) {
     CHECK(s.frame_rate == Settings::FrameRate::Original);
     CHECK(s.pc == Settings::Pc::At286);
     CHECK(s.draw_distance == Settings::DrawDistance::Original);
+    CHECK(s.sound == Settings::Sound::Speaker);
     CHECK(s.manual_check);
     s.manual_check = false;  // one change away from a preset is Custom
     CHECK(s.preset() == Settings::Preset::Custom);
     s.apply(Settings::Preset::Enhanced);
     CHECK(s.preset() == Settings::Preset::Enhanced);
     CHECK(s.draw_distance == Settings::DrawDistance::Maximum);
+    CHECK(s.sound == Settings::Sound::AdLib);
     // Options outside the presets don't affect which preset is matched.
     s.fullscreen = true;
     s.joystick = Settings::Joystick::Off;
@@ -36,10 +38,16 @@ TEST(settings_round_trip) {
     s.draw_distance = Settings::DrawDistance::Maximum;
     s.joystick = Settings::Joystick::On;
     s.fullscreen = true;
-    s.sound = false;
+    s.sound = Settings::Sound::Mac;
+    s.graphics = Settings::Graphics::Pc98;
     s.show_launcher = false;
     s.game_folder = "C:\\Old Games\\VETTE = 1989 #1";  // spaces, '=' and '#' survive
     CHECK(Settings::parse(s.serialize()) == s);
+}
+
+TEST(settings_old_sound_values) {
+    CHECK(Settings::parse("sound = on\n").sound == Settings::Sound::Speaker);
+    CHECK(Settings::parse("sound = off\n").sound == Settings::Sound::Off);
 }
 
 TEST(settings_parse_is_tolerant) {

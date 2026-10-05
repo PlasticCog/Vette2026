@@ -1,0 +1,331 @@
+# 07 — Sound (DOS 1.1)
+
+Addresses are image-relative `SEG:OFF` (`cs:` = 3009, `DS:` = 124A); names are in `re/symbols.csv`. Claims are
+**confirmed** at runtime (host emulator, `vette_run --sound-log` and a scratch harness, section 8) or read from
+the cited code. Durations: 1 driver tick = 4 × 4096 PIT clocks = **13.73 ms** (72.83 Hz). Frequencies:
+1193181.8 Hz / divisor.
+
+## 1. Hardware and mechanisms
+
+DOS 1.1 drives **only the PC speaker**: every `in`/`out` on ports 61h/42h/43h is inside 3009:933E–94FB, and no
+code touches an AdLib (388h), Tandy or other sound port. There is one voice, used in two ways:
+
+1. **Tone programs** on PIT channel 2 (mode 3 square wave), stepped by `snd_seq_tick` (9373) from `timer_work`
+   at 72.83 Hz. One program plays at a time; `cs:92BE` points at its current entry, `cs:92BC` counts ticks.
+2. **Noise**: `snd_noise_crash` (9498) and `snd_noise_grind` (94C9) toggle port 61h bit 1 directly (PIT gate
+   off) with CPU-timed `LOOP` delays. They run synchronously: the game is frozen while they click, and their
+   length depends on the CPU speed.
+
+### Sequence format and timing (`snd_seq_tick`, **confirmed**)
+
+Entries are `{w ticks, w divisor}`:
+
+- `ticks = FFFFh`: end. On the next tick the speaker goes off (61h &= FCh), `cs:926D = 0`, count = 0. The
+  pointer stays on the end entry, so the end branch runs again on every later tick.
+- `ticks = 0`: jump back by `divisor` bytes. This takes a tick of its own, during which the last note goes on.
+- otherwise: on the tick where the count becomes 1 the divisor is latched (`spk_set_divisor` 9360: 61h |= 3,
+  43h = B6h, 42h = lo, hi); `divisor = FFFFh` instead turns the speaker off (a rest). When the count reaches
+  `ticks` the pointer moves on and the count restarts at 0.
+
+So an entry sounds for exactly `ticks` ticks, a note starts 0–13.7 ms after `snd_play`, and **repeated notes run
+together**: the speaker never stops between two entries with the same divisor (the reprogramming only resets the
+counter's phase).
+
+`snd_play` (933E, AX = sequence) returns at once if `sound_enabled` (`cs:9277`) is 0. Otherwise it only sets the
+pointer and enables the speaker (61h |= 3). **It doesn't reset the count**; the callers do that (or don't, see
+3.3). `snd_stop` (9352) turns the speaker off and points at the idle sequence `cs:92C0` (`FFFF FFFF`).
+
+## 2. The sound list
+
+| Sfx id | DOS sound | Played by (caller → routine) | Condition | Program | Ends / cut off |
+|---|---|---|---|---|---|
+| `engine` | engine note | frame loop 0156 sets request bit 3 → `snd_request_dispatch` 94FC → `snd_engine_set_target` 93EA → `snd_play(92A6)` every race frame | race running, no skid/siren request, engine noise on (`cs:926E`, E key) | `{2, cs:92A8}` loop; the divisor slides (section 4) | a higher request, `snd_stop` (section 6) |
+| `garage_rev` | engine note, fixed pitch | car-select screen (`garage_screen` 8A22), Space → `garage_rev` 8BAF → 93EA (return 8BDC) | none | the engine program at divisor 1300h (245.3 Hz) | `snd_stop` at 8C09 when the exhaust animation is done (`cs:8DB2 = 1`) |
+| `skid` | 4-note warble | `vehicle_move` 1774 sets request bit 1 → 94FC → `snd_play_skid` 948A | player's `skid_flag` (DS:2C4B, `player_steer_skid` 4160:037F: \|steer\| ≥ 2 and speed ≥ grip[model][\|steer\|] + level bonus; TRAINEE's +255 makes it rare) | 927E, loop (5.1) | bit cleared when the skid ends (177D), or along with the siren's by the police code |
+| `siren` | two-tone | `police_step` 1479 sets request bit 2 → 94FC → `snd_play_siren` 9483 | chase car within 800h units, ticket screen not shown | 9292, loop (5.2) | bit cleared: farther than 800h (1482), pulled over (154B), chase reset (15DC) |
+| `title_tune` | melody | `title_screen` C532 → `snd_play_title` 9470 (C560) | sound on (else `snd_stop`) | 9304, once (5.3) | its end (8.79 s), or a key: `snd_stop` at C61B (S toggles the sound instead, C586) |
+| `win_tune` | fanfare | `race_end` C9E2 → results screen CA42 → `results_win_picture` CE9B → `snd_play_win` 9578 (CEBD) | race over with `DS:2AFF = 0`: the player reached a finish box (1AFF/1B31/1B60) before the opponent | 92C4, loop (5.4) | `snd_stop` at CEC3 after a key or 5 s (`wait_key_5s` 9968) |
+| `crash` | crash noise | `collision_box_event` default path → 1CF6 | ran into a wall/object box, or the opponent's car (`car_contact_check` 1D3B → 1976) | noise, 26 clicks (5.6) | synchronous |
+| `crash_car` | crash noise | `player_contact_response` 1720 (after `snd_stop` 171D); highway: `hw_player_collide` 4021:018B → far thunk 7F79 | hit a traffic car or the police patrol car (city), or a highway car | noise | synchronous |
+| `crash_rail` | crash noise | `highway_rail_check` 7D6A → 7EC5 | highway lane < 1 or ≥ 5 (pushed back into lane) | noise | synchronous |
+| `hit_pedestrian` | crash noise | `player_contact_response` 1720 (knocked down now, after `snd_stop`) or 16D2 (one already down) | pedestrian contact | noise | synchronous |
+| `gear_grind` | grind noise | `key_reverse` 098C → 0999; `gear_select` 1F01 → 1F4F | R while moving; a gear whose speed limit is below the current speed, or leaving reverse while moving (the car drops to neutral; on PRO `drivetrain_damage` 23EC) | noise, 41 clicks (5.7) | synchronous |
+
+Nothing else makes a sound: the start countdown (`BB00`) only changes the lights, and menus, the ticket screen,
+the pause and the copy-protection quiz are silent. The engine keeps running under the countdown and the ticket
+screen. Unused code is listed in 5.8.
+
+## 3. The race-frame dispatcher (`snd_request_dispatch` 94FC)
+
+Called once per frame by the frame loop (0165), right after it sets `cs:926C |= 8`. Returns at once when the sound
+is off.
+
+| Variable | Meaning |
+|---|---|
+| `cs:926C` `snd_request` | b: bit 1 skid (`vehicle_move`), bit 2 siren (`police_step`), bit 3 engine (every frame); bit 0 = one-shot lock (only the unused beeps set it). Cleared at race setup (20B7) and in the garage (8A2D). |
+| `cs:926D` `snd_current` | b: the request bit of the program now playing (2/4/8; 1 = beep); set to 0 when a sequence ends |
+| `cs:926E` `engine_noise_on` | b: E key (`key_engine_noise_toggle` 0C1D) |
+| `cs:9277` `sound_enabled` | b: S key (`key_sound_toggle` 0C0D, also in the garage 8A99 and on the title C589) |
+
+Priority (first match wins): bit 0 (hold until the beep ends, then clear all requests) > **skid** (play 927E,
+count = 0, unless already current) > **siren** (play 9292, unless current; count *not* reset) > **engine**
+(`cs:926D = 8`; engine noise on → `snd_engine_set_target`, which re-points the program at 92A6 every frame; off →
+`snd_stop` every frame).
+
+### 3.1 Interruption (**confirmed** unless marked)
+
+- A skid or siren request cuts the engine at the next frame; the engine comes back the frame after the request is
+  cleared. A skid during the siren cuts the siren, which then restarts *from its first note* (926D ≠ 4; code).
+- Noise doesn't stop the tone program. Only `player_contact_response` (car, pedestrian knocked down) calls
+  `snd_stop` first (171D); walls, the rail, highway cars, a pedestrian already down and the grind play over the
+  running program. The two fight over port 61h while the noise runs; the noise's last write leaves bits 0 and 1
+  clear, so the program stays silent until its next `snd_play` (the engine: next frame) or next latch (the
+  siren: up to 29 ticks, 0.4 s) (code).
+- After `snd_stop` the next tick ends the idle sequence and sets `cs:926D = 0`, so the dispatcher restarts the
+  highest request on the next frame.
+
+### 3.2 The tick count
+
+`snd_play` keeps `cs:92BC`. It is zeroed by the skid branch (9540), by `vehicle_move` every player frame that
+isn't skidding while no siren is requested (178B), and by the police code when it drops the siren
+(1488/1544/15E2).
+
+### 3.3 Quirk: the siren's first note
+
+If the siren starts while the count is ≥ 1 (left over from the engine or skid program), the count goes past 1
+without latching: the first entry (659.6 Hz) never sounds, the speaker keeps the previous program's pitch for
+the rest of its 28 ticks, then 523.3 Hz starts. From the code; every siren start in the test runs had count 0.
+
+## 4. The engine note
+
+**When.** Only on race frames: the dispatcher plays it whenever neither a skid nor a siren is requested, with
+sound and engine noise on. `engine_speed` (`cs:5891`) is the player's rpm/100 from `engine_rpm_update` (60D7,
+notes 04 §2): idle 11/9/8/7, redline 55/72/55/65 by car model.
+
+**Program.** `{2 ticks, cs:92A8}` + jump back: the speaker latches the current `cs:92A8` once every 3 ticks
+(every 2–3 when the frame's `snd_play` re-points it). `EngineSound::speaker_hz` is that latch,
+`EngineSound::pitch_hz` the slide value.
+
+**Pitch model (**confirmed**: `engine_slide` / `engine_pitch_tick` in `game/sound_events.cpp` match the original
+at every call over a whole race, `tests/game_sound_game.cpp`).** The pitch is not a function of the revs; it
+*slides* while the revs change:
+
+- Once per frame, `snd_engine_set_target` (93EA) compares `engine_speed` with last frame's (`cs:9273`):
+  - revs up → slide `8005h` (pitch rising);
+  - same, ≥ 20 (2000 rpm) → slide 0 (hold);
+  - revs down, or the same below 20 → slide `40h` (pitch falling) if `engine_speed` ≤ 53; above 5300 rpm the slide
+    is left as it was (so it keeps rising at the redline).
+- At 72.8 Hz, `snd_engine_pitch_tick` (9428) moves the divisor `cs:92A8`:
+  - rising: `divisor -= 5 × (85 − engine_speed)` (16-bit `mul`), stopping below 1400h (**233 Hz**), or below
+    1500h (222 Hz) when `engine_speed` ≤ 53. So it climbs fast at low revs (370/tick at idle) and slowly near the
+    redline (65/tick at 7200 rpm); from the bottom to the top takes 1.5 s (at idle revs) to 8.4 s (at 7200)
+    of rising frames.
+  - falling: `divisor += 40h` until it is above B000h (**26.5 Hz**): about 8.5 s from top to bottom.
+  - The tick runs whatever the speaker plays, but the slide is only re-evaluated on frames where the engine has
+    the speaker. A skid or siren therefore freezes the slide: a rising pitch keeps rising to the top meanwhile,
+    and the engine comes back at that pitch. Police run: the siren took over at 42.57 s with the pitch rising;
+    the car stood at idle when the engine came back at 50.70 s at 224.7 Hz, then fell (158 Hz at 51 s, 72 Hz
+    at 53 s, 40 Hz at 56 s).
+- Below 2000 rpm the revs change in whole units every few frames, and a frame without a change makes the slide
+  fall: the note wobbles upward as the car pulls away (38 s in the log below: revs rising, slide −1).
+
+**Start pitch.** The garage sets `cs:92A8 = DF00h` (20.9 Hz, 8A65). Since the falling limit only stops a divisor
+that has passed B000h, a first idle sits at ~21.6 Hz, *below* the 26.5 Hz a later idle settles at.
+
+**Resync** (`snd_engine_resync` 9588): turning the sound or the engine noise back on sets `cs:9273 =
+engine_speed` and the divisor from a table at `cs:932A` indexed by `engine_speed / 8`:
+
+| rpm | 0–700 | 800–1500 | 1600–2300 | 2400–3100 | 3200–3900 | 4000–4700 | 4800–6300 | 6400–7900 |
+|---|---|---|---|---|---|---|---|---|
+| divisor | BB00 | 8B00 | 7B00 | 2B00 | 14C0 | 1240 | 1100 | 0B00 |
+| Hz | 24.9 | 33.5 | 37.9 | 108.4 | 224.6 | 255.4 | 274.2 | 423.7 |
+
+This is the only direct rpm → pitch map in the game (and the only way past the 233 Hz top).
+
+**Log** (README drive, stock car, automatic, full throttle from 37.5 s; one line per second):
+
+```
+engine t=  37.0000s on  speaker   21.6 Hz, pitch   21.6 Hz, slide -1, rpm 1100 (idle 1100, redline 5500), throttle 0, gear 0
+engine t=  39.0000s on  speaker   31.4 Hz, pitch   31.9 Hz, slide +1, rpm 2200 (idle 1100, redline 5500), throttle 1, gear 1
+engine t=  40.0000s on  speaker   53.0 Hz, pitch   53.0 Hz, slide +1, rpm 3000 (idle 1100, redline 5500), throttle 1, gear 1
+engine t=  41.0000s on  speaker  143.9 Hz, pitch  143.9 Hz, slide +1, rpm 3800 (idle 1100, redline 5500), throttle 1, gear 1
+engine t=  42.0000s on  speaker  225.2 Hz, pitch  225.2 Hz, slide +1, rpm 4600 (idle 1100, redline 5500), throttle 1, gear 1
+engine t=  43.0000s on  speaker  239.2 Hz, pitch  239.2 Hz, slide +1, rpm 5400 (idle 1100, redline 5500), throttle 1, gear 1
+```
+
+For a replacement engine: `rpm`, `idle_rpm`, `redline_rpm`, `throttle` and `gear` give a smooth synth its input;
+`pitch_hz` is the DOS note itself.
+
+## 5. The sounds in detail
+
+Tables are decoded from the unpacked EXE (the observer reads them from the running game, never from the repo).
+
+### 5.1 Skid (927E) — loop of 11 ticks (151 ms)
+
+| # | ticks | ms | divisor | Hz | note |
+|---|---|---|---|---|---|
+| 0 | 3 | 41 | 094C | 501.3 | B4 |
+| 1 | 2 | 27 | 0A14 | 462.5 | A♯4 |
+| 2 | 3 | 41 | 09B0 | 481.1 | B4 −45 c |
+| 3 | 2 (+1 jump) | 41 | 094C | 501.3 | B4 |
+
+Steps 3 and 0 have the same divisor, so the speaker holds 501 Hz for 6 ticks: a warble 501 → 462 → 481 Hz.
+
+### 5.2 Siren (9292) — loop of 57 ticks (0.78 s)
+
+| # | ticks | ms | divisor | Hz | note |
+|---|---|---|---|---|---|
+| 0 | 28 | 384 | 0711 | 659.6 | E5 |
+| 1 | 28 (+1 jump) | 398 | 08E8 | 523.3 | C5 |
+
+### 5.3 Title tune (9304) — once, 640 ticks (8.79 s)
+
+| # | ticks | ms | divisor | Hz | note |
+|---|---|---|---|---|---|
+| 0 | 40 | 549 | 0711 | 659.6 | E5 |
+| 1 | 40 | 549 | 06AD | 698.2 | F5 |
+| 2 | 40 | 549 | 054B | 880.6 | A5 |
+| 3 | 200 | 2746 | 05F1 | 784.5 | G5 |
+| 4 | 40 | 549 | 054B | 880.6 | A5 |
+| 5 | 40 | 549 | 04B7 | 988.6 | B5 |
+| 6 | 40 | 549 | 0473 | 1047.6 | C6 |
+| 7 | 40 | 549 | 054B | 880.6 | A5 |
+| 8 | 160 | 2197 | 07EF | 587.5 | D5 |
+
+### 5.4 Win tune (92C4) — loop of 401 ticks (5.51 s), cut after 5 s
+
+| # | ticks | divisor | Hz | note | | # | ticks | divisor | Hz | note |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | 20 | 08E8 | 523.3 | C5 | | 8 | 10 | 05F1 | 784.5 | G5 |
+| 1 | 10 | 08E8 | 523.3 | C5 | | 9 | 10 | 054B | 880.6 | A5 |
+| 2 | 10 | 08E8 | 523.3 | C5 | | 10 | 40 | 0473 | 1047.6 | C6 |
+| 3 | 40 | 05F1 | 784.5 | G5 | | 11 | 20 | 0473 | 1047.6 | C6 |
+| 4 | 20 | 05F1 | 784.5 | G5 | | 12 | 10 | 0473 | 1047.6 | C6 |
+| 5 | 10 | 05F1 | 784.5 | G5 | | 13 | 10 | 0473 | 1047.6 | C6 |
+| 6 | 10 | 05F1 | 784.5 | G5 | | 14 | 160 (+1 jump) | 0473 | 1047.6 | C6 |
+| 7 | 20 | 054B | 880.6 | A5 | | | | | | |
+
+The rhythm (20-10-10, 40-20-10-10) is written out, but repeated notes run together on the speaker, so what plays
+is C5 0.55 s, G5 1.1 s, A5–G5–A5 (0.27/0.14/0.14 s), C6 3.3 s. `wait_key_5s` (91 BIOS ticks) stops it 4.97 s
+in, during the last C6.
+
+### 5.5 Garage rev
+
+The car-select screen's Space key: `garage_rev` saves `cs:92A8`, sets it to 1300h (245.3 Hz) and `engine_speed = 60`,
+then calls `snd_engine_set_target` on every pass of the exhaust animation until `cs:8DB2 = 1` (set by C4BB).
+1300h is already past the rising limit and steady revs give a hold, so it is a constant 245.3 Hz buzz: 1.08 s
+at 12 MHz, 0.09 s at 140 MHz (the animation is CPU-timed). Afterwards `snd_stop`, the divisor is restored and
+`engine_speed`/`cs:9273` are zeroed.
+
+### 5.6 Crash noise (`snd_noise_crash` 9498)
+
+Returns if `sound_enabled ≠ 1`. 26 clicks (DX = 19h down to 0): speaker bit 1 on for `rand & 7FFh` LOOPs
+(`random_pit` 8D64: PIT channel 0 count + previous value, `ror 3`; 0 means 65536 LOOPs, a 55 ms gap), then off
+for `BX += 100` LOOPs, BX starting at 3000 (3100 … 5600). At 12 MHz (10 cycles per LOOP) the click rate falls
+from about 290 to 180 Hz over **0.11–0.12 s (confirmed: 110–119 ms)**; at 140 MHz 10 ms; on a 4.77 MHz 8088 it
+would last about 0.5 s.
+
+| Return address | Caller | Sfx | Tone stopped first |
+|---|---|---|---|
+| 16D5 | `player_contact_response` 16D2: a pedestrian already lying (profile EAEA) | `hit_pedestrian` | no |
+| 1723, SI = pedestrian | 1720: pedestrian knocked down (EAE8 → EAEA, +100 points, heading ±15°, offence bit 3) | `hit_pedestrian` | yes (171D) |
+| 1723, SI = 2D35 | 1720: traffic car or patrol car (speed loss, offence bit 1 at ≥ 140) | `crash_car` | yes (171D) |
+| 1CF9 | 1CF6: `collision_box_event` crash (heading bounce, speed and rev_acc halved, offence bit 2) | `crash` | no |
+| 7EC8 | 7EC5: `highway_rail_check` (lane out of 1..4) | `crash_rail` | no |
+| 7F7C | far thunk 7F79 from `hw_player_collide` 4021:018B | `crash_car` | no |
+
+Side note (**confirmed**): on the car path (170A) `player_contact_response` pops SI twice (170D and 1723), so it
+leaves with SI = 1757 and its RET returns straight to `player_step` (0EDF), skipping the rest of `vehicle_move`
+for that frame. The pedestrian paths are balanced.
+
+### 5.7 Grind noise (`snd_noise_grind` 94C9)
+
+Returns if `sound_enabled ≠ 1`. 41 clicks: on for `r = rand & 3FFh` LOOPs, off for `r + 10`. Random spacing
+averaging about 0.87 ms (a hiss around 1.1 kHz), **33–36 ms at 12 MHz (confirmed)**, 3–4 ms at 140 MHz. Callers:
+099C (R while moving), 1F52 (missed shift). At 140 MHz one 100 ms press of R gave 3 grinds, 33 ms apart (the
+key is acted on again on later frames while it is down, **likely**); at 12 MHz the same press gave one.
+
+### 5.8 Unused (no caller in DOS 1.1)
+
+- `snd_beep_lo` 95A4 / `snd_beep_hi` 95C0: 659.6 Hz × 20 ticks (92AE) and 880.6 Hz × 10 ticks (92B4), with the
+  one-shot lock (`cs:926C = cs:926D = 1`). Plausibly cut start-countdown beeps.
+- `snd_play_idle` 9491 (plays 92C0), and the sequence 929E (36.4 Hz × 3 ticks, loop).
+
+## 6. Silence: `snd_stop` callers
+
+| Caller | When |
+|---|---|
+| 0647 | quit to DOS |
+| 0BC7 | pause (P) |
+| 0C15 / 0C25 | sound off (S, also in the garage) / engine noise off (E) |
+| 9574 | every race frame while the engine noise is off |
+| 171D | before the crash noise of a car or pedestrian contact |
+| 8A2A | garage screen entry (also clears `cs:926C`) |
+| 8C09 | end of the garage rev |
+| 9478 | title tune with the sound off |
+| C586 / C61B | title: S pressed / title over |
+| CA58 | results screen entry |
+| CEC3 | end of the win tune |
+| D102 (D108) | quitting the race from the Tab menu (0B56; D102 draws the results screen, **likely**) |
+| DDEE | race-over picture (`race_message_picture` DDED, picture by DS:2AFF: 6 = into the bay **confirmed**; 5 = wrecked, 1–4 = an opponent won, **likely**) |
+| E6A5 | options menu (Esc): also saves `sound_enabled` to `cs:E5FC` and sets it to 0 until EB0C restores it |
+
+## 7. The observer (`src/game/sound_events.*`)
+
+Watches only (no hooks, nothing written):
+
+| Watch | Use |
+|---|---|
+| 9347 (`snd_play` past its test) | AX = sequence → Sfx. 92A6: [SP] = 9427 and [SP+2] = 8BDC → `garage_rev`, else `engine`. A different sound replaces the current one (stop, start); the same looping sound is a continuation; `title_tune` again is a restart. |
+| 9352 (`snd_stop`), 937E (end entry) | stop of the current tone sound |
+| 9360 (`spk_set_divisor`) | CX: the latched divisor (`EngineSound::speaker_hz`) |
+| 94A1 / 94C8, 94D2 / 94FB | noise start (past the enabled test) / RET; the meaning from the return address (5.6) |
+| 94FC | race frame: time, throttle (DS:2D48, still set here), gear |
+| E6B0 / EB0C | options menu mute / restore, for `enabled()` |
+
+`requested(engine|skid|siren)` reads `cs:926C`/`926E`/`9277` while race frames arrive (≤ 250 ms ago).
+`program()` decodes the sequences above from memory, and the noise routines' immediates (count, mask, start,
+step) into click timings for the emulated CPU clock. `tests/game_sound_game.cpp` checks that a run with the
+observer is cycle-, RAM- and audio-identical to one without.
+
+## 8. Validation (highlights)
+
+`vette_run --game Game --skip-manual-check --sound-log ...`, 12 MHz (keys as in README's race script unless noted):
+
+```
+README drive:            1.8945 start title_tune   10.6889 stop title_tune   30.1928 start engine
+                         45.9903 stop engine   (drove into the bay: race-over picture, DDED)
++ Space in the garage,   15.0001 start garage_rev  16.0755 stop garage_rev
+  R at 41 s, 1 at 43.5:  41.0005 start gear_grind  41.0361 stop    43.5371 start gear_grind  43.5700 stop
+  left turn into traffic:48.9275 stop engine  48.9276 start crash_car  49.0388 stop crash_car
+                         49.1944 start engine  49.1946 stop engine  49.1946 start crash_car ...
+PRO, Sledgehammer:       42.2859 start crash  42.4047 stop crash   42.5693 stop engine  42.5693 start siren
+                         42.9868 start crash (over the siren) ...  50.4961 stop siren  50.4961 start engine
+                         (pulled over: ticket screen)
+PRO, random steering:    49.7453 stop engine  49.7453 start hit_pedestrian  49.8640 stop hit_pedestrian
+                         49.9455 start engine  49.9456 start hit_pedestrian (lying: engine not stopped)
+Toggles:                 E 32.0223 stop engine, E 33.0240 start; S 34.0749 stop, S 35.0596 start;
+                         P 36.0775 stop, P 37.0001 start; Esc 38.0467 stop, Esc 41.0032 start
+```
+
+Scratch harness (same machine, plus memory pokes to reach the state; the observer itself never writes):
+
+```
+speed poked to 180h with full left lock (stock car, PRO):
+                         41.2843 stop engine  41.2843 start skid  41.8350 stop skid  41.8350 start engine
+cs:3 = FFh (finish) at 40 s, opponent not finished:
+                         40.0326 stop engine  40.2661 start win_tune  45.2336 stop win_tune
+DS:2AD4 = 1 (on-ramp) at 39 s:
+                         43.0632 start crash_rail  43.1751 stop crash_rail  (6 rail hits, engine not stopped)
+                         95.6578 start crash_car   95.7711 stop crash_car   (highway traffic, via 7F7C)
+```
+
+At 140 MHz (`--cpu-hz 140000000 --idle-skip`): garage_rev 15.0000 → 15.0918, gear_grind 3.0–3.8 ms, crash
+10.0–10.3 ms.
+
+## Open questions
+
+- The unused beeps (5.8): a cut countdown? Check the PC-98 and Mac versions' start sequence.
+- Whether the siren first-note quirk (3.3) is audible in practice (count ≥ 1 at a siren start never observed).
+- The PIT reprogramming between repeated notes resets the counter phase: is there an audible click on a real
+  speaker?

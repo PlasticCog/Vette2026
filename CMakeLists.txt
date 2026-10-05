@@ -175,6 +175,7 @@ if(VETTE_BUILD_GAME)
     # The sound editor (a separate program): edits the AdLib sound bank the game plays.
     add_executable(vette_sfx
         src/tools/vette_sfx.cpp
+        src/core/game_dir.cpp
         src/platform/audio.cpp
         src/platform/framebuffer.cpp
         src/platform/presenter.cpp
@@ -186,6 +187,17 @@ if(VETTE_BUILD_GAME)
     if(WIN32 AND NOT CMAKE_CROSSCOMPILING)
         target_sources(vette_sfx PRIVATE ${VETTE_RC} ${VETTE_ICO})
         set_target_properties(vette_sfx PROPERTIES WIN32_EXECUTABLE TRUE)
+    endif()
+    if(APPLE AND NOT CMAKE_CROSSCOMPILING)
+        target_sources(vette_sfx PRIVATE ${VETTE_ICNS})
+        set_target_properties(vette_sfx PROPERTIES
+            MACOSX_BUNDLE TRUE
+            OUTPUT_NAME "VETTE! 2026 Sound Editor"
+            MACOSX_BUNDLE_BUNDLE_NAME "VETTE! 2026 Sound Editor"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.plasticcog.vette2026.sfx"
+            MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+            MACOSX_BUNDLE_ICON_FILE vette2026.icns)
     endif()
     vette_warnings(vette_sfx)
 endif()

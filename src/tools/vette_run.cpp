@@ -14,11 +14,14 @@
 // --smooth       take screenshots through the smooth renderer (race view interpolated between frames)
 // --smooth-check replay every game frame and compare it with the original's own drawing (exactness)
 // --idle-skip    skip emulated time spent polling for vertical retrace (the game's default)
+// --sound-log    print the game's sound events (game/sound_events.h) as they happen, and the engine
+//                note once a second while a race runs
 // --skip-manual-check  skip the copy-protection question (the game's default; off here so key
 //                scripts that type an answer keep working)
 // --trace        log every DOS file access and unhandled BIOS/port use
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -30,6 +33,7 @@
 #include "game/natives.h"
 #include "game/options.h"
 #include "game/smooth.h"
+#include "game/sound_events.h"
 #include "host/machine.h"
 #include "host/native.h"
 
@@ -90,7 +94,7 @@ int usage() {
     std::fprintf(stderr, "usage: vette_run --game <dir> [--seconds N] [--shot T]... [--key T:SC]... "
                          "[--hold A:B:SC]... [--watch S:O]... [--cpu-hz N] [--out dir] [--trace]\n"
                          "       [--verify F|all]... [--native F|all]... [--skip-manual-check] [--smooth]\n"
-                         "       [--smooth-check] [--idle-skip]\n");
+                         "       [--smooth-check] [--idle-skip] [--sound-log]\n");
     return 2;
 }
 
@@ -111,6 +115,7 @@ int main(int argc, char* argv[]) {
     bool smooth_shots = false;  // screenshots through the smooth renderer (interpolated race view)
     bool idle_skip = false;     // skip time spent polling for vertical retrace (the game's default)
     bool smooth_check = false;  // replay every game frame and compare it with the original's drawing
+    bool sound_log = false;     // print the sound events
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -166,6 +171,8 @@ int main(int argc, char* argv[]) {
             idle_skip = true;
         } else if (a == "--smooth-check") {
             smooth_check = true;
+        } else if (a == "--sound-log") {
+            sound_log = true;
         } else {
             return usage();
         }
@@ -214,6 +221,13 @@ int main(int argc, char* argv[]) {
     }
     uint64_t checked_frames = 0, mismatched_frames = 0, mismatched_pixels = 0, last_checked = 0;
 
+    std::unique_ptr<vette::game::SoundEvents> sound;
+    std::vector<vette::game::SoundEvent> sound_events;
+    std::vector<uint64_t> sound_starts(static_cast<size_t>(vette::game::Sfx::Count));
+    if (sound_log) {
+        sound = std::make_unique<vette::game::SoundEvents>(machine);
+    }
+
     const auto total_ms = static_cast<uint64_t>(seconds * 1000);
     size_t next_key = 0, next_shot = 0;
     Ega::Frame frame;
@@ -223,6 +237,23 @@ int main(int argc, char* argv[]) {
         }
         machine.run_for(kNsPerMs);
         runner.poll();
+        if (sound) {
+            sound_events.clear();
+            sound->take(sound_events);
+            for (const auto& e : sound_events) {
+                std::printf("sound t=%9.4fs %-5s %s\n", static_cast<double>(e.t_ns) / 1e9, e.start ? "start" : "stop",
+                            vette::game::sfx_name(e.sfx));
+                sound_starts[static_cast<size_t>(e.sfx)] += e.start ? 1 : 0;
+            }
+            if (const auto e = sound->engine(); e.running && (ms + 1) % 1000 == 0) {
+                std::printf("engine t=%9.4fs %-3s speaker %6.1f Hz, pitch %6.1f Hz, slide %+d, rpm %4.0f (idle %4.0f, "
+                            "redline %4.0f), throttle %d, gear %d\n",
+                            static_cast<double>(machine.emulated_ns()) / 1e9, e.on ? "on" : "off",
+                            static_cast<double>(e.speaker_hz), static_cast<double>(e.pitch_hz), e.slide,
+                            static_cast<double>(e.rpm), static_cast<double>(e.idle_rpm),
+                            static_cast<double>(e.redline_rpm), e.throttle ? 1 : 0, e.gear);
+            }
+        }
         // Once per game frame, as soon as the original has finished drawing it (self_check is -1 until then).
         if (smooth_check && smooth->stats().game_frames != last_checked) {
             if (const int diff = smooth->self_check(); diff >= 0) {
@@ -272,6 +303,14 @@ int main(int argc, char* argv[]) {
                         static_cast<unsigned long long>(mismatched_frames),
                         static_cast<unsigned long long>(mismatched_pixels));
         }
+    }
+    if (sound) {
+        std::printf("sound starts:");
+        for (size_t i = 0; i < sound_starts.size(); ++i) {
+            std::printf(" %s %llu", vette::game::sfx_name(static_cast<vette::game::Sfx>(i)),
+                        static_cast<unsigned long long>(sound_starts[i]));
+        }
+        std::printf("; sound %s\n", sound->enabled() ? "on" : "off");
     }
     if (!machine.fault().empty()) {
         return 3;

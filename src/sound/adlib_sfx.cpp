@@ -9,6 +9,7 @@ namespace {
 
 constexpr int kEngineChannel = 0;
 constexpr double kBlockSeconds = 0.001;  // programs and sweeps advance in 1 ms steps
+constexpr float kNoProgramMs = 400;       // an "original notes" sound whose notes aren't known
 
 double semitones(double hz, float transpose) { return hz * std::exp2(transpose / 12.0); }
 
@@ -75,12 +76,14 @@ void AdlibSfx::start(std::string_view name, const SpeakerProgram* original) {
     if (setting.pitch == SfxVoice::Pitch::Original && original && !original->steps.empty()) {
         v.program = *original;
     } else if (setting.pitch == SfxVoice::Pitch::Original) {
-        v.program.steps = {{1, setting.hz}};  // no program known: hold the bank's note
-        v.program.loop_to = 0;
+        // No notes to follow (unknown, or a noise sound): the bank's note, for its length or a moment.
+        v.setting.pitch = SfxVoice::Pitch::Fixed;
+        if (v.setting.time_ms <= 0)
+            v.setting.time_ms = kNoProgramMs;
     }
     load_patch(chip_, channel, setting.patch, volume_to_level(setting.volume));
 
-    if (setting.pitch == SfxVoice::Pitch::Original) {
+    if (v.setting.pitch == SfxVoice::Pitch::Original) {
         const SpeakerProgram::Step& first = v.program.steps.front();
         v.step_left = first.ticks / SpeakerProgram::kTickHz;
         key(channel, v, note(v, first.hz > 0 ? first.hz : setting.hz), first.hz > 0, false);

@@ -165,11 +165,74 @@ SfxBank SfxBank::defaults() {
     f.feedback = 6;
     f.modulator = {.multiple = 1, .level = 22, .attack = 15, .decay = 0, .sustain = 0, .release = 7};
     f.carrier = {.multiple = 1, .level = 0, .attack = 15, .decay = 0, .sustain = 0, .release = 7};
-    // Engine: a low, rough hum; a second harmonic modulator with heavy feedback gives the grit.
+    // Engine: a rough, buzzing hum on the original's own note (about 30 Hz at idle: the harmonics
+    // carry it, as they did on the speaker); feedback on a strongly coupled modulator gives the grit.
+    bank.engine.ratio = 1;
     OplPatch& e = bank.engine.patch;
-    e.feedback = 7;
-    e.modulator = {.multiple = 2, .level = 18, .attack = 12, .decay = 0, .sustain = 0, .release = 8};
-    e.carrier = {.multiple = 1, .level = 0, .attack = 12, .decay = 0, .sustain = 0, .release = 8};
+    e.feedback = 6;
+    e.modulator = {.multiple = 1, .level = 10, .attack = 15, .decay = 0, .sustain = 0, .release = 8};
+    e.carrier = {.multiple = 1, .level = 0, .attack = 15, .decay = 0, .sustain = 0, .release = 8};
+
+    // The DOS game's sounds (game/sound_events.h).
+    const auto voice = [&](const char* id) -> SfxVoice& { return bank.sounds[id] = bank.fallback; };
+    const OplOperator struck_mod{.multiple = 1, .level = 18, .attack = 13, .decay = 4, .sustain = 3, .release = 7};
+    const OplOperator struck_car{.multiple = 1, .level = 0, .attack = 14, .decay = 3, .sustain = 2, .release = 7};
+
+    SfxVoice& rev = voice("garage_rev");  // the engine revved in the garage: the engine's timbre
+    rev.patch = e;
+    rev.volume = 85;
+
+    SfxVoice& skid = voice("skid");  // tyre squeal: a thin, bright whine that wavers
+    skid.patch.feedback = 3;
+    skid.patch.modulator = {.vibrato = true, .multiple = 3, .level = 34, .attack = 15, .release = 9};
+    skid.patch.carrier = {.tremolo = true, .vibrato = true, .multiple = 1, .level = 0, .attack = 15, .release = 9};
+    skid.volume = 60;
+
+    SfxVoice& siren = voice("siren");  // police: a clean, slightly hollow tone
+    siren.patch.feedback = 1;
+    siren.patch.modulator = {.multiple = 2, .level = 36, .attack = 15, .release = 8};
+    siren.patch.carrier = {.multiple = 1, .level = 0, .attack = 15, .release = 8};
+    siren.volume = 70;
+
+    for (const char* tune : {"title_tune", "win_tune"}) {  // brassy lead, each note struck
+        SfxVoice& t = voice(tune);
+        t.patch.feedback = 5;
+        t.patch.modulator = struck_mod;
+        t.patch.carrier = struck_car;
+        t.retrigger = true;
+    }
+
+    // Crashes: the original's noise bursts, here falling, noisy FM (feedback on a high modulator).
+    const auto crash = [&](const char* id, float from, float to, float ms, uint8_t mult, int volume) {
+        SfxVoice& c = voice(id);
+        c.pitch = SfxVoice::Pitch::Sweep;
+        c.hz = from;
+        c.to_hz = to;
+        c.time_ms = ms;
+        c.volume = volume;
+        c.patch.feedback = 7;
+        c.patch.modulator = {.sustained = false, .multiple = mult, .level = 0, .attack = 15, .decay = 5, .sustain = 4, .release = 6};
+        c.patch.carrier = {.sustained = false, .multiple = 1, .level = 0, .attack = 15, .decay = 4, .sustain = 6, .release = 6};
+    };
+    crash("crash", 140, 45, 500, 15, 100);
+    crash("crash_car", 200, 70, 400, 11, 95);
+    crash("hit_pedestrian", 160, 55, 220, 3, 85);  // a dull thud
+
+    SfxVoice& rail = voice("crash_rail");  // guard rail: a metallic clang (inharmonic 7:2), ringing out
+    rail.pitch = SfxVoice::Pitch::Fixed;
+    rail.hz = 220;
+    rail.time_ms = 700;
+    rail.patch.feedback = 4;
+    rail.patch.modulator = {.sustained = false, .multiple = 7, .level = 14, .attack = 15, .decay = 3, .sustain = 6, .release = 5};
+    rail.patch.carrier = {.sustained = false, .multiple = 2, .level = 0, .attack = 15, .decay = 2, .sustain = 8, .release = 5};
+
+    SfxVoice& grind = voice("gear_grind");  // a missed shift: a rattling, gritty buzz
+    grind.pitch = SfxVoice::Pitch::Fixed;
+    grind.hz = 95;
+    grind.time_ms = 400;
+    grind.patch.feedback = 7;
+    grind.patch.modulator = {.tremolo = true, .multiple = 5, .level = 4, .attack = 15, .release = 8};
+    grind.patch.carrier = {.tremolo = true, .multiple = 1, .level = 0, .attack = 15, .release = 8};
     return bank;
 }
 

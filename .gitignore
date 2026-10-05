@@ -5,6 +5,15 @@
 /Vette_DOS_EN/
 /Vette_Mac_EN/
 /Vette_PC-98_JA/
+# ...and copies of them anywhere else in the tree (e.g. left in a tool's working folder).
+*.BIN
+*.bin
+VETTE.EXE
+*.rsrc
+*.toast
+*.hdi
+*.d88
+*.fdi
 *.zip
 *.toast
 *.hdi

@@ -1,5 +1,6 @@
 #include "host/pit.h"
 
+#include <cstddef>
 #include <limits>
 
 namespace vette::host {

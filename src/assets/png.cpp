@@ -1,5 +1,6 @@
 #include "assets/png.h"
 
+#include <cstddef>
 #include <fstream>
 
 #include "core/crc32.h"

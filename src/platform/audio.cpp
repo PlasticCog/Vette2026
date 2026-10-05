@@ -1,5 +1,7 @@
 #include "platform/audio.h"
 
+#include <cstddef>
+
 namespace vette {
 
 AudioOut::AudioOut(int sample_rate) {

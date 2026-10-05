@@ -4,6 +4,7 @@
 // gated by port 61h bit 0.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace vette::host {

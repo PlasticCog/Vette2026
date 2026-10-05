@@ -1,5 +1,7 @@
 // The program icon: sizes, opacity, and whole-pixel scaling of its two drawings.
 
+#include <cstddef>
+
 #include "test.h"
 #include "ui/app_icon.h"
 

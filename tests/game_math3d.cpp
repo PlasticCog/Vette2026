@@ -2,6 +2,8 @@
 // from the original's instruction sequences. The adapters are proven against the original by the
 // vette_run --verify harness; these tests pin down the cores' arithmetic, quirks included.
 
+#include <cstddef>
+
 #include "game/math3d.h"
 #include "game/projection.h"
 #include "test.h"

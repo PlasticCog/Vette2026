@@ -1,5 +1,6 @@
 #include "assets/rle.h"
 
+#include <cstddef>
 #include <stdexcept>
 
 namespace vette {

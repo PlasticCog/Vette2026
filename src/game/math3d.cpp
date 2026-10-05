@@ -1,5 +1,6 @@
 #include "game/math3d.h"
 
+#include <cstddef>
 #include <initializer_list>
 
 #include "game/x86.h"

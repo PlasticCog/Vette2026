@@ -26,7 +26,7 @@ namespace vette::ui {
 namespace {
 
 enum Row {
-    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kGraphics, kSound, kManualCheck, kJoystick, kDisplay, kLauncher,
+    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kGraphics, kEffects, kMusic, kManualCheck, kJoystick, kDisplay, kLauncher,
     kPlay, kQuit, kRows
 };
 
@@ -45,7 +45,8 @@ const char* label(int row) {
     case kJoystick: return "Joystick";
     case kDisplay: return "Display";
     case kGraphics: return "Graphics";
-    case kSound: return "Sound";
+    case kEffects: return "Sound effects";
+    case kMusic: return "Music";
     case kLauncher: return "This screen";
     case kPlay: return "Play";
     default: return "Quit";
@@ -79,8 +80,10 @@ Extras find_extras(const std::optional<GameDir>& game) {
 bool missing(int row, const Settings& s, const Extras& x) {
     if (row == kGraphics)
         return (s.graphics == Settings::Graphics::Pc98 && !x.pc98) || (s.graphics == Settings::Graphics::Mac && !x.mac);
-    if (row == kSound)
-        return (s.sound == Settings::Sound::Pc98 && !x.pc98) || (s.sound == Settings::Sound::Mac && !x.mac);
+    if (row == kEffects)
+        return s.effects == Settings::Effects::Mac && !x.mac;
+    if (row == kMusic)
+        return s.music == Settings::Music::Pc98 && !x.pc98;
     return false;
 }
 
@@ -107,10 +110,14 @@ std::string value(int row, const Settings& s, const std::optional<GameDir>& game
                                                                        : "Macintosh";
         return missing(row, s, x) ? v + " - files missing" : v;
     }
-    case kSound: {
-        static constexpr const char* kNames[] = {"Off", "PC speaker (original)", "AdLib (FM)", "PC-98 (YM2203 FM)",
-                                                 "Macintosh (digitized)"};
-        const std::string v = kNames[static_cast<int>(s.sound)];
+    case kEffects: {
+        static constexpr const char* kNames[] = {"Off", "PC speaker (original)", "AdLib (FM)", "Macintosh (digitized)"};
+        const std::string v = kNames[static_cast<int>(s.effects)];
+        return missing(row, s, x) ? v + " - files missing" : v;
+    }
+    case kMusic: {
+        static constexpr const char* kNames[] = {"Off", "Original", "PC-98 (YM2203 FM)"};
+        const std::string v = kNames[static_cast<int>(s.music)];
         return missing(row, s, x) ? v + " - files missing" : v;
     }
     case kLauncher: return s.show_launcher ? "Show at start" : "Skip at start";
@@ -157,17 +164,25 @@ std::string_view help(int row, const Settings& s) {
                    : s.graphics == Settings::Graphics::Pc98
                          ? "The PC-98 version's 640x400 art (Japanese text). Needs its files in Game/PC98."
                          : "The Macintosh version's colour screens. Needs its files in Game/Mac.";
-    case kSound:
-        switch (s.sound) {
-        case Settings::Sound::Off: return "No sound.";
-        case Settings::Sound::Speaker: return "The original's PC speaker sound.";
-        case Settings::Sound::AdLib:
-            return "An AdLib FM sound card, which the original never supported: each sound on its own instrument. "
-                   "vette_sfx edits them.";
-        case Settings::Sound::Pc98:
-            return "The PC-98 version's YM2203 FM sound. Needs its files in Game/PC98; AdLib plays what it lacks.";
-        case Settings::Sound::Mac:
-            return "The Macintosh version's digitized sounds. Needs its files in Game/Mac; AdLib plays what it lacks.";
+    case kEffects:
+        switch (s.effects) {
+        case Settings::Effects::Off: return "No sound effects.";
+        case Settings::Effects::Speaker: return "The original's PC speaker sounds.";
+        case Settings::Effects::AdLib:
+            return "An AdLib FM sound card, which the original never supported: each sound on its own instrument "
+                   "(edit them with vette_sfx). The engine keeps running under a skid or the siren.";
+        case Settings::Effects::Mac:
+            return "The Macintosh version's digitized sounds, including its opening song. Needs its files in "
+                   "Game/Mac; AdLib plays the two it doesn't have.";
+        }
+        return "";
+    case kMusic:
+        switch (s.music) {
+        case Settings::Music::Off: return "No title or winner tunes.";
+        case Settings::Music::Original: return "The original's title and winner tunes, on the sound effects' device.";
+        case Settings::Music::Pc98:
+            return "The PC-98 version's FM soundtrack: title, menus, winner and loser songs. Needs its files in "
+                   "Game/PC98.";
         }
         return "";
     case kLauncher:
@@ -301,7 +316,8 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             presenter.set_fullscreen(s.fullscreen);
             break;
         case kGraphics: s.graphics = static_cast<Settings::Graphics>((static_cast<int>(s.graphics) + dir + 3) % 3); break;
-        case kSound: s.sound = static_cast<Settings::Sound>((static_cast<int>(s.sound) + dir + 5) % 5); break;
+        case kEffects: s.effects = static_cast<Settings::Effects>((static_cast<int>(s.effects) + dir + 4) % 4); break;
+        case kMusic: s.music = static_cast<Settings::Music>((static_cast<int>(s.music) + dir + 3) % 3); break;
         case kLauncher: s.show_launcher = !s.show_launcher; break;
         default: break;
         }

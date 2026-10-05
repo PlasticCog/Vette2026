@@ -12,11 +12,22 @@ using game::Sfx;
 constexpr Sfx kContinuous[] = {Sfx::Skid, Sfx::Siren};
 
 bool is_continuous(Sfx s) { return s == Sfx::Engine || s == Sfx::Skid || s == Sfx::Siren; }
+bool is_music(Sfx s) { return s == Sfx::TitleTune || s == Sfx::WinTune; }
+// The noise routines click the speaker directly, over whatever tone program is running.
+bool is_noise(Sfx s) {
+    return s == Sfx::Crash || s == Sfx::CrashCar || s == Sfx::CrashRail || s == Sfx::HitPedestrian ||
+           s == Sfx::GearGrind;
+}
 
 }  // namespace
 
-GameAudio::GameAudio(host::Machine& machine, int rate, SfxBackend& primary, SfxBackend* fallback)
-    : events_(machine), rate_(rate), primary_(primary), fallback_(fallback) {}
+GameAudio::GameAudio(host::Machine& machine, int rate, const Sources& sources)
+    : events_(machine), rate_(rate), src_(sources) {
+    for (SfxBackend* b : {src_.effects, src_.music, src_.fallback}) {
+        if (b && std::find(backends_.begin(), backends_.end(), b) == backends_.end())
+            backends_.push_back(b);
+    }
+}
 
 const SpeakerProgram* GameAudio::original(Sfx sfx) {
     std::optional<SpeakerProgram>& p = programs_[static_cast<size_t>(sfx)];
@@ -33,33 +44,59 @@ const SpeakerProgram* GameAudio::original(Sfx sfx) {
     return p->steps.empty() ? nullptr : &*p;  // noise sounds (clicks) have no notes to follow
 }
 
-SfxBackend* GameAudio::route(Sfx sfx) {
+GameAudio::Route GameAudio::route(Sfx sfx) const {
     const char* id = game::sfx_name(sfx);
-    if (primary_.covers(id))
-        return &primary_;
-    return fallback_ && fallback_->covers(id) ? fallback_ : nullptr;
+    if (is_music(sfx)) {
+        if (src_.music_off)
+            return {};
+        if (src_.music && src_.music->covers(id))
+            return {false, src_.music};
+        if (src_.effects_off)
+            return {true, nullptr};  // the original tunes, though the effects are off
+    }
+    if (src_.effects_off)
+        return {};
+    if (!src_.effects)
+        return {true, nullptr};
+    if (src_.effects->covers(id))
+        return {false, src_.effects};
+    if (src_.fallback && src_.fallback->covers(id))
+        return {false, src_.fallback};
+    return {true, nullptr};
+}
+
+bool GameAudio::speaker_open() const {
+    // A noise burst takes over the speaker while it runs; otherwise it's the tone program, or silence.
+    const std::optional<Sfx> now = speaker_noise_ ? speaker_noise_ : speaker_tone_;
+    return !now || route(*now).speaker;
 }
 
 void GameAudio::apply(const game::SoundEvent& e) {
-    if (is_continuous(e.sfx))
+    // Track what the speaker plays, for the gate.
+    std::optional<Sfx>& slot = is_noise(e.sfx) ? speaker_noise_ : speaker_tone_;
+    if (e.start)
+        slot = e.sfx;
+    else if (slot == e.sfx)
+        slot.reset();
+
+    if (is_continuous(e.sfx) || muted_)
         return;  // see continuous()
-    SfxBackend* b = route(e.sfx);
-    if (!b)
+    const Route r = route(e.sfx);
+    if (!r.backend)
         return;
     const char* id = game::sfx_name(e.sfx);
-    if (e.start) {
-        b->start(id, original(e.sfx));
-    } else if (original(e.sfx)) {
-        b->stop(id);  // a tune cut off; noise sounds play out their own length
-    }
+    if (e.start)
+        r.backend->start(id, original(e.sfx));
+    else if (original(e.sfx))
+        r.backend->stop(id);  // a tune cut off; noise sounds play out their own length
 }
 
 void GameAudio::continuous() {
     const game::EngineSound e = events_.engine();
-    if (SfxBackend* b = route(Sfx::Engine))
+    if (SfxBackend* b = route(Sfx::Engine).backend)
         b->engine({e.running && !muted_, e.pitch_hz, e.rpm, e.throttle, e.gear});
     for (const Sfx s : kContinuous) {
-        SfxBackend* b = route(s);
+        SfxBackend* b = route(s).backend;
         if (!b)
             continue;
         const char* id = game::sfx_name(s);
@@ -71,13 +108,27 @@ void GameAudio::continuous() {
     }
 }
 
-void GameAudio::render(uint64_t t0_ns, int frames, std::vector<float>& out) {
-    out.assign(static_cast<size_t>(frames), 0.0f);
-    // The game's own sound switch (its S key) silences the replacement too.
+void GameAudio::mix(const std::vector<int16_t>& speaker, std::vector<float>& out, int from, int to) {
+    if (to <= from)
+        return;
+    if (speaker_open()) {
+        for (int i = from; i < to; ++i)
+            out[static_cast<size_t>(i)] += speaker[static_cast<size_t>(i)] / 32768.0f;
+    }
+    for (SfxBackend* b : backends_)
+        b->render(out.data() + from, to - from);
+    if (muted_)  // the game's sound switch: the speaker is silent already; the PC-98's songs ignore it
+        std::fill(out.begin() + from, out.begin() + to, 0.0f);
+}
+
+void GameAudio::render(uint64_t t0_ns, const std::vector<int16_t>& speaker, std::vector<float>& out) {
+    const int frames = static_cast<int>(speaker.size());
+    out.assign(speaker.size(), 0.0f);
+    // The game's own sound switch (its S key) silences the replacements too.
     const bool muted = !events_.enabled();
     if (muted && !muted_) {
         for (int i = 0; i < static_cast<int>(Sfx::Count); ++i) {
-            if (SfxBackend* b = route(static_cast<Sfx>(i)))
+            if (SfxBackend* b = route(static_cast<Sfx>(i)).backend)
                 b->stop(game::sfx_name(static_cast<Sfx>(i)));
         }
     }
@@ -86,25 +137,16 @@ void GameAudio::render(uint64_t t0_ns, int frames, std::vector<float>& out) {
     pending_.clear();
     events_.take(pending_);
     continuous();
-    // Each event lands on its own sample: render up to it, apply it, carry on.
+    // Each event lands on its own sample: mix up to it, apply it, carry on.
     int done = 0;
     for (const game::SoundEvent& e : pending_) {
         const double offset = static_cast<double>(e.t_ns > t0_ns ? e.t_ns - t0_ns : 0) * rate_ / 1e9;
         const int at = std::clamp(static_cast<int>(offset), done, frames);
-        if (at > done) {
-            primary_.render(out.data() + done, at - done);
-            if (fallback_)
-                fallback_->render(out.data() + done, at - done);
-            done = at;
-        }
-        if (!muted_)
-            apply(e);
+        mix(speaker, out, done, at);
+        done = at;
+        apply(e);
     }
-    if (frames > done) {
-        primary_.render(out.data() + done, frames - done);
-        if (fallback_)
-            fallback_->render(out.data() + done, frames - done);
-    }
+    mix(speaker, out, done, frames);
 }
 
 }  // namespace vette::sound

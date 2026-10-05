@@ -63,6 +63,15 @@ std::vector<fs::path> candidate_dirs(const std::optional<fs::path>& override_dir
 
 }  // namespace
 
+std::optional<fs::path> find_subfolder(const fs::path& dir, std::string_view name) {
+    std::error_code ec;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->is_directory(ec) && iequals(path_to_utf8(it->path().filename()), name))
+            return it->path();
+    }
+    return std::nullopt;
+}
+
 GameDir::GameDir(fs::path root) : root_(std::move(root)) {
     std::error_code ec;
     for (fs::directory_iterator it(root_, ec), end; !ec && it != end; it.increment(ec))

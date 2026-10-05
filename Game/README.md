@@ -19,12 +19,18 @@ Game/
 
 File name case doesn't matter.
 
-## Optional: extras for Enhanced mode (planned)
+## Optional: the other versions, for Enhanced mode
 
-Later Enhanced-mode features will use data from the other releases, if you own them:
+The launch menu's Sound and Graphics options can use the other releases of VETTE!, if you own them.
+Put them in subfolders here:
 
-- `Game/Mac/` — the Macintosh version's `VETTE!.Data` resource fork, for digitized sound effects
-  and music.
-- `Game/PC98/` — the PC-98 version's files, for FM sound.
+- `Game/Mac/`: the Macintosh version (1.02), for its digitized sounds (and its screens, to come).
+  Any of these works:
+  - the disk image (e.g. `VETTE_1_02.toast`; HFS, also `.dsk`, `.img`, `.hfv`, DiskCopy 4.2 or
+    partitioned images);
+  - the files themselves, with their resource forks: MacBinary (`.bin`), AppleSingle, AppleDouble
+    (`._name` files or a `__MACOSX` folder from a zip), BinHex (`.hqx`), or raw forks saved as
+    `name.rsrc`. On a Mac, plain copies of the files work too.
+- `Game/PC98/`: the PC-98 version (1.02J), for its YM2203 FM sound (and its screens, to come).
 
 Classic mode only needs the DOS files.

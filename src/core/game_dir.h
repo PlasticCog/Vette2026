@@ -51,6 +51,9 @@ struct GameDirSearch {
 // and in up to 4 of its parents (so build trees find the repo's Game/), then Game/ in the CWD.
 GameDirSearch find_game_dir(const std::optional<std::filesystem::path>& override_dir);
 
+// A subfolder of `dir` by name, ignoring case (Game/Mac, Game/PC98 for the other versions' files).
+std::optional<std::filesystem::path> find_subfolder(const std::filesystem::path& dir, std::string_view name);
+
 // Checks the MZ signature (throws if absent) and logs size and CRC32. Returns whether this is the
 // known v1.1 build; anything else only gets a warning.
 bool identify_vette_exe(std::span<const std::uint8_t> exe);

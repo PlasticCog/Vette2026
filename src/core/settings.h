@@ -12,9 +12,12 @@ struct Settings {
     enum class Pc { Fast, At286 };
     enum class DrawDistance { Original, Extended, Maximum };
     enum class Joystick { Auto, On, Off };
-    // Where the sound comes from: the original PC speaker, or a replacement driven by the game's sound
-    // events (an emulated AdLib, the PC-98 version's YM2203 FM, the Mac version's digitized sounds).
-    enum class Sound { Off, Speaker, AdLib, Pc98, Mac };
+    // The sound effects: the original PC speaker, or a replacement driven by the game's sound events
+    // (an emulated AdLib card, the Mac version's digitized sounds).
+    enum class Effects { Off, Speaker, AdLib, Mac };
+    // The music: the original's tunes (title, winner; played by the effects' device), the PC-98
+    // version's FM songs (YM2203: title, menus, winner, loser), or none.
+    enum class Music { Off, Original, Pc98 };
     // Whose artwork the screens show: the DOS original's, or the PC-98 or Mac version's.
     enum class Graphics { Dos, Pc98, Mac };
     enum class Preset { Classic, Enhanced, Custom };
@@ -25,7 +28,8 @@ struct Settings {
     bool manual_check = false;  // show the original's copy-protection question
     Joystick joystick = Joystick::Auto;
     bool fullscreen = false;
-    Sound sound = Sound::AdLib;
+    Effects effects = Effects::AdLib;
+    Music music = Music::Original;
     Graphics graphics = Graphics::Dos;
     bool show_launcher = true;
     std::string game_folder;  // UTF-8; empty: look for Game/ next to the program

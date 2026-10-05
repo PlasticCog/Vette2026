@@ -18,14 +18,15 @@ TEST(settings_presets) {
     CHECK(s.frame_rate == Settings::FrameRate::Original);
     CHECK(s.pc == Settings::Pc::At286);
     CHECK(s.draw_distance == Settings::DrawDistance::Original);
-    CHECK(s.sound == Settings::Sound::Speaker);
+    CHECK(s.effects == Settings::Effects::Speaker);
+    CHECK(s.music == Settings::Music::Original);
     CHECK(s.manual_check);
     s.manual_check = false;  // one change away from a preset is Custom
     CHECK(s.preset() == Settings::Preset::Custom);
     s.apply(Settings::Preset::Enhanced);
     CHECK(s.preset() == Settings::Preset::Enhanced);
     CHECK(s.draw_distance == Settings::DrawDistance::Maximum);
-    CHECK(s.sound == Settings::Sound::AdLib);
+    CHECK(s.effects == Settings::Effects::AdLib);
     // Options outside the presets don't affect which preset is matched.
     s.fullscreen = true;
     s.joystick = Settings::Joystick::Off;
@@ -38,7 +39,8 @@ TEST(settings_round_trip) {
     s.draw_distance = Settings::DrawDistance::Maximum;
     s.joystick = Settings::Joystick::On;
     s.fullscreen = true;
-    s.sound = Settings::Sound::Mac;
+    s.effects = Settings::Effects::Mac;
+    s.music = Settings::Music::Pc98;
     s.graphics = Settings::Graphics::Pc98;
     s.show_launcher = false;
     s.game_folder = "C:\\Old Games\\VETTE = 1989 #1";  // spaces, '=' and '#' survive
@@ -46,8 +48,9 @@ TEST(settings_round_trip) {
 }
 
 TEST(settings_old_sound_values) {
-    CHECK(Settings::parse("sound = on\n").sound == Settings::Sound::Speaker);
-    CHECK(Settings::parse("sound = off\n").sound == Settings::Sound::Off);
+    CHECK(Settings::parse("sound = on\n").effects == Settings::Effects::Speaker);
+    CHECK(Settings::parse("sound = off\n").music == Settings::Music::Off);
+    CHECK(Settings::parse("sound = pc98\n").music == Settings::Music::Pc98);
 }
 
 TEST(settings_parse_is_tolerant) {

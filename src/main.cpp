@@ -1,3 +1,5 @@
+#include "assets/mac_files.h"
+#include "assets/mac_sounds.h"
 #include "assets/planar.h"
 #include "assets/rle.h"
 #include "core/game_dir.h"
@@ -15,6 +17,10 @@
 #include "platform/mouse_pointer.h"
 #include "platform/presenter.h"
 #include "sound/game_audio.h"
+#include "assets/pc98_disk.h"
+#include "sound/mac_backend.h"
+#include "sound/pc98_backend.h"
+#include "sound/pc98_sound.h"
 #include "sound/sfx_backend.h"
 #include "sound/sfx_bank.h"
 #include "ui/launcher.h"
@@ -23,6 +29,7 @@
 #include <SDL3/SDL_main.h>  // UTF-8 argv on Windows
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -45,7 +52,8 @@ constexpr const char* kAppName = "VETTE! 2026";
 constexpr const char* kUsage =
     "Usage: vette2026 [--[no-]launcher] [--game <dir>] [--fps smooth|original] [--pc fast|286]\n"
     "                 [--draw-distance original|extended|maximum] [--cpu-hz <n>] [--[no-]joystick]\n"
-    "                 [--sound off|speaker|adlib|pc98|mac] [--manual-check] [--dump-frame <file.bmp>]\n"
+    "                 [--effects off|speaker|adlib|mac] [--music off|original|pc98] [--no-sound]\n"
+    "                 [--manual-check] [--dump-frame <file.bmp>]\n"
     "Settings come from the launch menu (saved in settings.ini); these flags override them for one run.\n"
     "  --launcher           show the launch menu even if it's switched off (--no-launcher: skip it)\n"
     "  --game <dir>         folder with the DOS VETTE! files (default: search for Game/)\n"
@@ -60,9 +68,11 @@ constexpr const char* kUsage =
     "                       own 320x200 view, about two blocks ahead\n"
     "  --joystick           give the PC a joystick even if no gamepad is connected yet\n"
     "  --no-joystick        no joystick, even with a gamepad connected\n"
-    "  --sound adlib        (default) the sounds on an emulated AdLib FM card (bank: adlib.ini, edited\n"
-    "                       with vette_sfx); speaker: the original PC speaker; pc98: the PC-98 version's\n"
-    "                       FM sound; mac: the Macintosh version's digitized sounds; off (or --no-sound)\n"
+    "  --effects adlib      (default) the sound effects on an emulated AdLib FM card (bank: adlib.ini,\n"
+    "                       edited with vette_sfx); speaker: the original PC speaker; mac: the Macintosh\n"
+    "                       version's digitized sounds (Game/Mac); off\n"
+    "  --music original     (default) the title and winner tunes on the effects' device; pc98: the PC-98\n"
+    "                       version's FM songs (Game/PC98); off. --no-sound: no effects, no music\n"
     "  --manual-check       show the original's manual-lookup question before the first race\n"
     "                       (skipped by default; this version accepts any answer anyway)\n"
     "  --dump-frame <file>  write the title screen to a 640x200 BMP and exit, without a window\n"
@@ -107,7 +117,8 @@ struct Options {
     std::optional<bool> joystick;
     std::optional<bool> manual_check;
     std::optional<bool> launcher;
-    std::optional<Settings::Sound> sound;
+    std::optional<Settings::Effects> effects;
+    std::optional<Settings::Music> music;
     std::vector<ScriptedKey> keys;
     std::vector<std::uint64_t> shots;    // emulated ns, sorted
     std::optional<std::uint64_t> quit_after;  // emulated ns
@@ -126,8 +137,10 @@ struct Options {
             s.joystick = *joystick ? Settings::Joystick::On : Settings::Joystick::Off;
         if (manual_check)
             s.manual_check = *manual_check;
-        if (sound)
-            s.sound = *sound;
+        if (effects)
+            s.effects = *effects;
+        if (music)
+            s.music = *music;
     }
 };
 
@@ -154,16 +167,26 @@ std::optional<Options> parse_args(int argc, char** argv) {
         } else if (arg == "--mute") {
             opts.mute = true;
         } else if (arg == "--no-sound") {
-            opts.sound = Settings::Sound::Off;
-        } else if (arg == "--sound" && has_value) {
+            opts.effects = Settings::Effects::Off;
+            opts.music = Settings::Music::Off;
+        } else if (arg == "--effects" && has_value) {
             const std::string_view v = argv[++i];
-            static constexpr std::string_view kNames[] = {"off", "speaker", "adlib", "pc98", "mac"};
+            static constexpr std::string_view kNames[] = {"off", "speaker", "adlib", "mac"};
             const auto it = std::find(std::begin(kNames), std::end(kNames), v);
             if (it == std::end(kNames)) {
-                std::fprintf(stderr, "--sound: off, speaker, adlib, pc98 or mac\n");
+                std::fprintf(stderr, "--effects: off, speaker, adlib or mac\n");
                 return std::nullopt;
             }
-            opts.sound = static_cast<Settings::Sound>(it - std::begin(kNames));
+            opts.effects = static_cast<Settings::Effects>(it - std::begin(kNames));
+        } else if (arg == "--music" && has_value) {
+            const std::string_view v = argv[++i];
+            static constexpr std::string_view kNames[] = {"off", "original", "pc98"};
+            const auto it = std::find(std::begin(kNames), std::end(kNames), v);
+            if (it == std::end(kNames)) {
+                std::fprintf(stderr, "--music: off, original or pc98\n");
+                return std::nullopt;
+            }
+            opts.music = static_cast<Settings::Music>(it - std::begin(kNames));
         } else if (arg == "--launcher" || arg == "--no-launcher") {
             opts.launcher = arg == "--launcher";
         } else if (arg == "--game" && has_value) {
@@ -211,7 +234,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const bool needs_value = arg == "--game" || arg == "--dump-frame" || arg == "--cpu-hz" ||
                                      arg == "--fps" || arg == "--pc" || arg == "--draw-distance" ||
                                      arg == "--key" || arg == "--hold" || arg == "--shot" || arg == "--quit-after" ||
-                                     arg == "--wav" || arg == "--sound";
+                                     arg == "--wav" || arg == "--effects" || arg == "--music";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
                          argv[i], kUsage);
             return std::nullopt;
@@ -334,21 +357,39 @@ struct EnhancedView {
     }
 };
 
-// The game's sound from a replacement source (AdLib; the PC-98 and Mac versions' sound to come), driven
-// by its sound events, in place of the emulated PC speaker. The AdLib bank is read from adlib.ini in the
-// settings folder, again whenever it changes (saved from the sound editor while the game runs).
-constexpr float kReplacementGain = 2.5f;  // a single FM voice at full volume against the speaker's level
+// The game's sound put together from the player's choices (sound/game_audio.h): the effects from the
+// speaker, AdLib or the Mac's samples (AdLib for what the Mac lacks), the music from the same, from the
+// PC-98's FM songs, or off. The AdLib bank is read from adlib.ini in the settings folder, again whenever
+// it changes (saved from the sound editor while the game runs).
+// Sounds playing together can add up past full scale (the engine under a crash): bend the peaks
+// smoothly instead of clipping them.
+float soft_limit(float x) {
+    constexpr float kKnee = 0.8f;
+    const float a = std::fabs(x);
+    return a <= kKnee ? x : std::copysign(kKnee + (1 - kKnee) * std::tanh((a - kKnee) / (1 - kKnee)), x);
+}
 
 struct GameSound {
     sound::AdlibBackend adlib{kAudioRate};
+    std::unique_ptr<sound::SfxBackend> mac, pc98;
     std::unique_ptr<sound::GameAudio> audio;
     std::filesystem::path bank_file;
     std::filesystem::file_time_type bank_time{};
     std::uint64_t next_check_ns = 0;
     std::vector<float> mix;
 
-    GameSound(host::Machine& machine, std::filesystem::path bank)
-        : audio(std::make_unique<sound::GameAudio>(machine, kAudioRate, adlib, nullptr)), bank_file(std::move(bank)) {
+    GameSound(host::Machine& machine, const Settings& settings, std::unique_ptr<sound::SfxBackend> mac_sound,
+              std::unique_ptr<sound::SfxBackend> pc98_music, std::filesystem::path bank)
+        : mac(std::move(mac_sound)), pc98(std::move(pc98_music)), bank_file(std::move(bank)) {
+        sound::GameAudio::Sources src;
+        src.effects_off = settings.effects == Settings::Effects::Off;
+        src.effects = settings.effects == Settings::Effects::AdLib ? &adlib
+                      : settings.effects == Settings::Effects::Mac ? (mac ? mac.get() : &adlib)
+                                                                   : nullptr;
+        src.music_off = settings.music == Settings::Music::Off;
+        src.music = pc98.get();
+        src.fallback = &adlib;
+        audio = std::make_unique<sound::GameAudio>(machine, kAudioRate, src);
         load_bank();
     }
 
@@ -375,9 +416,9 @@ struct GameSound {
             if (!ec && t != bank_time)
                 load_bank();
         }
-        audio->render(t0_ns, static_cast<int>(samples.size()), mix);
+        audio->render(t0_ns, samples, mix);
         for (std::size_t i = 0; i < samples.size(); ++i)
-            samples[i] = static_cast<std::int16_t>(std::clamp(mix[i] * kReplacementGain, -1.0f, 1.0f) * 32767.0f);
+            samples[i] = static_cast<std::int16_t>(soft_limit(mix[i]) * 32767.0f);
     }
 };
 
@@ -410,6 +451,45 @@ private:
     std::ofstream file_;
     std::uint32_t bytes_ = 0;
 };
+
+// The Mac version's sounds from the player's copy in Game/Mac (nullptr, with the reason logged, if not).
+std::unique_ptr<sound::SfxBackend> mac_sound(const GameDir& game) {
+    const std::optional<std::filesystem::path> folder = find_subfolder(game.root(), "Mac");
+    if (!folder) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "Mac sound: no Game/Mac folder");
+        return nullptr;
+    }
+    const assets::MacFiles files = assets::MacFiles::open(*folder);
+    const std::optional<assets::ResourceFork> data = assets::find_vette_data(files);
+    std::vector<assets::MacSound> sounds = data ? assets::decode_mac_sounds(*data) : std::vector<assets::MacSound>{};
+    if (sounds.empty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "Mac sound: VETTE!.Data's sounds not found in %s",
+                    path_to_utf8(*folder).c_str());
+        for (const std::string& note : files.notes())
+            SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "  %s", note.c_str());
+        return nullptr;
+    }
+    SDL_Log("Mac sound: %u sounds from %s", static_cast<unsigned>(sounds.size()), path_to_utf8(*folder).c_str());
+    return std::make_unique<sound::MacBackend>(std::move(sounds), kAudioRate);
+}
+
+// The PC-98 version's FM songs from the player's copy in Game/PC98 (nullptr, with the reason logged, if not).
+std::unique_ptr<sound::SfxBackend> pc98_music(const GameDir& game, host::Machine& machine) {
+    const std::optional<std::filesystem::path> folder = find_subfolder(game.root(), "PC98");
+    if (!folder) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "PC-98 music: no Game/PC98 folder");
+        return nullptr;
+    }
+    std::string error;
+    const std::optional<assets::Pc98Files> files = assets::Pc98Files::open(*folder, error);
+    std::unique_ptr<sound::Pc98Sound> fm = files ? sound::Pc98Sound::create(*files, kAudioRate, error) : nullptr;
+    if (!fm) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "PC-98 music: %s", error.c_str());
+        return nullptr;
+    }
+    SDL_Log("PC-98 music: from %s", path_to_utf8(*folder).c_str());
+    return std::make_unique<sound::Pc98Backend>(machine, std::move(fm));
+}
 
 // Runs the hosted game until the window closes or VETTE.EXE exits.
 // `smooth` (optional) draws the race view at the display's refresh rate (game/smooth.h), and `view`
@@ -611,7 +691,7 @@ int run(int argc, char** argv) {
         identify_vette_exe(game->read("VETTE.EXE"));
 
         std::optional<AudioOut> audio;
-        if (settings.sound == Settings::Sound::Off) {
+        if (settings.effects == Settings::Effects::Off && settings.music == Settings::Music::Off) {
             SDL_Log("Sound: off");
         } else if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
             try {
@@ -665,13 +745,20 @@ int run(int argc, char** argv) {
         if (opts->mute)
             audio.reset();
         std::unique_ptr<GameSound> game_sound;
-        if (settings.sound != Settings::Sound::Off && settings.sound != Settings::Sound::Speaker) {
-            if (settings.sound != Settings::Sound::AdLib)
-                SDL_Log("The PC-98 and Mac sound isn't ready yet: AdLib plays instead.");
-            game_sound = std::make_unique<GameSound>(machine, settings_dir() / "adlib.ini");
+        const bool silent = settings.effects == Settings::Effects::Off && settings.music == Settings::Music::Off;
+        if (!silent &&
+            (settings.effects != Settings::Effects::Speaker || settings.music != Settings::Music::Original)) {
+            std::unique_ptr<sound::SfxBackend> mac =
+                settings.effects == Settings::Effects::Mac ? mac_sound(*game) : nullptr;
+            std::unique_ptr<sound::SfxBackend> pc98 =
+                settings.music == Settings::Music::Pc98 ? pc98_music(*game, machine) : nullptr;
+            game_sound = std::make_unique<GameSound>(machine, settings, std::move(mac), std::move(pc98),
+                                                     settings_dir() / "adlib.ini");
         }
-        SDL_Log("Sound: %s%s", settings.sound == Settings::Sound::Off ? "off" : game_sound ? "AdLib (YM3812)" : "PC speaker",
-                audio || settings.sound == Settings::Sound::Off ? "" : " (not played)");
+        static constexpr const char* kEffects[] = {"off", "PC speaker", "AdLib", "Macintosh"};
+        static constexpr const char* kMusic[] = {"off", "original", "PC-98 FM"};
+        SDL_Log("Sound effects: %s; music: %s%s", kEffects[static_cast<int>(settings.effects)],
+                kMusic[static_cast<int>(settings.music)], audio || silent ? "" : " (not played)");
 
         main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad, smooth ? &*smooth : nullptr, view.get(),
                   game_sound.get(), *opts);

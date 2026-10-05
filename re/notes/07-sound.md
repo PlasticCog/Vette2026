@@ -53,7 +53,8 @@ pointer and enables the speaker (61h |= 3). **It doesn't reset the count**; the 
 
 Nothing else makes a sound: the start countdown (`BB00`) only changes the lights, and menus, the ticket screen,
 the pause and the copy-protection quiz are silent. The engine keeps running under the countdown and the ticket
-screen. Unused code is listed in 5.8.
+screen. Unused code is listed in 5.8. The moments the Mac version gives a sound to while DOS stays silent
+(countdown, helicopter view, the bay, ...) are in section 9.
 
 ## 3. The race-frame dispatcher (`snd_request_dispatch` 94FC)
 
@@ -248,7 +249,8 @@ key is acted on again on later frames while it is down, **likely**); at 12 MHz t
 ### 5.8 Unused (no caller in DOS 1.1)
 
 - `snd_beep_lo` 95A4 / `snd_beep_hi` 95C0: 659.6 Hz × 20 ticks (92AE) and 880.6 Hz × 10 ticks (92B4), with the
-  one-shot lock (`cs:926C = cs:926D = 1`). Plausibly cut start-countdown beeps.
+  one-shot lock (`cs:926C = cs:926D = 1`). Plausibly cut start-countdown beeps: the Mac plays low, low, high at
+  the start (section 9), and these two are a fourth apart like the Mac's beep1/beep2.
 - `snd_play_idle` 9491 (plays 92C0), and the sequence 929E (36.4 Hz × 3 ticks, loop).
 
 ## 6. Silence: `snd_stop` callers
@@ -280,10 +282,14 @@ Watches only (no hooks, nothing written):
 | 9352 (`snd_stop`), 937E (end entry) | stop of the current tone sound |
 | 9360 (`spk_set_divisor`) | CX: the latched divisor (`EngineSound::speaker_hz`) |
 | 94A1 / 94C8, 94D2 / 94FB | noise start (past the enabled test) / RET; the meaning from the return address (5.6) |
-| 94FC | race frame: time, throttle (DS:2D48, still set here), gear |
+| 94FC | race frame: time, throttle (DS:2D48, still set here), gear; the player's z, pitch, speed (thud); the held states |
 | E6B0 / EB0C | options menu mute / restore, for `enabled()` |
+| BB00, 198A, 1562, C55D/C5A6/C612/C615, 3FFC:0219 | the silent moments (section 9) |
 
-`requested(engine|skid|siren)` reads `cs:926C`/`926E`/`9277` while race frames arrive (≤ 250 ms ago).
+`requested(engine|skid|siren|horn|helicopter)` reads `cs:926C`/`926E`/`9277` (and section 9's state) while race
+frames arrive (one within 1 s) and the game hasn't silenced everything since: a `snd_stop` from anything but
+the engine-noise switch (0C28, 9577) or the crash into a car or pedestrian (1720) ends them at once (pause,
+menus, race-over pictures, sound off).
 `program()` decodes the sequences above from memory, and the noise routines' immediates (count, mask, start,
 step) into click timings for the emulated CPU clock. `tests/game_sound_game.cpp` checks that a run with the
 observer is cycle-, RAM- and audio-identical to one without.
@@ -323,9 +329,103 @@ DS:2AD4 = 1 (on-ramp) at 39 s:
 At 140 MHz (`--cpu-hz 140000000 --idle-skip`): garage_rev 15.0000 → 15.0918, gear_grind 3.0–3.8 ms, crash
 10.0–10.3 ms.
 
+## 9. The silent moments (Mac sounds without a DOS sound)
+
+The Mac version (notes 08) plays sounds where DOS 1.1 is silent. The observer reports the DOS moment each one
+corresponds to (`game::SfxKind` Cue: a start event only; Held: start and stop events plus `requested()`), so a
+replacement can fill them in. The PC speaker plays nothing for them. They respect the game's sound switch.
+
+| Sfx id | Kind | The DOS moment | Read from (**confirmed**) | Mac sound |
+|---|---|---|---|---|
+| `horn` | Held | the horn key, **X** (scan 2Dh), held in a race. DOS has no horn: an addition (9.1) | `kbd_held` 3FFC:000F bit 08h of byte 14h, while `kbd_game_mode` 3FFC:003C = 1; watched at the key handler (3FFC:0219) and each frame | `horn`, looped |
+| `helicopter` | Held | the helicopter view: F4 or keypad + (`key_helicopter_view` 0A49) until F1-F3 (0A74) | `helicopter_view` DS:2ACF ≠ 0, each race frame | `heli`, looped; replaces the engine |
+| `countdown_beep` | Cue | the start lights' first two steps: light 0 + "buckle up" (0 s), light 1 + "get ready" (2 s) | `start_countdown_step` BB00: `start_light` DS:2AD8 becomes 1, then 2 | `beep1` |
+| `countdown_go` | Cue | light 2 + "go" (3 s); the clock restarts | DS:2AD8 becomes 3 | `beep2` |
+| `splash` | Cue | drove into the bay: the water box C606h | `box_into_the_bay` 198A | `splash` |
+| `thud` | Cue | the road under the car turns upward by 7° or more (onto an uphill, off a downhill) at speed ≥ 140, or its height steps by 32 or more, in the city (9.2) | the player's z DS:2D39, pitch 2D3D, speed 2D43 between race frames (`is_thud`) | `thud` |
+| `pulled_over` | Cue | the police stop you (speed and gear zeroed, before the ticket screen) | `police_step` 1562 with `player_pulled_over` DS:2C59 = 0 | `joel` (a voice) |
+| `intro_cable_car` | Cue | title: the cable car starts rolling in (1.9 s) | the first `title_restore_band` step after the reveal (C5A6 after C55D) | `cable car bell` (the intro's use) |
+| `intro_car` | Cue | title: the Corvette comes at you (5.2 s) | `title_car_approach` call at C612 | `mic` |
+| `intro_logo` | Cue | title: the VETTE! logo drops in (5.5 s) | `title_logo_drop` call at C615 | `Signature` |
+
+`program()` gives the countdown cues the two unused DOS beeps (5.8) as their "original" notes; the others have
+none.
+
+Not reported: the race's **cable car bell**. The Mac rings it on entering a particular box (handler 6:5688,
+reached through jump table entry A5+6D2 from the box-type table in CODE 10; re-armed once the car leaves the
+box). DOS has no such box (the cases of `collision_box_event` 1976 are the water, rough surfaces, on-ramps,
+finish lines, C358 and crash boxes) and never draws a cable car in the race: model 2, the cable car's, isn't
+used by any traffic entity or scenery stub. The Mac's "landing after a jump" thud also has no DOS counterpart:
+DOS sets the car's height from the ground every frame (`ground_shape_height` 4160:0515), so it never leaves it.
+
+### 9.1 The horn's key
+
+DOS has no horn: no key handler touches the speaker or a sound request. During a race (`race_keyboard` DS:2AD0
+= FF) the game reads `kbd_isr`'s bitmaps (`read_held_keys` 07CF) and calls the handler of every key down,
+from `key_handlers` cs:0D4E. 0B83 (a bare RET) handles 7, 8, 9, Tab, Y, the brackets, Enter, semicolon,
+quote, backquote, backslash, X, V, full stop, slash, keypad * and -, Ins, Del, F11 and F12 (Ctrl, Shift, Alt
+and the lock keys go to the BIOS; F11/F12 never reach the bitmaps). H, the usual horn key, is taken
+(`key_map_toggle` 0CA2; the Mac chart labels H "Map"). X sits by the left hand next to the brake (Space) and
+does nothing in the race, so it is the horn. It is still in the game's own list of keys that act once per
+press (`keys_no_repeat` DS:2AEE), a leftover with no effect.
+
+### 9.2 Vertical motion
+
+The ground height is the cell's elevation × 224 plus a ramp shape (`ground_shape_height`: shapes 1-9 rise
+224 over a cell, linear in x or y or the smaller/larger of the two), and the pitch (`vehicle_set_pitch`
+4160:0004) is 0 or ±7° by the slope under the car. So the car's height is continuous on ramps and the pitch
+snaps when a slope starts or ends: driving north up the Great Highway's hill at cell (22, 2) gives pitch 0 → +7
+at the bottom and +7 → 0 at the top, z rising 8-9 per frame from 0 to 224. The thud is the compression: the
+pitch rising by ≥ 7 (the bottom of an uphill, or the end of a downhill) at speed ≥ 140 (the speed DOS treats as
+a hard hit, `player_contact_response` 1652). The height check catches any step between cells; a map scan finds
+a few mismatched borders, but none on the roads driven here.
+
+### 9.3 Validation
+
+`vette_run --sound-log`, 12 MHz:
+
+```
+README drive + F4 at 40 s, F2 at 42, X held 43-44:
+   1.9167 start intro_cable_car   5.1709 start intro_car   5.5381 start intro_logo
+  30.4203 start countdown_beep   32.4228 start countdown_beep   33.4241 start countdown_go
+  40.0994 start helicopter   42.0686 stop helicopter   43.0000 start horn   44.0000 stop horn
+  46.2576 start splash   46.4242 stop engine (the race-over picture)
+PRO, Sledgehammer:    50.4133 start pulled_over   50.4961 stop siren
+North on the Great Highway (stock car, automatic, K to straighten every 5 s):
+ 115.0793 start thud   (cell (22, 2): pitch 0 -> 7 at speed 672)
+```
+
+Recordings from the game itself (`vette2026 --no-launcher --mute --pc 286 --effects mac --wav ...`, same keys),
+each Mac sample found by normalized cross-correlation of the whole sample with the recording around its event:
+
+| Event (vette_run, idle skip) | Sample | Best match | Where |
+|---|---|---|---|
+| intro_cable_car 1.9167 | cable car bell | 0.958 | 1.917 s |
+| intro_car 5.1709 | mic | 0.285 (next best 0.049) | 5.171 s |
+| intro_logo 5.5381 | Signature | 0.660 (next 0.107) | 5.538 s |
+| countdown_beep 30.4036, countdown_go 33.4074 | beep1, beep2 | 0.925, 0.933 | 30.404, 33.407 s |
+| helicopter 40.08-42.07 | heli | 0.995 | in the window |
+| horn 43.000 | horn | 0.752 | 43.007 s |
+| splash 46.2409 | splash | 0.686 (next 0.043) | 46.241 s |
+| pulled_over 50.4133 (police run) | joel | 0.509 (0.074 elsewhere) | 50.397 s |
+| thud (hill run) | thud | 0.750 (0.280 elsewhere) | 115.18 s* |
+
+\*The game's own run drifts from vette_run's by up to 0.2 s over two minutes of driving (its pedestrian hit is
+0.2 s later too), so the thud is matched on the hill climb, not on the exact time.
+
+The AdLib recording of the README drive shows the defaults sounding at the events (new spectral peaks after
+each): the bell's 660/1320 Hz, the countdown's 660 Hz and 883 Hz (the unused DOS beeps' notes), the horn's
+partials (since tuned to 416/520 Hz), the rotor's low partials with the engine level unchanged (it replaced the
+engine). `tests/sound_game_audio_moments.cpp` checks on the running game that each moment reaches the
+replacement, that the rotor replaces the engine for exactly the view's time, and that with the PC speaker alone
+the output is unchanged sample for sample.
+
 ## Open questions
 
-- The unused beeps (5.8): a cut countdown? Check the PC-98 and Mac versions' start sequence.
+- The unused beeps (5.8) as a cut countdown: the Mac's countdown supports it (section 9); the PC-98's is unchecked.
+- The Mac's horn key: its handler (1:30C0, released at 1:2E2C) tests a GetKeys bit; which key that is wasn't
+  settled. The keyboard chart in the Mac box doesn't list a horn.
+- Where the Mac's cable car box is, and whether a DOS cell matches it (9).
 - Whether the siren first-note quirk (3.3) is audible in practice (count ≥ 1 at a siren start never observed).
 - The PIT reprogramming between repeated notes resets the counter phase: is there an audible click on a real
   speaker?

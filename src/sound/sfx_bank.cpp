@@ -233,6 +233,75 @@ SfxBank SfxBank::defaults() {
     grind.patch.feedback = 7;
     grind.patch.modulator = {.tremolo = true, .multiple = 5, .level = 4, .attack = 15, .release = 8};
     grind.patch.carrier = {.tremolo = true, .multiple = 1, .level = 0, .attack = 15, .release = 8};
+
+    // The moments the DOS game passes in silence (game::SfxKind Cue and Held), the Mac's sounds' roles.
+    const auto fixed = [&](const char* id, float hz, float ms, int volume) -> SfxVoice& {
+        SfxVoice& v = voice(id);
+        v.pitch = SfxVoice::Pitch::Fixed;
+        v.hz = hz;
+        v.time_ms = ms;
+        v.volume = volume;
+        return v;
+    };
+    const auto sweep = [&](const char* id, float from, float to, float ms, int volume) -> SfxVoice& {
+        SfxVoice& v = fixed(id, from, ms, volume);
+        v.pitch = SfxVoice::Pitch::Sweep;
+        v.to_hz = to;
+        return v;
+    };
+
+    // Horn, held: two brassy partials a major third apart, as a car's two horns: 416 and 520 Hz (the
+    // absolute-sine wave sounds an octave above the operators' 208 and 260 Hz).
+    SfxVoice& horn = fixed("horn", 52, 0, 75);
+    horn.patch.additive = true;
+    horn.patch.feedback = 4;
+    horn.patch.modulator = {.multiple = 5, .level = 3, .attack = 15, .release = 10, .wave = 2};
+    horn.patch.carrier = {.multiple = 4, .level = 0, .attack = 15, .release = 10, .wave = 2};
+
+    // Helicopter, held: a 13 Hz chop (the blades) over a low, rough drone.
+    SfxVoice& heli = fixed("helicopter", 13, 0, 80);
+    heli.patch.feedback = 5;
+    heli.patch.modulator = {.multiple = 1, .level = 6, .attack = 15, .release = 8, .wave = 1};
+    heli.patch.carrier = {.multiple = 6, .level = 0, .attack = 15, .release = 8, .wave = 0};
+
+    // Countdown: the original's own two beeps (game::SoundEvents::program: the beeps the DOS game has
+    // but never plays), on a clean tone.
+    for (const char* id : {"countdown_beep", "countdown_go"}) {
+        SfxVoice& b = voice(id);
+        b.patch.feedback = 0;
+        b.patch.modulator = {.multiple = 2, .level = 42, .attack = 15, .release = 9};
+        b.patch.carrier = {.multiple = 1, .level = 0, .attack = 15, .release = 9};
+        b.volume = 70;
+    }
+
+    // Into the bay: a long, falling rush of noise.
+    SfxVoice& splash = sweep("splash", 320, 60, 1400, 90);
+    splash.patch.feedback = 7;
+    splash.patch.modulator = {.sustained = false, .multiple = 15, .level = 0, .attack = 13, .decay = 4, .sustain = 3, .release = 5};
+    splash.patch.carrier = {.sustained = false, .multiple = 1, .level = 0, .attack = 12, .decay = 3, .sustain = 4, .release = 5};
+
+    // Thud: a short, low knock.
+    SfxVoice& thud = sweep("thud", 95, 45, 180, 95);
+    thud.patch.feedback = 3;
+    thud.patch.modulator = {.sustained = false, .multiple = 1, .level = 16, .attack = 15, .decay = 7, .sustain = 6, .release = 7};
+    thud.patch.carrier = {.sustained = false, .multiple = 1, .level = 0, .attack = 15, .decay = 6, .sustain = 8, .release = 7};
+
+    // Pulled over: the police loudspeaker's falling "whoop" (the Mac has a voice here).
+    SfxVoice& whoop = sweep("pulled_over", 1100, 420, 450, 65);
+    whoop.patch = siren.patch;
+
+    // Title: the cable car's bell (inharmonic 7:2, ringing out), the Corvette rushing past (the
+    // engine's buzz, falling), and a chime for the logo.
+    SfxVoice& bell = fixed("intro_cable_car", 330, 1600, 80);
+    bell.patch.feedback = 2;
+    bell.patch.modulator = {.sustained = false, .multiple = 7, .level = 18, .attack = 15, .decay = 3, .sustain = 8, .release = 3};
+    bell.patch.carrier = {.sustained = false, .multiple = 2, .level = 0, .attack = 15, .decay = 2, .sustain = 10, .release = 3};
+    SfxVoice& zoom = sweep("intro_car", 240, 70, 900, 85);
+    zoom.patch = e;
+    SfxVoice& chime = fixed("intro_logo", 262, 1300, 75);
+    chime.patch.feedback = 1;
+    chime.patch.modulator = {.sustained = false, .multiple = 11, .level = 22, .attack = 15, .decay = 4, .sustain = 8, .release = 4};
+    chime.patch.carrier = {.sustained = false, .multiple = 4, .level = 0, .attack = 15, .decay = 3, .sustain = 9, .release = 4};
     return bank;
 }
 

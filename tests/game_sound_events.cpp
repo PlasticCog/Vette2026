@@ -67,7 +67,7 @@ TEST(game_sound_names_round_trip) {
     CHECK(!sfx_from_name("").has_value());
     CHECK(!sfx_from_name("Engine").has_value());
     CHECK(!sfx_from_name("engine ").has_value());
-    CHECK(!sfx_from_name("horn").has_value());
+    CHECK(!sfx_from_name("klaxon").has_value());
     CHECK_EQ(std::string(sfx_name(Sfx::Engine)), std::string("engine"));
     CHECK_EQ(std::string(sfx_name(Sfx::HitPedestrian)), std::string("hit_pedestrian"));
 }
@@ -216,4 +216,48 @@ TEST(game_sound_noise_pulses) {
         }
     }
     CHECK(noise_pulses(NoiseParams{}, hz).empty());
+}
+
+TEST(game_sound_kinds) {
+    using vette::game::sfx_kind;
+    using vette::game::SfxKind;
+    // The DOS game's own sounds come first: tones and noises; then the silent moments.
+    for (const Sfx s : {Sfx::Engine, Sfx::GarageRev, Sfx::Skid, Sfx::Siren, Sfx::TitleTune, Sfx::WinTune}) {
+        CHECK(sfx_kind(s) == SfxKind::Tone);
+    }
+    for (const Sfx s : {Sfx::Crash, Sfx::CrashCar, Sfx::CrashRail, Sfx::HitPedestrian, Sfx::GearGrind}) {
+        CHECK(sfx_kind(s) == SfxKind::Noise);
+    }
+    CHECK(sfx_kind(Sfx::Horn) == SfxKind::Held && sfx_kind(Sfx::Helicopter) == SfxKind::Held);
+    for (const Sfx s : {Sfx::CountdownBeep, Sfx::CountdownGo, Sfx::Splash, Sfx::Thud, Sfx::PulledOver,
+                        Sfx::IntroCableCar, Sfx::IntroCar, Sfx::IntroLogo}) {
+        CHECK(sfx_kind(s) == SfxKind::Cue);
+    }
+    // The ids stay where they were (sound banks and settings name them).
+    static_assert(static_cast<int>(Sfx::GearGrind) == 10 && static_cast<int>(Sfx::Horn) == 11);
+    static_assert(vette::game::kHornScancode == 0x2D);  // X
+    CHECK_EQ(std::string(sfx_name(Sfx::Helicopter)), std::string("helicopter"));
+    CHECK_EQ(std::string(sfx_name(Sfx::IntroLogo)), std::string("intro_logo"));
+}
+
+TEST(game_sound_thud) {
+    using vette::game::CarMotion;
+    using vette::game::is_thud;
+    const CarMotion flat{0, 0, 600, false};
+    // Onto an uphill (pitch 0 -> +7, the car's nose up) and off a downhill (-7 -> 0): the suspension
+    // takes the jolt.
+    CHECK(is_thud(flat, CarMotion{1, 7, 600, false}));
+    CHECK(is_thud(CarMotion{100, -7, 600, false}, CarMotion{90, 0, 600, false}));
+    // Over a crest or into a downhill the load comes off instead.
+    CHECK(!is_thud(CarMotion{224, 7, 600, false}, CarMotion{224, 0, 600, false}));
+    CHECK(!is_thud(flat, CarMotion{0, -7, 600, false}));
+    // A step in height, either way.
+    CHECK(is_thud(flat, CarMotion{40, 0, 600, false}));
+    CHECK(is_thud(CarMotion{224, 0, 600, false}, CarMotion{0, 0, 600, false}));
+    CHECK(!is_thud(flat, CarMotion{9, 0, 600, false}));  // a slope's climb in one frame
+    // Too slow, or the highway (entering and leaving it moves the car).
+    CHECK(!is_thud(flat, CarMotion{1, 7, 139, false}));
+    CHECK(is_thud(flat, CarMotion{1, 7, 140, false}));
+    CHECK(!is_thud(CarMotion{224, 0, 800, false}, CarMotion{7, 0, 800, true}));
+    CHECK(!is_thud(CarMotion{7, 0, 800, true}, CarMotion{224, 0, 800, false}));
 }

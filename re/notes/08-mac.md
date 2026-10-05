@@ -191,10 +191,31 @@ same formula, continuous.
 | `win_tune` | — | **the Mac has no results fanfare** |
 | `gear_grind` | — | **the Mac has no missed-shift sound** |
 
-**Mac only**: `horn` (DOS has no horn), `heli` (DOS's helicopter view, F4, keeps the engine note),
-`joel` (voice when pulled over), `beep1`/`beep2` (race start countdown), `thud` (kerbs, landings),
-`cable car bell`, `splash` (DOS ends the race in the bay silently: `snd_stop` at DDEE), and the
-intro's `mic`, `Signature`, `Engine` and bell.
+The Mac's other sounds play at moments DOS passes in silence. The DOS observer reports those moments too
+(notes 07 section 9), so they map as well:
+
+| DOS `Sfx` (silent in DOS) | Mac sound | The DOS moment |
+|---|---|---|
+| `horn` | `horn`, looped | the X key held in a race (DOS has no horn; X does nothing there) |
+| `helicopter` | `heli`, looped; replaces the engine | the helicopter view (F4, keypad +) |
+| `countdown_beep` | `beep1` | start lights: "buckle up", then "get ready" 2 s later |
+| `countdown_go` | `beep2` | start lights: "go", 1 s after |
+| `splash` | `splash` | drove into the bay (the water box) |
+| `thud` | `thud` (the kerb use) | the road under the car turns upward (bottom of an uphill, end of a downhill) at speed, or its height steps |
+| `pulled_over` | `joel` | the police stop you |
+| `intro_cable_car` | `cable car bell` (the intro's use: channel 1, 2 s) | title: the cable car rolls in |
+| `intro_car` | `mic` | title: the Corvette comes at the viewer |
+| `intro_logo` | `Signature` | title: the VETTE! logo drops in |
+
+Still without a DOS moment: the race's `cable car bell` (DOS has no cable car in the race, and no box where
+the Mac's is), the landing `thud` (DOS cars never leave the ground), the wreck `crash`, and the intro's
+`Engine`.
+
+**The cable car bell** (6:5688) is a box handler: the Mac's box-type table (CODE 10, longs 0006xxxx from
+offset 4777) sends three box types to jump table entry A5+6D2. Each frame `1:2746` clears a "in the box" flag
+(A5−$33E8); the handler sets it and rings the bell when it wasn't already ringing for this box (A5−$33EA),
+which is cleared again once a frame passes outside the box (1:295C). So it rings on each entry, not once
+per race. Which cells carry those boxes is still open.
 
 The countdown answers a question in notes 07. DOS 1.1 has two unused beeps: `snd_beep_lo` (659.6 Hz) and
 `snd_beep_hi` (880.6 Hz), and its countdown is silent. The Mac plays beep1, beep1, beep2, which is the
@@ -209,7 +230,10 @@ on 2. A new sound on a busy channel replaces the one there (horn and siren share
 
 - The content of `mic` and `Signature` has not been identified by listening (see the table).
 - `joel`'s words. Its loop end (29693, 2.67 s in) lies past the game's 2.5 s limit, so it never loops.
-- The exact cell types that trigger `thud` (the list at A5−$3116) and `splash`, and the cable car
-  trigger position. These are needed only to mirror the Mac's events in places where DOS has none.
+- The exact cell types that trigger `thud` (the list at A5−$3116) and `splash`, and the cells with the cable
+  car's box (box types 3, 28 and 29 of the CODE 10 table, if it is indexed from 0). These are needed only to
+  mirror the Mac's events in places where DOS has none.
+- The horn key: the handler at 1:30C0 tests a GetKeys bit (released at 1:2E0C, byte 0 bit 6 of the KeyMap
+  copy at A5−$39B6); which key that is depends on the KeyMap's bit order, not settled.
 - Whether the B&W application uses other durations anywhere. Its call sites match in number and
   shape, but only Color VETTE!'s parameters were read.

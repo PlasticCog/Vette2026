@@ -465,3 +465,31 @@ addr,name,kind,comment
 3009:7D6A,highway_rail_check,func,"Highway lane out of 1..4: back into the lane, speed loss, crash noise (7EC5)."
 3009:7F79,far_snd_noise_crash,func,Far thunk (RETF) to snd_noise_crash for segment 4021.
 124A:2AFF,race_end_picture,data,"b; race-over picture: 0 finished first (win), 1-4 an opponent won (likely), 5 wrecked (likely), 6 into the bay."
+# --- Sound: the silent moments (re/notes/07-sound.md section 9) --------------------------------
+3009:BB00,start_countdown_step,func,"Race start, every frame while start_light < 5 (jump table cs:BAF6): 1 light 0 + ""buckle up"" until race_seconds >= 2; 2 light 1 + ""get ready"" until 3; 3 light 2 + ""go"" (clock reset); 4; then 5 = racing."
+124A:2AD8,start_light,data,b; start countdown state 0..5 (5 = racing).
+3009:6688,draw_start_light,func,BX = light 0..2 (picture DS:3B45[BX]).
+3009:6589,draw_dash_message,func,"SI = 11-character message: DS:3C66 ""buckle up"", 3C72 ""get ready"", 3C7E ""go""."
+3009:0A49,key_helicopter_view,func,"F4 and keypad +: helicopter_view = FF, camera offsets 2CCF = 88h, 2BEB = -17, 2C7D = 100h, mirror off."
+3009:0A74,camera_views_reset,func,"Clears helicopter_view and the camera offsets; the end of F1-F3 (092B, 094C, 090A) and of the tour (0CEF)."
+124A:2ACF,helicopter_view,data,b; FF in the helicopter view; cleared by F1-F3 and at race setup (213E).
+3009:198A,box_into_the_bay,label,"collision_box_event, box C606h (the water): into_the_bay = FF, race over."
+124A:2C69,into_the_bay,data,b; FF once the car drove into the bay (race over; race_end_picture 6).
+124A:2C6A,wrecked,data,"b; FF while the car is wrecked and stopped (player_wreck_check); race over 10 s later."
+3009:C66B,title_car_approach,func,Title: the Corvette (VX.BIN's 5 frames) comes at the viewer.
+3009:C819,title_logo_drop,func,Title: the BIGVET.BIN logo drops in.
+3009:C85E,title_presents,func,"Title: SPETRUM.BIN, ""Spectrum HoloByte presents"", slides in."
+3009:C8A9,title_restore_band,func,Title: restores the background band under the cable car (one step of it rolling in).
+3009:07CF,read_held_keys,func,"Race keyboard (race_keyboard != 0): kbd_read_keys into keys_down, then the handler (key_handlers) of every key in it."
+124A:2ADF,keys_down,data,11 b; this frame's keys: bit 80h >> (n & 7) of byte n >> 3 (n = scan code - 1).
+124A:2AEE,keys_no_repeat,data,"17 b; scan codes acted on once per press (BS W E P A S D G H X C V B F5 F6 F4 KP+), given to kbd_set_no_repeat at startup."
+124A:2AD0,race_keyboard,data,b; FF: the race reads kbd_isr's bitmaps (read_held_keys); 0: the BIOS (INT 16h).
+3009:0D4E,key_handlers,data,"88 w; the race's handler per scan code - 1. 0B83 (nothing): 7 8 9 Tab Y [ ] Enter Ctrl ; ' ` LShift \ X V . / RShift KP* Alt Caps NumLock Scroll KP- Ins Del F11 F12."
+3FFC:000F,kbd_held,data,11 b; keys held now (kbd_isr): bit 80h >> (n & 7) of byte n >> 3 (n = scan code - 1).
+3FFC:001A,kbd_repeat_mask,data,11 b; keys whose holding counts as a press every frame.
+3FFC:003C,kbd_game_mode,data,b; 1: kbd_isr keeps the bitmaps itself and doesn't pass the keys to the BIOS.
+3FFC:00E7,kbd_set_no_repeat,func,"SI = scan codes, CX = count: clears their kbd_repeat_mask bits."
+3FFC:010F,kbd_read_keys,func,ES:DI = kbd_state | (kbd_held & kbd_repeat_mask); clears kbd_state (latched presses).
+3FFC:0145,kbd_game_mode_on,func,Zeroes kbd_state and sets kbd_game_mode.
+3009:0CA2,key_map_toggle,func,"H: toggles DS:2ADD (the map display, likely), clears the D display."
+3009:0C7C,key_damage_toggle,func,"D: toggles DS:2AC9 (the damage indicator, likely), message timer DS:3DEE."

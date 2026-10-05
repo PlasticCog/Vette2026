@@ -1,9 +1,11 @@
 // SoundEvents against the real game: a scripted session (title, garage rev, race, missed shifts, a
-// crash into traffic) must produce the expected events, the native engine-note model must match the
-// original's at every step, and the observer must not change the run. Skipped when the game files are
+// crash into traffic, then the horn and the helicopter view) must produce the expected events, the
+// native engine-note model must match the original's at every step, and the observer must not change
+// the run. Skipped when the game files are
 // missing (Game/VETTE.EXE, or the folder in VETTE_GAME_DIR).
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -93,6 +95,9 @@ std::vector<Key> script() {
     tap(41, 0x13);
     tap(43.5, 0x02);
     hold(44, 46, 0x4B);
+    hold(49.3, 49.8, vette::game::kHornScancode);
+    tap(50.0, 0x3E);  // F4: helicopter view
+    tap(51.0, 0x3C);  // F2: ahead
     std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) { return a.at < b.at; });
     return keys;
 }
@@ -150,9 +155,15 @@ TEST(game_sound_real_game_session) {
     });
 
     std::vector<SoundEvent> events;
-    bool engine_seen_running = false, engine_pitch_ok = true;
-    run(*m, 50, [&] {
+    bool engine_seen_running = false, engine_pitch_ok = true, horn_requested = false, horn_late = false;
+    run(*m, 52, [&] {
         sound.take(events);
+        const double t = static_cast<double>(m->emulated_ns()) / 1e9;
+        if (t > 49.4 && t < 49.7) {
+            horn_requested = horn_requested || sound.requested(Sfx::Horn);
+        } else if (t > 49.9) {
+            horn_late = horn_late || sound.requested(Sfx::Horn);
+        }
         const auto e = sound.engine();
         if (e.running) {
             engine_seen_running = true;
@@ -172,20 +183,25 @@ TEST(game_sound_real_game_session) {
     CHECK(engine_pitch_ok);
     CHECK(sound.enabled());
 
-    // Events: in time order, each stop after a start of the same sound, one tone at a time.
+    // Events: in time order, each stop after a start of the same sound, one tone at a time; cues start
+    // only.
     std::vector<int> starts(static_cast<size_t>(Sfx::Count));
     std::vector<bool> on(static_cast<size_t>(Sfx::Count));
     uint64_t last_t = 0;
     int tones_on = 0;
-    const auto is_tone = [](Sfx s) { return s <= Sfx::WinTune; };
+    using vette::game::SfxKind;
     for (const auto& e : events) {
         const auto i = static_cast<size_t>(e.sfx);
         CHECK(e.t_ns >= last_t);
         last_t = e.t_ns;
+        starts[i] += e.start ? 1 : 0;
+        if (vette::game::sfx_kind(e.sfx) == SfxKind::Cue) {
+            CHECK(e.start);
+            continue;
+        }
         CHECK(e.start != on[i]);
         on[i] = e.start;
-        starts[i] += e.start ? 1 : 0;
-        if (is_tone(e.sfx)) {
+        if (vette::game::sfx_kind(e.sfx) == SfxKind::Tone) {
             tones_on += e.start ? 1 : -1;
             CHECK(tones_on <= 1);
         }
@@ -196,14 +212,52 @@ TEST(game_sound_real_game_session) {
     CHECK_EQ(starts[static_cast<size_t>(Sfx::GearGrind)], 2);
     CHECK(starts[static_cast<size_t>(Sfx::CrashCar)] >= 1);
     CHECK_EQ(starts[static_cast<size_t>(Sfx::Siren)], 0);  // TRAINEE: no police
+    // The silent moments: the title's three, the start lights, the horn and the helicopter view.
+    for (const Sfx s : {Sfx::IntroCableCar, Sfx::IntroCar, Sfx::IntroLogo, Sfx::CountdownGo, Sfx::Horn,
+                        Sfx::Helicopter}) {
+        CHECK_EQ(starts[static_cast<size_t>(s)], 1);
+    }
+    CHECK_EQ(starts[static_cast<size_t>(Sfx::CountdownBeep)], 2);
+    CHECK(!on[static_cast<size_t>(Sfx::Horn)] && !on[static_cast<size_t>(Sfx::Helicopter)]);  // both ended
+    CHECK(horn_requested && !horn_late);
+    CHECK_EQ(starts[static_cast<size_t>(Sfx::Splash)] + starts[static_cast<size_t>(Sfx::PulledOver)], 0);
+    // In order: the title's cable car, car and logo; the lights 2 s and 1 s apart, after the engine starts.
+    std::vector<uint64_t> at(static_cast<size_t>(Sfx::Count));
+    std::vector<uint64_t> beeps;
+    for (const auto& e : events) {
+        if (e.start && !at[static_cast<size_t>(e.sfx)]) {
+            at[static_cast<size_t>(e.sfx)] = e.t_ns;
+        }
+        if (e.sfx == Sfx::CountdownBeep) {
+            beeps.push_back(e.t_ns);
+        }
+    }
+    const auto when = [&](Sfx s) { return static_cast<double>(at[static_cast<size_t>(s)]) / 1e9; };
+    CHECK(when(Sfx::TitleTune) <= when(Sfx::IntroCableCar) && when(Sfx::IntroCableCar) < when(Sfx::IntroCar) &&
+          when(Sfx::IntroCar) < when(Sfx::IntroLogo));
+    CHECK(when(Sfx::Engine) <= when(Sfx::CountdownBeep));
+    if (beeps.size() == 2) {
+        const double gap = static_cast<double>(beeps[1] - beeps[0]) / 1e9;
+        const double go = when(Sfx::CountdownGo) - static_cast<double>(beeps[1]) / 1e9;
+        CHECK(gap > 1.8 && gap < 2.3);
+        CHECK(go > 0.8 && go < 1.3);
+    }
+    CHECK(when(Sfx::Horn) > 49.2 && when(Sfx::Horn) < 49.4);
+    CHECK(when(Sfx::Helicopter) > 49.9 && when(Sfx::Helicopter) < 50.4);
 
     // The title tune plays out: 9 notes, 640 ticks.
-    for (size_t i = 0; i + 1 < events.size(); ++i) {
+    for (size_t i = 0; i < events.size(); ++i) {
         if (events[i].sfx == Sfx::TitleTune && events[i].start) {
-            const double ticks = static_cast<double>(events[i + 1].t_ns - events[i].t_ns) * 1e-9 *
-                                 vette::game::kSoundTickHz;
-            CHECK(events[i + 1].sfx == Sfx::TitleTune && !events[i + 1].start);
-            CHECK(ticks > 639 && ticks < 642);
+            size_t j = i + 1;
+            while (j < events.size() && events[j].sfx != Sfx::TitleTune) {
+                ++j;
+            }
+            CHECK(j < events.size() && !events[j].start);
+            if (j < events.size()) {
+                const double ticks = static_cast<double>(events[j].t_ns - events[i].t_ns) * 1e-9 *
+                                     vette::game::kSoundTickHz;
+                CHECK(ticks > 639 && ticks < 642);
+            }
         }
     }
 
@@ -237,6 +291,17 @@ TEST(game_sound_real_game_session) {
         CHECK_EQ(p.pulses.size(), size_t{26});
     }
     CHECK_EQ(sound.program(Sfx::GearGrind).pulses.size(), size_t{41});
+    // The countdown: the DOS game's two unused beeps.
+    const auto beep = sound.program(Sfx::CountdownBeep), go = sound.program(Sfx::CountdownGo);
+    CHECK(beep.steps.size() == 1 && beep.loop_to == -1 && go.steps.size() == 1 && go.loop_to == -1);
+    if (beep.steps.size() == 1 && go.steps.size() == 1) {
+        CHECK(beep.steps[0].ticks == 20 && std::fabs(beep.steps[0].hz - 659.6f) < 0.5f);
+        CHECK(go.steps[0].ticks == 10 && std::fabs(go.steps[0].hz - 880.6f) < 0.5f);
+    }
+    for (const Sfx s : {Sfx::Horn, Sfx::Helicopter, Sfx::Splash, Sfx::Thud, Sfx::PulledOver, Sfx::IntroLogo}) {
+        const auto p = sound.program(s);
+        CHECK(p.steps.empty() && p.pulses.empty());
+    }
 }
 
 TEST(game_sound_observer_changes_nothing) {

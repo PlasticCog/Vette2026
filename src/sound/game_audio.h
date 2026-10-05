@@ -5,7 +5,9 @@
 // (game/sound_events.h) drive the replacements, each on its own sample within a stretch of emulated
 // time, and gate the speaker so it's heard only for what it still plays. Unlike the original's single
 // voice, the engine keeps running under a skid or the siren: what the race asks for is played, not
-// just what won the speaker.
+// just what won the speaker. The moments the DOS game passes in silence (countdown, helicopter view,
+// horn, ...: game::SfxKind Cue and Held) play only on a replacement; in the helicopter view its rotor
+// replaces the engine.
 
 #include <array>
 #include <cstdint>

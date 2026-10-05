@@ -88,7 +88,10 @@ sounds on an emulated **AdLib** card (the Enhanced preset; DOS VETTE! never supp
 **Macintosh** version's digitized sounds. The **music** can be the original's tunes, or the **PC-98**
 version's FM soundtrack (its YM2203 chip, emulated). That soundtrack adds music to the menus and the
 loser's screen, where DOS is silent. With AdLib or the Mac sounds, the engine keeps running under a skid
-or the siren, where the original's single speaker voice cut it off. The Mac and PC-98 options need those
+or the siren, where the original's single speaker voice cut it off. They also play the Mac version's
+extra sounds at the matching moments, which the DOS game passes in silence: the start countdown, the
+helicopter view's rotor, the horn (X), splashing into the bay, thuds over hill crests, the police
+officer pulling you over, and the title sequence's bell and voices. The Mac and PC-98 options need those
 versions' files (see [`Game/`](Game/README.md)). `--effects` and `--music` override the settings for one
 run.
 
@@ -108,6 +111,7 @@ windows. `--pc 286` emulates a 12 MHz PC/AT of 1989 (about 12-17 fps); `--cpu-hz
 ## Controls
 
 - **Keyboard:** every key goes to the game, Esc included. F11 or Alt+Enter toggles fullscreen.
+  **X** is the horn (with AdLib or the Mac sounds): the DOS game has none, so it plays the Mac's.
 - **Mouse:** acts as the PC's mouse. When the game shows the mouse pointer, it's drawn over the picture
   as the classic DOS arrow, and the Windows pointer is hidden while it's over the window.
 - **Gamepad:** acts as the PC's analog joystick. The D-pad, Start and Back also work as keys for the

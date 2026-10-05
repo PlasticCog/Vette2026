@@ -68,6 +68,16 @@ const char* label(game::Sfx sfx) {
     case game::Sfx::CrashRail: return "Crash: guard rail";
     case game::Sfx::HitPedestrian: return "Hit a pedestrian";
     case game::Sfx::GearGrind: return "Gear grind";
+    case game::Sfx::Horn: return "Horn (X key)";
+    case game::Sfx::Helicopter: return "Helicopter view";
+    case game::Sfx::CountdownBeep: return "Countdown beep";
+    case game::Sfx::CountdownGo: return "Countdown: go";
+    case game::Sfx::Splash: return "Into the bay";
+    case game::Sfx::Thud: return "Thud: bump or dip";
+    case game::Sfx::PulledOver: return "Pulled over";
+    case game::Sfx::IntroCableCar: return "Title: cable car";
+    case game::Sfx::IntroCar: return "Title: the car";
+    case game::Sfx::IntroLogo: return "Title: logo";
     case game::Sfx::Count: break;
     }
     return "";

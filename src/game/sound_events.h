@@ -14,6 +14,11 @@
 // down stops it first, so the other noises' events overlap the engine (or skid, or siren) events.
 // Their length, and the garage rev's, scale with the emulated CPU (a crash is 0.12 s at 12 MHz, 0.01 s
 // at 140 MHz); replacement sounds should keep their own length.
+//
+// The Mac version has sounds for moments the DOS game passes in silence (the start countdown, the
+// helicopter view, driving into the bay, ...). Those moments are reported too, read from the game's
+// state, so a replacement can fill them in; the PC speaker plays nothing for them. One is new: the
+// horn, on a key the DOS game ignores during a race.
 
 #include <cstdint>
 #include <functional>
@@ -25,8 +30,8 @@
 
 namespace vette::game {
 
-// One per sound the DOS game makes, by meaning. Several meanings can share one DOS sound (the crash
-// noise); the names are stable ids for files (sfx_name).
+// One per sound the DOS game makes, by meaning, then the silent moments with a Mac sound. Several
+// meanings can share one DOS sound (the crash noise); the names are stable ids for files (sfx_name).
 enum class Sfx : uint8_t {
     Engine,         // race engine note; its pitch slides as the revs change (SoundEvents::engine())
     GarageRev,      // car-select screen, Space: the engine revved while the exhaust animation runs
@@ -39,11 +44,43 @@ enum class Sfx : uint8_t {
     CrashRail,      // hit the highway's guard rail
     HitPedestrian,  // ran into a pedestrian (standing or already knocked down)
     GearGrind,      // missed shift: a gear too low for the speed, or reverse while moving
+    // No sound in the DOS game (re/notes/07-sound.md, section 9):
+    Horn,           // the horn key (kHornScancode, X) held during a race: an addition, DOS has no horn
+    Helicopter,     // the helicopter view (F4 or keypad +) is on
+    CountdownBeep,  // race start lights: "buckle up", then "get ready" two seconds later
+    CountdownGo,    // race start lights: "go"
+    Splash,         // drove into the bay
+    Thud,           // the car jolts: the road under it turns upward (onto an uphill, off a downhill)
+                    // at speed, or its height steps
+    PulledOver,     // the police pull you over
+    IntroCableCar,  // title: the cable car rolls in
+    IntroCar,       // title: the Corvette comes at you
+    IntroLogo,      // title: the VETTE! logo drops in
     Count
 };
 
 const char* sfx_name(Sfx);  // "engine", "skid", "crash_car", ...; nullptr for Count
 std::optional<Sfx> sfx_from_name(std::string_view);
+
+enum class SfxKind : uint8_t {
+    Tone,   // a PC-speaker program: start and stop events
+    Noise,  // CPU-timed speaker clicks: start and stop events
+    Cue,    // a moment the DOS game passes in silence: a start event only (no length of its own)
+    Held,   // a state the DOS game keeps silent: start and stop events, and requested()
+};
+SfxKind sfx_kind(Sfx);
+
+// The horn's key, a scan code (set 1) whose handler does nothing during a race: X.
+inline constexpr uint8_t kHornScancode = 0x2D;
+
+// The thud: between two race frames (`before`, `after`: the player's height z, pitch in degrees and
+// speed), the road under a moving car (speed >= 140) turns upward by 7 degrees or more, or its height
+// jumps by 32 or more. `highway`: on the highway (its heights aren't the city's), in either frame.
+struct CarMotion {
+    int z = 0, pitch = 0, speed = 0;
+    bool highway = false;
+};
+bool is_thud(const CarMotion& before, const CarMotion& after);
 
 struct SoundEvent {
     uint64_t t_ns;  // emulated time (Machine::emulated_ns)
@@ -84,13 +121,15 @@ public:
     EngineSound engine() const;  // the engine note right now
     bool enabled() const;        // the game's own sound setting (S key; kept while its options menu
                                  // mutes the speaker)
-    // Engine, Skid, Siren: true while a race runs, the sound is on and the race asks for the sound,
-    // whether or not it has the speaker. The other sounds: true while they play.
+    // Engine, Skid, Siren, Horn, Helicopter: true while a race runs, the sound is on and the race asks
+    // for the sound, whether or not it has the speaker (the horn: while its key is held). Cues: false.
+    // The other sounds: true while they play.
     bool requested(Sfx) const;
     std::optional<Sfx> playing() const;  // the speaker program (tone) sound playing now
 
     // The original's speaker program for a sound, read from the running game's memory (never stored
-    // in the repo): for the sound editor's "original" preview. Empty until the game is unpacked.
+    // in the repo): for the sound editor's "original" preview. Empty until the game is unpacked, and for
+    // the silent moments, except the countdown: the two beeps the DOS game has but never plays.
     struct Step {
         uint16_t ticks;  // at kSoundTickHz (a loop's jump entry takes a tick too: counted in the last step)
         float hz;        // 0 = rest
@@ -109,12 +148,17 @@ public:
 
 private:
     void on_play();
+    void on_stop();
     void on_noise(bool start, bool grind);
     void on_frame();
+    void on_countdown();
+    void cue(Sfx sfx);
+    void update_held();
     void set_playing(std::optional<Sfx> sfx);
     void push(Sfx sfx, bool start);
     bool race_running() const;
     bool game_loaded() const;
+    bool sound_on() const;
 
     host::Machine& machine_;
     std::vector<host::Cpu::WatchId> watches_;
@@ -126,8 +170,13 @@ private:
     // At the last race frame (the request dispatcher 3009:94FC, once per frame loop pass).
     uint64_t frame_ns_ = 0;
     bool frame_seen_ = false;
+    bool silenced_ = false;  // the game has silenced everything since (pause, menu, race over)
     bool throttle_ = false;
     int gear_ = 0;
+    std::optional<CarMotion> motion_;  // the player at the last race frame
+    bool held_[2] = {};                // Horn, Helicopter on
+    int countdown_ = 0;                // the start light last reported
+    bool intro_bell_ = false;          // this title's cable car reported
 };
 
 // --- Decoding and models of the original's driver (also used by tests) ------------------------------

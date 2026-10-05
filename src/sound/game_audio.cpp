@@ -8,16 +8,18 @@ namespace {
 
 using game::Sfx;
 
-// Played while the race asks for them (SoundEvents::requested), whatever has the speaker.
-constexpr Sfx kContinuous[] = {Sfx::Skid, Sfx::Siren};
+// Played while the race asks for them (SoundEvents::requested), whatever has the speaker; the horn and
+// the helicopter have no speaker sound at all.
+constexpr Sfx kContinuous[] = {Sfx::Skid, Sfx::Siren, Sfx::Horn, Sfx::Helicopter};
 
-bool is_continuous(Sfx s) { return s == Sfx::Engine || s == Sfx::Skid || s == Sfx::Siren; }
+bool is_continuous(Sfx s) {
+    return s == Sfx::Engine || s == Sfx::Skid || s == Sfx::Siren || game::sfx_kind(s) == game::SfxKind::Held;
+}
 bool is_music(Sfx s) { return s == Sfx::TitleTune || s == Sfx::WinTune; }
 // The noise routines click the speaker directly, over whatever tone program is running.
-bool is_noise(Sfx s) {
-    return s == Sfx::Crash || s == Sfx::CrashCar || s == Sfx::CrashRail || s == Sfx::HitPedestrian ||
-           s == Sfx::GearGrind;
-}
+bool is_noise(Sfx s) { return game::sfx_kind(s) == game::SfxKind::Noise; }
+// What the speaker itself plays: the rest (the silent moments) only ever reaches a replacement.
+bool on_speaker(Sfx s) { return game::sfx_kind(s) == game::SfxKind::Tone || is_noise(s); }
 
 }  // namespace
 
@@ -73,11 +75,13 @@ bool GameAudio::speaker_open() const {
 
 void GameAudio::apply(const game::SoundEvent& e) {
     // Track what the speaker plays, for the gate.
-    std::optional<Sfx>& slot = is_noise(e.sfx) ? speaker_noise_ : speaker_tone_;
-    if (e.start)
-        slot = e.sfx;
-    else if (slot == e.sfx)
-        slot.reset();
+    if (on_speaker(e.sfx)) {
+        std::optional<Sfx>& slot = is_noise(e.sfx) ? speaker_noise_ : speaker_tone_;
+        if (e.start)
+            slot = e.sfx;
+        else if (slot == e.sfx)
+            slot.reset();
+    }
 
     if (is_continuous(e.sfx) || muted_)
         return;  // see continuous()
@@ -88,13 +92,16 @@ void GameAudio::apply(const game::SoundEvent& e) {
     if (e.start)
         r.backend->start(id, original(e.sfx));
     else if (original(e.sfx))
-        r.backend->stop(id);  // a tune cut off; noise sounds play out their own length
+        r.backend->stop(id);  // a tune cut off; noise sounds play out their own length (cues have no stop)
 }
 
 void GameAudio::continuous() {
     const game::EngineSound e = events_.engine();
-    if (SfxBackend* b = route(Sfx::Engine).backend)
-        b->engine({e.running && !muted_, e.pitch_hz, e.rpm, e.throttle, e.gear});
+    if (SfxBackend* b = route(Sfx::Engine).backend) {
+        // In the helicopter view the rotor replaces the engine, as on the Mac, where the device has both.
+        const bool heli = events_.requested(Sfx::Helicopter) && route(Sfx::Helicopter).backend == b;
+        b->engine({e.running && !muted_ && !heli, e.pitch_hz, e.rpm, e.throttle, e.gear});
+    }
     for (const Sfx s : kContinuous) {
         SfxBackend* b = route(s).backend;
         if (!b)

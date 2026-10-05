@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdlib>
+#include <iterator>
 
 #include "game/x86.h"
 
@@ -26,6 +28,23 @@ constexpr uint16_t kGrindNoiseEnd = 0x94FB;
 constexpr uint16_t kDispatch = 0x94FC;     // snd_request_dispatch: once per race frame
 constexpr uint16_t kMenuMute = 0xE6B0;     // options menu: setting saved in cs:E5FC, then muted
 constexpr uint16_t kMenuRestore = 0xEB0C;  // options menu: setting restored
+
+// The silent moments (re/notes/07-sound.md, section 9).
+constexpr uint16_t kCountdown = 0xBB00;      // start_countdown_step, every frame until the lights go out
+constexpr uint16_t kIntoTheBay = 0x198A;     // collision_box_event: the water box (C606h)
+constexpr uint16_t kPulledOver = 0x1562;     // police_step: `mov [2C59],1`, the car stopped by the police
+constexpr uint16_t kTitleReveal = 0xC55D;    // title_screen: the picture dissolves in
+constexpr uint16_t kTitleCableCar = 0xC5A6;  // title_screen: one step of the cable car rolling in
+constexpr uint16_t kTitleCar = 0xC612;       // title_screen: the Corvette coming at you (title_car_approach)
+constexpr uint16_t kTitleLogo = 0xC615;      // title_screen: the logo drops in (title_logo_drop)
+// The keyboard handler in segment 3FFC, past updating its key bitmap (game keyboard mode only).
+constexpr uint16_t kKeyboard = emu_seg(0x3FFC);
+constexpr uint16_t kKeyUpdated = 0x0219;
+constexpr uint16_t kKeyHeld = 0x000F;     // 11 bytes: bit 80h >> (n & 7) of byte n >> 3, n = scan code - 1
+constexpr uint16_t kKeyboardMode = 0x003C;  // b: 1 while the game reads the keyboard itself (races)
+// snd_stop callers that aren't the game silencing everything: the engine noise switched off (E key
+// and every frame after), and the crash into a car or pedestrian.
+constexpr uint16_t kRetEngineOff = 0x0C28, kRetEngineOffFrame = 0x9577, kRetContactStop = 0x1720;
 
 // Driver variables (cs:).
 constexpr uint16_t kRequest = 0x926C;  // b: bit 1 skid, 2 siren, 3 engine (set by the race)
@@ -64,18 +83,34 @@ constexpr NoiseCode kGrindCode{0x94D3, 0x94D6, 0x94D9, 0x94E8, true};
 
 // Player state (DS:).
 constexpr uint16_t kGear = 0x2D45, kMaxGear = 0x2D47, kThrottle = 0x2D48;
+constexpr uint16_t kZ = 0x2D39, kPitch = 0x2D3D, kSpeed = 0x2D43;
+constexpr uint16_t kHighway = 0x2AD4;     // b: 0 in the city
+constexpr uint16_t kHelicopter = 0x2ACF;  // b: FFh in the helicopter view
+constexpr uint16_t kStartLight = 0x2AD8;  // b: 0..4 during the start countdown, then 5
+constexpr uint16_t kStopped = 0x2C59;     // w: 1 once the police have pulled you over
+
+// The unused beeps (snd_beep_lo 95A4, snd_beep_hi 95C0), and the `mov ax, seq` that plays each.
+constexpr uint16_t kSeqBeepLo = 0x92AE, kSeqBeepHi = 0x92B4;
+constexpr uint16_t kBeepLoMov = 0x95AD, kBeepHiMov = 0x95C9;
+
+constexpr int kThudPitch = 7, kThudStep = 32, kThudSpeed = 140;
 
 // snd_play: `cmp byte cs:[9277],0`, present once the game has unpacked itself.
 constexpr uint16_t kSignatureAt = 0x933E;
 constexpr std::array<uint8_t, 6> kSignature{0x2E, 0x80, 0x3E, 0x77, 0x92, 0x00};
 
-constexpr uint64_t kStaleNs = 250'000'000;  // no race frame for this long: the race isn't running
+// No race frame for this long: the race isn't running. Only a safety net: the game silences everything
+// when a race stops (snd_stop). A frame can take a crash noise's 0.12 s on top of its own 0.25 s.
+constexpr uint64_t kStaleNs = 1'000'000'000;
 constexpr size_t kMaxEvents = 4096;
 
 constexpr std::array<const char*, static_cast<size_t>(Sfx::Count)> kNames{
     "engine", "garage_rev", "skid", "siren", "title_tune", "win_tune",
     "crash", "crash_car", "crash_rail", "hit_pedestrian", "gear_grind",
+    "horn", "helicopter", "countdown_beep", "countdown_go", "splash", "thud", "pulled_over",
+    "intro_cable_car", "intro_car", "intro_logo",
 };
+constexpr Sfx kHeld[] = {Sfx::Horn, Sfx::Helicopter};
 
 // Speaker programs that loop until the game stops them; playing one again continues it.
 bool loops(Sfx s) { return s != Sfx::TitleTune; }
@@ -94,6 +129,40 @@ std::optional<Sfx> sfx_from_name(std::string_view name) {
         }
     }
     return std::nullopt;
+}
+
+SfxKind sfx_kind(Sfx s) {
+    switch (s) {
+    case Sfx::Crash:
+    case Sfx::CrashCar:
+    case Sfx::CrashRail:
+    case Sfx::HitPedestrian:
+    case Sfx::GearGrind:
+        return SfxKind::Noise;
+    case Sfx::Horn:
+    case Sfx::Helicopter:
+        return SfxKind::Held;
+    case Sfx::CountdownBeep:
+    case Sfx::CountdownGo:
+    case Sfx::Splash:
+    case Sfx::Thud:
+    case Sfx::PulledOver:
+    case Sfx::IntroCableCar:
+    case Sfx::IntroCar:
+    case Sfx::IntroLogo:
+        return SfxKind::Cue;
+    default:
+        return SfxKind::Tone;
+    }
+}
+
+bool is_thud(const CarMotion& before, const CarMotion& after) {
+    if (before.highway || after.highway || after.speed < kThudSpeed) {
+        return false;
+    }
+    // A compression: the slope under the car turns upward (pitch is nose-up positive). Turning
+    // downward (over a crest) unloads the suspension instead, and DOS cars never leave the ground.
+    return after.pitch - before.pitch >= kThudPitch || std::abs(after.z - before.z) >= kThudStep;
 }
 
 float divisor_hz(uint16_t divisor) { return static_cast<float>(kPitHz / (divisor ? divisor : 0x10000)); }
@@ -172,7 +241,7 @@ SoundEvents::SoundEvents(host::Machine& machine) : machine_(machine) {
     Cpu& cpu = machine_.cpu();
     const auto watch = [&](uint16_t off, auto fn) { watches_.push_back(cpu.add_watch(Cpu::linear(kCode, off), fn)); };
     watch(kPlayCommit, [this](Cpu&) { on_play(); });
-    watch(kStop, [this](Cpu&) { set_playing(std::nullopt); });
+    watch(kStop, [this](Cpu&) { on_stop(); });
     watch(kSeqEnd, [this](Cpu&) { set_playing(std::nullopt); });
     watch(kSetDivisor, [this](Cpu& c) { latched_ = c.regs.r[host::CX]; });
     watch(kCrashNoise, [this](Cpu&) { on_noise(true, false); });
@@ -182,6 +251,23 @@ SoundEvents::SoundEvents(host::Machine& machine) : machine_(machine) {
     watch(kDispatch, [this](Cpu&) { on_frame(); });
     watch(kMenuMute, [this](Cpu&) { in_menu_ = true; });
     watch(kMenuRestore, [this](Cpu&) { in_menu_ = false; });
+    watch(kCountdown, [this](Cpu&) { on_countdown(); });
+    watch(kIntoTheBay, [this](Cpu&) { cue(Sfx::Splash); });
+    watch(kPulledOver, [this](Cpu&) {
+        if (rd16(machine_.memory(), kData, kStopped) == 0) {  // police_step repeats until the ticket shows
+            cue(Sfx::PulledOver);
+        }
+    });
+    watch(kTitleReveal, [this](Cpu&) { intro_bell_ = false; });
+    watch(kTitleCableCar, [this](Cpu&) {
+        if (!intro_bell_) {
+            intro_bell_ = true;
+            cue(Sfx::IntroCableCar);
+        }
+    });
+    watch(kTitleCar, [this](Cpu&) { cue(Sfx::IntroCar); });
+    watch(kTitleLogo, [this](Cpu&) { cue(Sfx::IntroLogo); });
+    watches_.push_back(cpu.add_watch(Cpu::linear(kKeyboard, kKeyUpdated), [this](Cpu&) { update_held(); }));
 }
 
 SoundEvents::~SoundEvents() {
@@ -191,6 +277,7 @@ SoundEvents::~SoundEvents() {
 }
 
 void SoundEvents::take(std::vector<SoundEvent>& out) {
+    update_held();  // ends a state whose race frames stopped without the game silencing anything
     out.insert(out.end(), events_.begin(), events_.end());
     events_.clear();
 }
@@ -250,6 +337,46 @@ void SoundEvents::on_play() {
     set_playing(sfx);
 }
 
+void SoundEvents::on_stop() {
+    set_playing(std::nullopt);
+    // Pause, menus, the race-over pictures, sound off: the game silences everything. The race's own
+    // stops (engine noise off, a crash into a car or pedestrian) leave the other sounds alone.
+    const Cpu& cpu = machine_.cpu();
+    const uint16_t ret = rd16(machine_.memory(), cpu.regs.s[host::SS], cpu.regs.r[host::SP]);
+    if (ret != kRetEngineOff && ret != kRetEngineOffFrame && ret != kRetContactStop) {
+        silenced_ = true;
+        update_held();
+    }
+}
+
+void SoundEvents::cue(Sfx sfx) {
+    if (sound_on()) {
+        push(sfx, true);
+    }
+}
+
+void SoundEvents::on_countdown() {
+    // Called every frame of the countdown: light 1 ("buckle up"), light 2 ("get ready"), light 3 ("go").
+    const int light = rd8(machine_.memory(), kData, kStartLight);
+    if (light == 0 || light < countdown_) {
+        countdown_ = 0;  // a new race
+    }
+    if (light >= 1 && light <= 3 && light != countdown_) {
+        countdown_ = light;
+        cue(light == 3 ? Sfx::CountdownGo : Sfx::CountdownBeep);
+    }
+}
+
+void SoundEvents::update_held() {
+    for (size_t i = 0; i < std::size(kHeld); ++i) {
+        const bool want = requested(kHeld[i]);
+        if (want != held_[i]) {
+            held_[i] = want;
+            push(kHeld[i], want);
+        }
+    }
+}
+
 void SoundEvents::on_noise(bool start, bool grind) {
     if (!start) {
         if (noise_) {
@@ -286,17 +413,30 @@ void SoundEvents::on_noise(bool start, bool grind) {
 
 void SoundEvents::on_frame() {
     Memory& m = machine_.memory();
-    frame_ns_ = machine_.emulated_ns();
-    frame_seen_ = true;
     // The frame's input is still in the car struct here: the player step that clears it comes later.
     throttle_ = rd8(m, kData, kThrottle) != 0;
     const uint16_t gear = rd16(m, kData, kGear);
     gear_ = gear > rd8(m, kData, kMaxGear) ? -1 : gear;
+
+    const bool was_running = race_running();
+    frame_ns_ = machine_.emulated_ns();
+    frame_seen_ = true;
+    silenced_ = false;
+    // The last player step's result (this frame's comes after the dispatcher).
+    const CarMotion now{static_cast<int16_t>(rd16(m, kData, kZ)), static_cast<int16_t>(rd16(m, kData, kPitch)),
+                        static_cast<int16_t>(rd16(m, kData, kSpeed)), rd8(m, kData, kHighway) != 0};
+    if (was_running && motion_ && is_thud(*motion_, now)) {
+        cue(Sfx::Thud);
+    }
+    motion_ = now;
+    update_held();
 }
 
 bool SoundEvents::race_running() const {
-    return frame_seen_ && machine_.emulated_ns() - frame_ns_ < kStaleNs;
+    return frame_seen_ && !silenced_ && machine_.emulated_ns() - frame_ns_ < kStaleNs;
 }
+
+bool SoundEvents::sound_on() const { return game_loaded() && rd8(machine_.memory(), kCode, kEnabled) != 0; }
 
 bool SoundEvents::game_loaded() const {
     for (size_t i = 0; i < kSignature.size(); ++i) {
@@ -315,11 +455,15 @@ bool SoundEvents::enabled() const {
 }
 
 bool SoundEvents::requested(Sfx sfx) const {
-    if (sfx != Sfx::Engine && sfx != Sfx::Skid && sfx != Sfx::Siren) {
+    const SfxKind kind = sfx_kind(sfx);
+    if (kind == SfxKind::Cue) {
+        return false;
+    }
+    if (kind != SfxKind::Held && sfx != Sfx::Engine && sfx != Sfx::Skid && sfx != Sfx::Siren) {
         return playing_ == sfx || noise_ == sfx;
     }
     Memory& m = machine_.memory();
-    if (!race_running() || !game_loaded() || rd8(m, kCode, kEnabled) == 0) {
+    if (!race_running() || !sound_on()) {
         return false;
     }
     const uint8_t request = rd8(m, kCode, kRequest);
@@ -328,6 +472,13 @@ bool SoundEvents::requested(Sfx sfx) const {
         return (request & kSkidBit) != 0;
     case Sfx::Siren:
         return (request & kSirenBit) != 0;
+    case Sfx::Helicopter:
+        return rd8(m, kData, kHelicopter) != 0;
+    case Sfx::Horn: {
+        constexpr int n = kHornScancode - 1;
+        return rd8(m, kKeyboard, kKeyboardMode) == 1 &&
+               (rd8(m, kKeyboard, static_cast<uint16_t>(kKeyHeld + (n >> 3))) & (0x80 >> (n & 7))) != 0;
+    }
     default:
         return rd8(m, kCode, kEngineOn) != 0;
     }
@@ -405,7 +556,17 @@ SoundEvents::Program SoundEvents::program(Sfx sfx) const {
         return noise(kCrashCode);
     case Sfx::GearGrind:
         return noise(kGrindCode);
-    case Sfx::Count:
+    case Sfx::CountdownBeep:
+    case Sfx::CountdownGo: {
+        // The beeps the DOS game has but never plays, 659.6 and 880.6 Hz: likely a cut countdown.
+        const bool lo = sfx == Sfx::CountdownBeep;
+        const uint16_t mov = lo ? kBeepLoMov : kBeepHiMov, seq = lo ? kSeqBeepLo : kSeqBeepHi;
+        if (rd8(m, kCode, mov) != 0xB8 || read16(static_cast<uint16_t>(mov + 1)) != seq) {
+            return {};
+        }
+        return decode_sequence(read16, seq);
+    }
+    default:  // no sound in the DOS game
         break;
     }
     return {};

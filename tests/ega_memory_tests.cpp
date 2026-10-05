@@ -2,6 +2,7 @@
 // read modes 0/1, latches and the memory map.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 #include "host/ega.h"

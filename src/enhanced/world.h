@@ -40,6 +40,7 @@
 // The original's 3D view is reproduced pixel for pixel from this model by world_reference.h.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>

@@ -14,6 +14,7 @@
 //    (the compound guard, the finish-banner flag, animation counters, model colour patches).
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>

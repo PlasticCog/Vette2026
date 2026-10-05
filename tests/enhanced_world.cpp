@@ -3,6 +3,7 @@
 // conventions, variant selection and trace signatures. The extraction itself is checked against the
 // original game by vette_world (--validate, --teleport).
 
+#include <cstddef>
 #include <vector>
 
 #include "enhanced/world.h"

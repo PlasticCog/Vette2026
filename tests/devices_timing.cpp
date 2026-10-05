@@ -1,6 +1,7 @@
 // PIC, PIT and PC speaker: the devices behind VETTE's 291 Hz timer and its sound.
 
 #include <cmath>
+#include <cstddef>
 #include <vector>
 
 #include "host/pic.h"

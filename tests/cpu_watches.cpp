@@ -1,6 +1,7 @@
 // Watches: several observers per address (verification harness, smooth renderer, idle skip), the
 // single-owner set_watch shorthand, and add_cycles / IRQ inhibit used with them.
 
+#include <cstddef>
 #include <vector>
 
 #include "host/cpu.h"

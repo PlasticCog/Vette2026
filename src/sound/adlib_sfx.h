@@ -4,6 +4,7 @@
 // game's. Channel 0 is the engine's; sounds share the other eight (a new sound takes the quietest
 // or oldest when all are busy).
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <string_view>

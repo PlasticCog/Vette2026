@@ -5,6 +5,7 @@
 // the input status register's retrace bits for code that waits on vertical retrace.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>

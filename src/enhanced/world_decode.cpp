@@ -1,5 +1,6 @@
 #include "enhanced/world_decode.h"
 
+#include <cstddef>
 #include <cstdio>
 
 namespace vette::enhanced {

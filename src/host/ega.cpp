@@ -11,6 +11,7 @@
 #include "host/ega.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <limits>
 #include <utility>

@@ -1,6 +1,7 @@
 #include "ui/canvas.h"
 
 #include <algorithm>
+#include <cstddef>
 
 #include "ui/font8x8.h"
 

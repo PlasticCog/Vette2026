@@ -11,6 +11,7 @@
 // Camera space: X right, Y down, Z forward (depth).
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace vette::host {

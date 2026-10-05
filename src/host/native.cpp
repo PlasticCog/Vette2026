@@ -1,6 +1,7 @@
 #include "host/native.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <string_view>
 #include <unordered_map>

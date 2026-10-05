@@ -1,6 +1,7 @@
 #include "ui/app_icon.h"
 
 #include <array>
+#include <cstddef>
 #include <string_view>
 
 namespace vette::ui {

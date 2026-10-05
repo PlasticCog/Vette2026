@@ -7,6 +7,7 @@
 //
 // It uses a fixed seed, so a failure reproduces exactly.
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

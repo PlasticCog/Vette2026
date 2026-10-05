@@ -4,6 +4,7 @@
 // machine (VETTE.EXE loaded at segment 1000h and unpacked); nothing here runs emulated code.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>

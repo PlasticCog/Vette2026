@@ -2,6 +2,7 @@
 // Helpers for high-level BIOS/DOS services. Each service lives in a ROM stub `0F FF id / IRET`, so
 // when the callback runs, SS:SP points at the caller's IRET frame (IP, CS, FLAGS).
 
+#include <cstddef>
 #include <string>
 
 #include "host/cpu.h"

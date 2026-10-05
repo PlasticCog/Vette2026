@@ -1,6 +1,7 @@
 #include "enhanced/world_probe.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 
 #include "host/cpu.h"

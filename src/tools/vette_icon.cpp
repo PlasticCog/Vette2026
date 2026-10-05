@@ -3,6 +3,7 @@
 // the app bundle (PNG images). The extension picks the format.
 // Usage: vette_icon <out.ico | out.icns>
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>

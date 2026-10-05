@@ -1,6 +1,7 @@
 // The FM chips through ymfm: a note sounds, silence is silent, timers raise their flags.
 
 #include <cmath>
+#include <cstddef>
 #include <vector>
 
 #include "sound/fm_chip.h"

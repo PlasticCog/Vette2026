@@ -171,6 +171,23 @@ if(VETTE_BUILD_GAME)
         target_link_libraries(vette2026 PRIVATE vette_graphics)
     endif()
     vette_warnings(vette2026)
+
+    # The sound editor (a separate program): edits the AdLib sound bank the game plays.
+    add_executable(vette_sfx
+        src/tools/vette_sfx.cpp
+        src/platform/audio.cpp
+        src/platform/framebuffer.cpp
+        src/platform/presenter.cpp
+        src/ui/app_icon.cpp
+        src/ui/canvas.cpp
+    )
+    target_include_directories(vette_sfx PRIVATE src)
+    target_link_libraries(vette_sfx PRIVATE vette_enhanced vette_sound vette_core ${VETTE_SDL})
+    if(WIN32 AND NOT CMAKE_CROSSCOMPILING)
+        target_sources(vette_sfx PRIVATE ${VETTE_RC} ${VETTE_ICO})
+        set_target_properties(vette_sfx PROPERTIES WIN32_EXECUTABLE TRUE)
+    endif()
+    vette_warnings(vette_sfx)
 endif()
 
 # --- Tests ---------------------------------------------------------------------------------------

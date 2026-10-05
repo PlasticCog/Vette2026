@@ -1,6 +1,7 @@
 #include "ui/launcher.h"
 
 #include <SDL3/SDL.h>
+#include <cstddef>
 
 #include <algorithm>
 #include <cmath>
@@ -13,6 +14,7 @@
 #include "platform/gamepad.h"
 #include "platform/presenter.h"
 #include "ui/canvas.h"
+#include "ui/theme.h"
 
 #ifndef VETTE_VERSION
 #define VETTE_VERSION "dev"
@@ -26,10 +28,7 @@ enum Row {
     kPlay, kQuit, kRows
 };
 
-// Colours (0xRRGGBB).
-constexpr uint32_t kBackground = 0x0E1324, kSelection = 0x28345A, kRule = 0x2E3A5C;
-constexpr uint32_t kGold = 0xFFC23C, kSubtitle = 0xB9BECB, kLabel = 0xC5CAD6, kValue = 0xEEF0F4;
-constexpr uint32_t kHelp = 0xD6DAE4, kHint = 0x7C8396, kGood = 0x62D96B, kBad = 0xFF6464;
+using namespace theme;
 
 constexpr int kValueColumn = 20;  // characters from the left margin
 

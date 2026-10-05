@@ -2,6 +2,7 @@
 // decode, CRTC start address/offset, render(), and the 3DAh/3C2h timing bits.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 

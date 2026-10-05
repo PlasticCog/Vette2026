@@ -1,6 +1,7 @@
 #include "core/settings.h"
 
 #include <array>
+#include <cstddef>
 #include <fstream>
 #include <sstream>
 #include <string_view>

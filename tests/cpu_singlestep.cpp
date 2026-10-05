@@ -21,6 +21,7 @@
 // those files; VETTE_SST_SHOW=n prints up to n failure details per file (default 3).
 
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

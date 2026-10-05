@@ -3,16 +3,19 @@
 // application's resources, plus the DOS pictures the screens are matched against. Everything is read
 // at runtime from the player's own copies; nothing is bundled.
 //
-// ArtFiles is a set of callbacks, so any file access can be plugged in. from_game_dir() is the
-// game's: DOS files in the game folder, the PC-98 version in PC98/ (assets/pc98_disk.h: plain files
-// or a disk image), the Mac version in Mac/ (assets/mac_files.h: HFS images, MacBinary, AppleDouble,
-// raw forks, ...). from_folders() takes plain files and a raw resource fork, for tools and tests.
+// ArtFiles is a set of callbacks, so any file access can be plugged in. from_versions() is the
+// game's: the versions found in the game folder (core/versions.h), the PC-98 version as plain files
+// or a disk image (assets/pc98_disk.h), the Mac version from HFS images, MacBinary, AppleDouble, raw
+// forks, ... (assets/mac_files.h). from_folders() takes plain files and a raw resource fork, for tools
+// and tests.
 
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
+
+#include "core/versions.h"
 
 namespace vette::graphics {
 
@@ -22,7 +25,9 @@ struct ArtFiles {
     std::function<std::vector<std::uint8_t>(const std::string& name)> pc98_file;  // "TITLE.PIC"
     std::function<std::vector<std::uint8_t>(std::int16_t id)> mac_pict;           // Color VETTE!'s PICT id
 
-    // The game folder's layout (Game/, Game/PC98/, Game/Mac/). `notes` receives what was found.
+    // The versions found in the game folder. `notes` receives what was found.
+    static ArtFiles from_versions(const GameVersions& versions, std::vector<std::string>* notes = nullptr);
+    // The same, scanning `game_dir` first.
     static ArtFiles from_game_dir(const std::filesystem::path& game_dir, std::vector<std::string>* notes = nullptr);
     // Plain files: `dos_dir` holds the .BIN files, `pc98_dir` the PC-98 files, `mac_rsrc` is Color
     // VETTE!'s resource fork as a raw file. Missing parts are fine.

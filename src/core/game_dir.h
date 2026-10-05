@@ -10,16 +10,9 @@
 #include <string_view>
 #include <vector>
 
-namespace vette {
+#include "core/versions.h"
 
-// Every file of the DOS release (see Game/README.md).
-inline constexpr std::array<std::string_view, 25> kRequiredGameFiles = {
-    "VETTE.EXE",    "BIGVET.BIN",   "CONFIG.BIN",   "CRASH0.BIN",   "CRASH1.BIN",
-    "EGAPIC.BIN",   "EGASKILL.BIN", "GARAGE.BIN",   "HIGHSC.BIN",   "HORIZON0.BIN",
-    "HORIZON1.BIN", "HORIZON2.BIN", "LOSER0.BIN",   "LOSER1.BIN",   "LOSER2.BIN",
-    "LOSER3.BIN",   "MAPPIC.BIN",   "PENALTY.BIN",  "REDVETTE.BIN", "SCORE.BIN",
-    "SPETRUM.BIN",  "TICKET.BIN",   "TITLE.BIN",    "VX.BIN",       "WINNER.BIN",
-};
+namespace vette {
 
 // The supported VETTE.EXE: DOS v1.1, English (EXEPACK-packed as shipped).
 inline constexpr std::size_t kVetteExeSize = 248173;
@@ -42,13 +35,17 @@ private:
 };
 
 struct GameDirSearch {
-    std::optional<GameDir> dir;                   // first folder with every required file
-    std::vector<std::filesystem::path> searched;  // folders tried, in order
-    std::vector<std::string_view> missing;        // from the most complete folder, if none matched
+    std::optional<GameDir> dir;                   // the DOS game's files
+    GameVersions versions;                        // every version found in the game folder
+    std::vector<std::filesystem::path> searched;  // game folders tried, in order
+    std::vector<std::string_view> missing;        // DOS files missing from the most complete folder
 };
 
-// With `override_dir` (--game) only that folder is tried. Otherwise: Game/ next to the executable
-// and in up to 4 of its parents (so build trees find the repo's Game/), then Game/ in the CWD.
+// Finds the game folder and scans it for the versions of VETTE! (core/versions.h): the DOS files in
+// it or in a folder of their own below it, the PC-98 and Mac versions in theirs. With `override_dir`
+// (--game, the launch menu's choice) only that folder is tried. Otherwise: Game/ next to the
+// executable and in up to 4 of its parents (so build trees find the repo's Game/), then Game/ in the
+// CWD.
 GameDirSearch find_game_dir(const std::optional<std::filesystem::path>& override_dir);
 
 // A subfolder of `dir` by name, ignoring case (Game/Mac, Game/PC98 for the other versions' files).

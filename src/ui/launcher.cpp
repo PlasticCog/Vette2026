@@ -33,6 +33,7 @@ enum Row {
 using namespace theme;
 
 constexpr int kValueColumn = 20;  // characters from the left margin
+constexpr int kStatusPitch = 11;  // the versions-found lines
 
 const char* label(int row) {
     switch (row) {
@@ -59,21 +60,8 @@ struct Extras {
     bool mac = false;
 };
 
-bool has_subfolder(const std::filesystem::path& root, std::string_view name) {
-    std::error_code ec;
-    for (std::filesystem::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
-        const std::string n = path_to_utf8(it->path().filename());
-        if (it->is_directory(ec) && n.size() == name.size() &&
-            std::equal(n.begin(), n.end(), name.begin(), [](char a, char b) { return std::tolower(a) == std::tolower(b); }))
-            return true;
-    }
-    return false;
-}
-
-Extras find_extras(const std::optional<GameDir>& game) {
-    if (!game)
-        return {};
-    return {has_subfolder(game->root(), "PC98"), has_subfolder(game->root(), "Mac")};
+Extras find_extras(const GameDirSearch& search) {
+    return {search.versions.pc98.has_value(), search.versions.mac.has_value()};
 }
 
 // A choice that needs another version's files, when they aren't there.
@@ -87,9 +75,10 @@ bool missing(int row, const Settings& s, const Extras& x) {
     return false;
 }
 
-std::string value(int row, const Settings& s, const std::optional<GameDir>& game, const Extras& x) {
+std::string value(int row, const Settings& s, const GameDirSearch& search, const Extras& x) {
+    const std::optional<GameDir>& game = search.dir;
     switch (row) {
-    case kFolder: return game ? path_to_utf8(game->root()) : "Not found - Enter to choose";
+    case kFolder: return game ? path_to_utf8(search.versions.root) : "Not found - Enter to choose";
     case kPreset:
         return s.preset() == Settings::Preset::Classic    ? "Classic (1989)"
                : s.preset() == Settings::Preset::Enhanced ? "Enhanced"
@@ -128,8 +117,8 @@ std::string value(int row, const Settings& s, const std::optional<GameDir>& game
 std::string_view help(int row, const Settings& s) {
     switch (row) {
     case kFolder:
-        return "The folder with your DOS VETTE! files: by default the folder Game next to vette2026 "
-               "(Game/README.md lists the files). Enter: choose another folder.";
+        return "The folder with your copies of VETTE!: the DOS files, and the PC-98 and Mac versions if you "
+               "have them, each in a folder of its own (any names). Enter: choose another folder.";
     case kPreset:
         return "Classic is VETTE! as it was in 1989. Enhanced turns on the smooth frame rate, a fast PC and "
                "the whole city in view, and skips the manual question. Changing an option below makes it Custom.";
@@ -231,7 +220,7 @@ struct Layout {
         list_y = 56;
         actions_y = list_y + kPlay * pitch + pitch / 2;
         status_y = actions_y + 2 * pitch + pitch / 2;
-        rule_y = status_y + pitch;
+        rule_y = status_y + 3 * kStatusPitch + 2;  // a line per version
         help_y = rule_y + 8;
         hints_y = height - 14;
     }
@@ -270,7 +259,7 @@ std::string describe_problem(const GameDirSearch& search) {
 }  // namespace
 
 LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, std::optional<GameDir>& game,
-                          const GameDirSearch& search) {
+                          GameDirSearch& search) {
     static FolderPick pick;  // static: a dialog left open must not outlive what its callback writes to
     int selected = game ? kPlay : kFolder;
     std::string status = game ? "" : describe_problem(search);
@@ -356,9 +345,10 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             const std::lock_guard lock(pick.mutex);
             if (pick.done) {
                 pick.done = false;
-                const GameDirSearch chosen = find_game_dir(path_from_utf8(pick.path));
+                GameDirSearch chosen = find_game_dir(path_from_utf8(pick.path));
                 if (chosen.dir) {
                     game = chosen.dir;
+                    search = std::move(chosen);
                     s.game_folder = pick.path;
                     status.clear();
                     selected = kPlay;
@@ -464,7 +454,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
         // Options and actions.
         const int value_x = m + kValueColumn * kGlyph;
         const size_t value_chars = static_cast<size_t>(std::max(0, (canvas.width - value_x - m) / kGlyph - 4));
-        const Extras extras = find_extras(game);
+        const Extras extras = find_extras(search);
         for (int row = 0; row < kRows; ++row) {
             const int y = lay.row_y(row);
             const bool sel = row == selected;
@@ -475,7 +465,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
                 continue;
             }
             canvas.text(m, y, label(row), sel ? kGold : kLabel);
-            std::string v = fit_left(value(row, s, game, extras), value_chars);
+            std::string v = fit_left(value(row, s, search, extras), value_chars);
             if (row != kFolder)
                 v = "< " + v + " >";
             canvas.text(value_x, y, v, (row == kFolder && !game) || missing(row, s, extras) ? kBad : kValue);
@@ -483,10 +473,31 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
 
         // Status, help and key hints.
         const size_t line_chars = static_cast<size_t>((canvas.width - 2 * m) / kGlyph);
+        // The versions found in the game folder (a problem, if there is one, in place of the DOS line).
+        const auto where = [&](const std::filesystem::path& p, const std::string& what) {
+            std::error_code ec;
+            const std::filesystem::path base = search.versions.root.parent_path();
+            const std::filesystem::path rel = std::filesystem::relative(p, base, ec);
+            std::string text = path_to_utf8(ec || rel.empty() ? p : rel);
+            return what.empty() ? text : text + "  (" + what + ")";
+        };
+        const int label_w = 11;
+        const auto version_line = [&](int i, const char* name, const std::optional<std::filesystem::path>& at,
+                                      const std::string& what) {
+            const int y = lay.status_y + i * kStatusPitch;
+            canvas.text(m, y, name, kLabel);
+            const size_t room = line_chars > static_cast<size_t>(label_w) ? line_chars - label_w : 0;
+            if (at)
+                canvas.text(m + label_w * kGlyph, y, fit_left(where(*at, what), room), kGood);
+            else
+                canvas.text(m + label_w * kGlyph, y, "not found", kDim);
+        };
         if (!status.empty())
             canvas.text(m, lay.status_y, fit_left(status, line_chars), kBad);
-        else if (game)
-            canvas.text(m, lay.status_y, fit_left("Game found: " + path_to_utf8(game->root()), line_chars), kGood);
+        else
+            version_line(0, "DOS", game ? std::optional{game->root()} : std::nullopt, "");
+        version_line(1, "PC-98", search.versions.pc98, search.versions.pc98_what);
+        version_line(2, "Macintosh", search.versions.mac, search.versions.mac_what);
         canvas.fill_rect(m, lay.rule_y, canvas.width - 2 * m, 1, kRule);
         const std::vector<std::string> lines = wrap(help(selected, s), line_chars);
         for (size_t i = 0; i < lines.size() && i < 3; ++i)

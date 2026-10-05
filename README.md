@@ -12,7 +12,9 @@ Status: early reverse engineering. See [docs/PLAN.md](docs/PLAN.md) for the appr
 ## You need the original game
 
 This repository contains **no original game files**. To play, copy the files from your own copy of
-VETTE! for DOS into the [`Game/`](Game/README.md) folder.
+VETTE! for DOS into a folder in [`Game/`](Game/README.md) (e.g. `Game/DOS`). The PC-98 and Macintosh
+versions, if you have them, go in folders of their own beside it, under any names: VETTE! 2026 scans
+`Game/` when it starts, works out which version is where, and shows what it found in the launch menu.
 
 VETTE! 2026 is an unofficial fan project. It is not affiliated with or endorsed by the rights holders
 of VETTE!.

@@ -495,14 +495,14 @@ private:
     std::uint32_t bytes_ = 0;
 };
 
-// The Mac version's sounds from the player's copy in Game/Mac (nullptr, with the reason logged, if not).
-std::unique_ptr<sound::SfxBackend> mac_sound(const GameDir& game) {
-    const std::optional<std::filesystem::path> folder = find_subfolder(game.root(), "Mac");
-    if (!folder) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "Mac sound: no Game/Mac folder");
+// The Mac version's sounds from the player's copy (nullptr, with the reason logged, if not).
+std::unique_ptr<sound::SfxBackend> mac_sound(const GameVersions& versions) {
+    if (!versions.mac) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "Mac sound: the Mac version isn't in the game folder");
         return nullptr;
     }
-    const assets::MacFiles files = assets::MacFiles::open(*folder);
+    const std::optional<std::filesystem::path>& folder = versions.mac;
+    const assets::MacFiles files = open_mac(versions);
     const std::optional<assets::ResourceFork> data = assets::find_vette_data(files);
     std::vector<assets::MacSound> sounds = data ? assets::decode_mac_sounds(*data) : std::vector<assets::MacSound>{};
     if (sounds.empty()) {
@@ -516,15 +516,15 @@ std::unique_ptr<sound::SfxBackend> mac_sound(const GameDir& game) {
     return std::make_unique<sound::MacBackend>(std::move(sounds), kAudioRate);
 }
 
-// The PC-98 version's FM songs from the player's copy in Game/PC98 (nullptr, with the reason logged, if not).
-std::unique_ptr<sound::SfxBackend> pc98_music(const GameDir& game, host::Machine& machine) {
-    const std::optional<std::filesystem::path> folder = find_subfolder(game.root(), "PC98");
-    if (!folder) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "PC-98 music: no Game/PC98 folder");
+// The PC-98 version's FM songs from the player's copy (nullptr, with the reason logged, if not).
+std::unique_ptr<sound::SfxBackend> pc98_music(const GameVersions& versions, host::Machine& machine) {
+    if (!versions.pc98) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "PC-98 music: the PC-98 version isn't in the game folder");
         return nullptr;
     }
+    const std::optional<std::filesystem::path>& folder = versions.pc98;
     std::string error;
-    const std::optional<assets::Pc98Files> files = assets::Pc98Files::open(*folder, error);
+    const std::optional<assets::Pc98Files> files = open_pc98(versions, error);
     std::unique_ptr<sound::Pc98Sound> fm = files ? sound::Pc98Sound::create(*files, kAudioRate, error) : nullptr;
     if (!fm) {
         SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO, "PC-98 music: %s", error.c_str());
@@ -736,7 +736,12 @@ int run(int argc, char** argv) {
             if (!save_settings(settings_file, settings))
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't save %s", path_to_utf8(settings_file).c_str());
         }
-        SDL_Log("Game folder: %s", path_to_utf8(game->root()).c_str());
+        SDL_Log("Game folder: %s", path_to_utf8(search.versions.root).c_str());
+        SDL_Log("  DOS: %s", path_to_utf8(game->root()).c_str());
+        if (search.versions.pc98)
+            SDL_Log("  PC-98: %s (%s)", path_to_utf8(*search.versions.pc98).c_str(), search.versions.pc98_what.c_str());
+        if (search.versions.mac)
+            SDL_Log("  Mac: %s (%s)", path_to_utf8(*search.versions.mac).c_str(), search.versions.mac_what.c_str());
         identify_vette_exe(game->read("VETTE.EXE"));
 
         std::optional<AudioOut> audio;
@@ -798,9 +803,9 @@ int run(int argc, char** argv) {
         if (!silent &&
             (settings.effects != Settings::Effects::Speaker || settings.music != Settings::Music::Original)) {
             std::unique_ptr<sound::SfxBackend> mac =
-                settings.effects == Settings::Effects::Mac ? mac_sound(*game) : nullptr;
+                settings.effects == Settings::Effects::Mac ? mac_sound(search.versions) : nullptr;
             std::unique_ptr<sound::SfxBackend> pc98 =
-                settings.music == Settings::Music::Pc98 ? pc98_music(*game, machine) : nullptr;
+                settings.music == Settings::Music::Pc98 ? pc98_music(search.versions, machine) : nullptr;
             game_sound = std::make_unique<GameSound>(machine, settings, std::move(mac), std::move(pc98),
                                                      settings_dir() / "adlib.ini");
         }
@@ -815,7 +820,7 @@ int run(int argc, char** argv) {
             const graphics::Art which =
                 settings.graphics == Settings::Graphics::Pc98 ? graphics::Art::Pc98 : graphics::Art::Mac;
             std::vector<std::string> notes;
-            const graphics::ArtFiles files = graphics::ArtFiles::from_game_dir(game->root(), &notes);
+            const graphics::ArtFiles files = graphics::ArtFiles::from_versions(search.versions, &notes);
             auto substitution = std::make_unique<graphics::Substitution>(which, files);
             for (const std::string& w : substitution->warnings())
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Graphics: %s", w.c_str());

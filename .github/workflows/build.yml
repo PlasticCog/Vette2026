@@ -84,6 +84,11 @@ jobs:
           mkdir -p "$dist/Game" "$dist/licenses"
           cp README.md "$dist/"
           cp Game/README.md "$dist/Game/"
+          # A folder for each version, to show where they go (any names work; see Game/README.md).
+          for v in DOS PC-98 Mac; do
+            mkdir -p "$dist/Game/$v"
+            echo "Put your $v VETTE! files here (see ../README.md)." > "$dist/Game/$v/PUT YOUR $v FILES HERE.txt"
+          done
           cp "$BUILD/_deps/ymfm-src/LICENSE" "$dist/licenses/ymfm.txt"
           cp "$BUILD/_deps/sdl3-src/LICENSE.txt" "$dist/licenses/SDL3.txt"
           cp THIRD_PARTY_NOTICES.md "$dist/licenses/"

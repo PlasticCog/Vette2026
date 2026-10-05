@@ -23,14 +23,6 @@ bool iequals(std::string_view a, std::string_view b) {
     return std::ranges::equal(a, b, [](char x, char y) { return ascii_lower(x) == ascii_lower(y); });
 }
 
-std::vector<std::string_view> missing_files(const GameDir& dir) {
-    std::vector<std::string_view> missing;
-    for (const std::string_view name : kRequiredGameFiles)
-        if (!dir.find(name))
-            missing.push_back(name);
-    return missing;
-}
-
 std::vector<fs::path> candidate_dirs(const std::optional<fs::path>& override_dir) {
     if (override_dir)
         return {*override_dir};
@@ -105,18 +97,21 @@ std::vector<std::uint8_t> GameDir::read(std::string_view name) const {
 GameDirSearch find_game_dir(const std::optional<fs::path>& override_dir) {
     GameDirSearch search;
     search.searched = candidate_dirs(override_dir);
-    std::optional<std::vector<std::string_view>> best;
+    std::optional<GameVersions> best;
     for (const fs::path& path : search.searched) {
-        GameDir dir(path);
-        auto missing = missing_files(dir);
-        if (missing.empty()) {
-            search.dir = std::move(dir);
+        GameVersions v = scan_game_folder(path);
+        if (v.dos) {
+            search.dir = GameDir(*v.dos);
+            search.versions = std::move(v);
             return search;
         }
-        if (!best || missing.size() < best->size())
-            best = std::move(missing);
+        if (!best || v.dos_missing.size() < best->dos_missing.size())
+            best = std::move(v);
     }
-    search.missing = std::move(best).value_or(std::vector<std::string_view>{});
+    if (best) {
+        search.missing = best->dos_missing;
+        search.versions = std::move(*best);
+    }
     return search;
 }
 

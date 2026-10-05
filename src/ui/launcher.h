@@ -18,10 +18,11 @@ namespace vette::ui {
 enum class LaunchChoice { Start, Quit };
 
 // Runs until the player starts or quits. Edits `settings` in place (including the game folder).
-// `game` starts as the result of `search`. The player can choose another folder, and Start is only
-// possible with a valid one, so `game` is set whenever this returns Start. Keyboard, mouse and
-// gamepad all work; the display setting applies to the window immediately.
+// `game` starts as the result of `search` (the DOS files, and the versions found in the game folder,
+// which the menu shows). The player can choose another folder, which is scanned again and replaces
+// `search`; Start is only possible with the DOS files, so `game` is set whenever this returns Start.
+// Keyboard, mouse and gamepad all work; the display setting applies to the window immediately.
 LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& settings, std::optional<GameDir>& game,
-                          const GameDirSearch& search);
+                          GameDirSearch& search);
 
 }  // namespace vette::ui

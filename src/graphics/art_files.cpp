@@ -44,12 +44,13 @@ std::filesystem::path find_ci(const std::filesystem::path& dir, const std::strin
     return {};
 }
 
-ArtFiles ArtFiles::from_game_dir(const std::filesystem::path& game_dir, std::vector<std::string>* notes) {
+ArtFiles ArtFiles::from_versions(const GameVersions& versions, std::vector<std::string>* notes) {
     ArtFiles files;
-    files.dos_file = [game_dir](const std::string& name) { return read_file(find_ci(game_dir, name)); };
+    const std::filesystem::path dos_dir = versions.dos.value_or(versions.root);
+    files.dos_file = [dos_dir](const std::string& name) { return read_file(find_ci(dos_dir, name)); };
 
     std::string error;
-    auto pc98 = assets::Pc98Files::open(game_dir / "PC98", error);
+    auto pc98 = open_pc98(versions, error);
     if (pc98) {
         if (notes) notes->push_back("PC-98: " + pc98->description());
         auto shared = std::make_shared<const assets::Pc98Files>(std::move(*pc98));
@@ -64,9 +65,8 @@ ArtFiles ArtFiles::from_game_dir(const std::filesystem::path& game_dir, std::vec
     }
 
     std::shared_ptr<const assets::ResourceFork> fork;
-    std::error_code ec;
-    if (std::filesystem::exists(game_dir / "Mac", ec)) {
-        const auto mac = assets::MacFiles::open(game_dir / "Mac");
+    if (versions.mac) {
+        const auto mac = open_mac(versions);
         for (const char* app : {"Color VETTE!", "VETTE!"}) {
             for (const auto* file : mac.find_all(app)) {
                 auto res = mac.resources(*file);
@@ -82,6 +82,10 @@ ArtFiles ArtFiles::from_game_dir(const std::filesystem::path& game_dir, std::vec
     }
     files.mac_pict = pict_lookup(fork);
     return files;
+}
+
+ArtFiles ArtFiles::from_game_dir(const std::filesystem::path& game_dir, std::vector<std::string>* notes) {
+    return from_versions(scan_game_folder(game_dir), notes);
 }
 
 ArtFiles ArtFiles::from_folders(const std::filesystem::path& dos_dir, const std::filesystem::path& pc98_dir,

@@ -9,6 +9,9 @@
 //       every Mac PICT and PC-98 picture as PNG, and an inventory on stdout
 //   vette_gfx --game Game --trace-io --seconds 30 --key ...
 //       logs the game's file opens and reads and its picture blits (3009:8666) with caller addresses
+//   vette_gfx --game Game --trace-draw ...
+//       logs the text the game draws over its pictures, as the Mac set's draw tracker sees it
+//   --no-track: without the draw tracker (what the game drew is inferred from colour differences)
 //
 // --game DIR        DOS files (default Game)
 // --pc98 DIR        PC-98 files (default <game>/PC98)
@@ -24,6 +27,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -75,8 +79,9 @@ std::string fmt_time(double t) {
 int usage() {
     std::fprintf(stderr,
                  "usage: vette_gfx [--game DIR] [--pc98 DIR] [--mac-rsrc FILE] [--out DIR] [--size WxH]\n"
-                 "                 [--seconds N] [--shot T]... [--key T:SC]... [--hold A:B:SC]...\n"
-                 "                 [--skip-manual-check] [--idle-skip] [--stills | --dump DIR | --trace-io]\n");
+                 "                 [--seconds N] [--shot T]... [--key T:SC]... [--hold A:B:SC]... [--poke A:B:SEG:OFF:BYTE]...\n"
+                 "                 [--skip-manual-check] [--idle-skip] [--no-track] [--every MS [--partial R]]\n"
+                 "                 [--stills | --dump DIR | --trace-io | --trace-draw]\n");
     return 2;
 }
 
@@ -178,7 +183,10 @@ int main(int argc, char* argv[]) {
     std::vector<KeyEvent> keys;
     std::vector<Poke> pokes;
     int out_w = 1280, out_h = 960;
-    bool skip_manual_check = false, idle_skip = false, do_stills = false, trace_io = false;
+    bool skip_manual_check = false, idle_skip = false, do_stills = false, trace_io = false, trace_draw = false,
+         no_track = false;
+    int every_ms = 0;         // compose every N ms, as the game does per displayed frame (0: at the shots only)
+    float partial_below = 0;  // with --every: save the frames whose background picture matches less than this
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -237,6 +245,14 @@ int main(int argc, char* argv[]) {
             do_stills = true;
         } else if (a == "--trace-io") {
             trace_io = true;
+        } else if (a == "--trace-draw") {
+            trace_draw = true;
+        } else if (a == "--no-track") {
+            no_track = true;
+        } else if (a == "--every" && has_value) {
+            every_ms = std::max(1, std::atoi(argv[++i]));
+        } else if (a == "--partial" && has_value) {
+            partial_below = static_cast<float>(std::atof(argv[++i]));
         } else {
             return usage();
         }
@@ -282,7 +298,14 @@ int main(int argc, char* argv[]) {
     }
     if (skip_manual_check) vette::game::install_skip_manual_check(machine.cpu());
     if (idle_skip) vette::game::install_idle_skip(machine);
-    for (auto& set : sets) set->set_program_memory(machine.memory().ram());
+    for (auto& set : sets) {
+        if (no_track) set->set_program_memory(machine.memory().ram());  // the colour-difference way only
+        else set->attach(machine);
+    }
+    if (trace_draw && !sets.empty())
+        sets.back()->set_draw_log([&machine](const std::string& line) {
+            std::printf("t=%.3f %s\n", static_cast<double>(machine.emulated_ns()) / 1e9, line.c_str());
+        });
 
     if (trace_io) {
         // File opens and reads through the INT 21h entry, and the picture unpacker 3009:8666
@@ -317,11 +340,50 @@ int main(int argc, char* argv[]) {
     const auto total_ms = static_cast<uint64_t>(seconds * 1000);
     size_t next_key = 0, next_shot = 0;
     vette::host::Ega::Frame frame;
+    std::vector<std::string> last_found(sets.size());
+    std::vector<float> last_match(sets.size(), 0);
+    int partial_saved = 0;
     for (uint64_t ms = 0; ms < total_ms && !machine.stopped(); ++ms) {
         while (next_key < keys.size() && keys[next_key].at_ms <= ms) machine.key(keys[next_key++].scancode);
         for (const auto& p : pokes)
             if (ms >= p.from_ms && ms <= p.to_ms) machine.memory().write8(p.linear, p.value);
         machine.run_for(1'000'000);
+        // Every displayed frame, as the game composes them: what is recognised and when that changes,
+        // and (--partial) the frames whose background picture is only partly there (wipes, dissolves).
+        if (every_ms > 0 && (ms + 1) % static_cast<uint64_t>(every_ms) == 0) {
+            machine.render(frame);
+            const double t = static_cast<double>(ms + 1) / 1000;
+            for (std::size_t k = 0; k < sets.size() && frame.width != 0; ++k) {
+                const FrameView view{frame.pixels.data(), frame.width, frame.height, &frame.palette};
+                Composite c;
+                const bool composed = sets[k]->compose(view, c);
+                std::string art = vette::graphics::art_name(sets[k]->art());
+                std::string found, matches;
+                for (const auto& f : sets[k]->found()) {
+                    found += std::string(" ") + vette::graphics::screen_name(f.screen);
+                    matches += " " + std::to_string(static_cast<int>(f.match * 100 + 0.5f));
+                }
+                const auto& fd = sets[k]->found();
+                const float match = fd.empty() ? 0 : fd.front().match;
+                if (found != last_found[k] || std::fabs(match - last_match[k]) >= 0.03f) {
+                    std::printf("t=%.3f %s:%s%s\n", t, art.c_str(), found.empty() ? " -" : found.c_str(), matches.c_str());
+                    last_found[k] = found;
+                    last_match[k] = match;
+                }
+                if (!composed || partial_below <= 0 || fd.empty() || fd.front().match >= partial_below || partial_saved >= 200)
+                    continue;
+                ++partial_saved;
+                art.erase(std::remove(art.begin(), art.end(), '-'), art.end());
+                std::transform(art.begin(), art.end(), art.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                std::printf("t=%.3f %s partly: %s %.2f\n", t, art.c_str(), vette::graphics::screen_name(fd.front().screen),
+                            fd.front().match);
+                char stem[32];
+                std::snprintf(stem, sizeof stem, "partial_%07.3f_", t);
+                save(out_dir / (stem + art + ".png"), vette::graphics::render(c, out_w, out_h));
+                save(out_dir / (std::string(stem) + "dos.png"),
+                     vette::graphics::render_frame(frame.pixels.data(), frame.width, frame.height, frame.palette, out_w, out_h));
+            }
+        }
         while (next_shot < shots.size() && shots[next_shot] * 1000 <= static_cast<double>(ms + 1)) {
             machine.render(frame);
             const std::string stem = "shot_" + fmt_time(shots[next_shot]);
@@ -354,5 +416,7 @@ int main(int argc, char* argv[]) {
             std::printf("\n");
         }
     }
-    return machine.fault().empty() ? 0 : 3;
+    const int result = machine.fault().empty() ? 0 : 3;
+    sets.clear();  // their watches go before the machine does
+    return result;
 }

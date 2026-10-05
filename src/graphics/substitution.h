@@ -15,12 +15,17 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "graphics/art_files.h"
 #include "graphics/composite.h"
+
+namespace vette::host {
+class Machine;
+}
 
 namespace vette::graphics {
 
@@ -84,6 +89,14 @@ public:
     // dashboard and course map draw the game's values (speed, revs, gear, the course on show) from
     // it every frame. Without it those screens aren't replaced.
     void set_program_memory(const std::uint8_t* ram);
+
+    // Attaches to the running game: set_program_memory() plus watches on the game's text and sprite
+    // drawing (draw_tracker.h), so what it draws over a replaced picture stays exactly on top, letters
+    // of the picture's own colour included. Without it, that is inferred from colour differences.
+    // The machine must outlive this object (the watches are removed in its destructor).
+    void attach(host::Machine& machine);
+    // Diagnostics: what the tracker sees (vette_gfx --trace-draw). After attach().
+    void set_draw_log(std::function<void(const std::string&)> log);
 
     // Builds the composite for a displayed frame. Returns false, leaving `out` alone, when the frame
     // should be shown as it is. The composite's images stay valid while this object lives.

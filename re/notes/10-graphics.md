@@ -171,21 +171,65 @@ columns (the game's blits are byte-aligned) with a 64-point probe first. No game
 address is needed, so it is robust against everything the game draws, works the same with Smooth and
 Enhanced rendering, and can't disturb Classic mode's timing. Cost per frame (`vette_gfx`, Release):
 PC-98 0.1–0.6 ms; Mac 0.2 ms (course map) to 0.7–1.4 ms (title with its sprites, garage, dashboard),
-2.2 ms on the high scores; the live game logged 1.4 ms on average over menus and a race. Alternatives kept in reserve: a
+2.2 ms on the high scores; the live game logged 1.4 ms on average over menus and a race. With the
+draw tracker (below) PC-98 is 0.4–1.0 ms and Mac 0.3–1.9 ms. Alternatives kept in reserve: a
 CPU watch on the INT 21h entry for file opens (`vette_gfx --trace-io` does this), or on `3009:8666`
 for every picture unpack with its destination; useful for sprites (below).
 
 **What stays on top.** Inside a recognised picture, every pixel that differs from the DOS picture is
 the game's own drawing (text, highlights, sprites, gauges, a game-drawn pointer) and is kept, in the
-DOS frame's coordinates (`Composite::over`). For Mac art, which differs under the DOS text, one- and
-two-pixel holes in that mask are closed (3×3 closing) so glyph counters don't show the art. Per screen
-and art set the table (`make_table()` in substitution.cpp) adds:
+DOS frame's coordinates (`Composite::over`). A pixel the game drew in the colour the picture has
+there doesn't differ, so an art pixel most of whose 5×5 neighbourhood is DOS pixels becomes one too
+(`support_mask`: no art slivers or hairlines inside the game's drawing). For Mac art, which differs
+under the DOS text, one- and two-pixel holes in that mask are also closed (3×3 closing) so glyph
+counters don't show the art. Per screen and art set the table (`make_table()` in substitution.cpp) adds:
 - `keep` rectangles (DOS pixels always on top: the garage menu bar, the title's © line, the PC-98
   loser bubbles' English text),
 - `hide` rectangles (no DOS pixels: the DOS car and mechanic in the Mac garage),
 - `remaps`: a DOS rectangle drawn at another place of the art's layout (`Composite::pieces`), either
   whole or only its dynamic pixels, optionally leaving one colour behind (the DOS graph grid),
-- `indicators`: a DOS rectangle showing a colour (the selected menu item) frames a rectangle of the art.
+- `indicators`: a DOS rectangle showing a colour (the selected menu item) frames a rectangle of the art,
+- `course_panels`: the course map's white text panel for the course on show (DS:FD10), all DOS pixels
+  (PC-98; where the map under a panel is white too, the PC-98 map showed through the panel's white as
+  faint lines before; the draw tracker sees the `88AF` fill as well).
+
+**Text and sprites, exactly** (`draw_tracker.h`, after `Substitution::attach(machine)`). A pixel the
+game draws in the picture's own colour doesn't differ from the picture, so the difference mask loses
+it: black credits over the title's black, holes in strokes, and on the Mac letterbox bars a line of
+text the bars' colour all but vanished. CPU watches on the game's drawing routines therefore keep a
+shadow of video memory (A0000h–AFFFFh, all pages): per pixel the colour of the text or solid
+rectangle drawn there, "a sprite pixel", or nothing, plus per byte the text cell it belongs to. A
+shadow pixel counts only while the frame still shows its colour there (so nothing stale survives an
+erasure the tracker doesn't see), and only on the page on display (`Ega::display_start()`).
+
+| Routine (3009:) | What | Registers |
+|---|---|---|
+| `88EB` | 8×10 text, 640 mode (credits, garage stats, high scores) | DS:SI zero-terminated, DI, AH colour; page cs:8DAB; glyph DS 124Ah:F3DE + (c−20h)×10, rows 50h apart; spaces are skipped but are cells |
+| `F3E1` | 8×10 text (menus, map panels) | DS:SI count-prefixed; DI = (cs:[8F4A+2·BX] >> cs:926A) + CX; page cs:8DA9; row stride byte DS:7763; even/odd rows masked by cs:E5FE/E5FF; chars < 20h skipped |
+| `5D55` | 8×7 text, 320 mode (garage opponents, dash messages) | DX page, DI, AH colour; c ≥ 3Ah: c &= DFh; glyph seg 3243h (run time):14C0 + (c−2Eh)×7, rows 28h apart |
+| `858F` from `854C` | masked sprite, mask pass (return address 854Fh; colour passes ignored) | page cs:8DAB, dest cs:7FB7 (+skip 7FB3), source DS:SI+cs:7FB5 (+skip 7FB1), rows 7FBB, bytes 7FB9; first mask FFh >> (7FA1 & 7), last FFh if 7FA5−7FAB ≥ 8 else FFh << ((7FA5 & 7) ^ 7); written = mask & ~source |
+| `88AF` | solid rectangle (course map text panels) | AX:DI, BH bytes × BP rows, BL colour (set/reset), stride 28h + cs:926B |
+| `8666` | picture unpack: clears | AX:DI, BH × BP, stride 50h |
+| `8820` | page copy (latches): copies | AX:SI → DX:DI, BH × BP, stride 28h + cs:926B |
+| `886E` | XOR rectangle (highlight bars): XORs the colours | AX:DI, BH × BP, BL, stride 50h >> cs:926A |
+| `CD22`, `C9A5`, `884B` | byte runs: A800:SI → draw page:DI (the title restoring its credits area each frame), draw page → display page, A800 → draw page:1F40 | CX bytes (884B: 1F40h) |
+| `F318`, `E600` | byte-run erasures: clear | A000:DI, CX bytes; A000:DI, BL bytes × BH rows, stride byte [1ACB:7763] |
+| `8F00`, `8F25` | mode sets: clear everything | |
+| `7FE7` … `82B1` | the screen transition (only the title calls it): page BX onto the displayed page AX, as DS:E01C picks (0 at first: the dissolve `8239`, one byte × 5 rows at a time copied at `8285`; afterwards `82C1` picks one of the slides/scrolls 4–7); every way ends at `82B1` | until then, what the dissolve hasn't brought in counts as drawn (the old, black screen): the art dissolves in block by block, exactly |
+
+In `compose()` a tracked pixel stays on top of the art whatever colour is under it (a sprite pixel
+not where the sprite's own art replaces it; text drawn over such a sprite stays); inside text cells
+the difference mask is used as is (no hole closing, which smeared glyphs); and on the background
+picture a text cell outside or across the art's edge (the Mac letterbox bars) keeps its whole DOS
+cell, background colour included, so every line stays readable.
+Without `attach()` (only `set_program_memory()`) the layer falls back to the colour difference. The
+credits are one block of eight lines that scrolls up from 11.3 s to about 15.5 s (one row per frame,
+redrawn at a new DI after `CD22` restored the area), then the attract mode stops on the garage. Seen
+in runs: `88EB` (credits, garage statistics, map panels, high scores), `5D55` (opponents, dashboard
+messages), `F3E1` (the Esc options menu's bar over the race view), `88AF` (map panels only).
+`vette_gfx --every 17` composes every displayed frame as the game does and logs what is recognised
+and how well: the only partial frames in a whole session are the title's dissolve (1.2–1.9 s, 50% →
+99%); every other screen change is instant (mode set or page copy).
 
 **Placement.** All rectangles are in the DOS frame's pixels; the frame is shown 4:3, so a frame pixel
 is 4/W × 3/H display units (W×H = 640×200 or 320×200). PC-98 art has the DOS geometry (640×200, or
@@ -204,7 +248,9 @@ pointer): the gauge arcs are 65 precomputed steps each, revealed along the band 
 (distance along the lit pixels, calibrated at the Mac scale's marks); the course boxes with their
 text are made once, when the DOS font (DS:F3DE, 8×10) can first be read.
 - *Mac dashboard*: everything of the DOS dashboard is hidden except the clock/messages (only colour 2
-  moves, so the shifter hand that overlaps them in DOS doesn't) and the road signs. Values: speed
+  moves, so the shifter hand that overlaps them in DOS doesn't; DOS rows 138–164, the clock and both
+  message lines, go into the Mac display's black, art rows 55–81, clear of the shifter window below)
+  and the road signs. Values: speed
   DS:3AA1, revs cs:588F (both what the DOS digits show, at most one game frame apart from the frame
   on screen), gear DS:2D45 and gearbox DS:2D47 (gate pictures 10000–10005, 10006–10012, 10013–10020:
   neutral, the gears, reverse), steering DS:2B84 (hands 16269, 3738, 16018, 27381; 30004 = no hand,
@@ -240,8 +286,9 @@ With the Enhanced 3D view, call compose() on SmoothRenderer's `Layers::over` ins
 transparent pixels stay transparent in `base`/`over`, so the order is `under`, scene, composite (no
 backdrop, since `base` is non-empty in the race). Settings: `Art` (DOS/PC-98/Mac) and
 `SubstitutionOptions::english_text`; build the files with `ArtFiles::from_game_dir(game_dir, &notes)`
-(PC-98 through `Pc98Files`, Mac through `MacFiles`), call `set_program_memory(machine.memory().ram())`
-after boot (the dashboards, the gauges and the course map need it every frame), and gray out an art set
+(PC-98 through `Pc98Files`, Mac through `MacFiles`), call `attach(machine)` after boot (the
+dashboards, the gauges and the course map read the game's memory every frame, and the draw tracker
+watches its text and sprite routines; the machine must outlive the Substitution), and gray out an art set
 whose `available()` is empty (log `warnings()`). The launcher
 option needs nothing else from the game.
 

@@ -132,17 +132,21 @@ TEST(graphics_pc98_title_with_dos_text_on_top) {
     CHECK_EQ(c.layers.size(), std::size_t{1});
     CHECK(c.layers[0].dst.x == 0 && c.layers[0].dst.w == 640 && c.layers[0].dst.h == 200);  // PC-98: same layout
     CHECK_EQ(c.layers[0].image->at(0, 0), 0xFF00BBBBu);  // index 3 in the PC-98 palette
-    // Only the changed pixels are kept, where the DOS picture didn't already have colour 15.
-    int kept = 0, wrong = 0;
+    // The changed pixels are kept (where the DOS picture didn't already have colour 15), and nothing
+    // outside the drawing; a pixel inside it that happens to match the picture goes with it.
+    int kept = 0, wrong = 0, inside = 0;
     for (int y = 0; y < 200; ++y)
         for (int x = 0; x < 640; ++x) {
             const auto v = c.over[static_cast<std::size_t>(y) * 640 + x];
-            const bool text = x >= 100 && x < 110 && y >= 50 && y < 58 && fake.title[static_cast<std::size_t>(y) * 640 + x] != 15;
+            const bool drawn = x >= 100 && x < 110 && y >= 50 && y < 58;
+            const bool changed = drawn && fake.title[static_cast<std::size_t>(y) * 640 + x] != 15;
             kept += v != kTransparent;
-            wrong += (v != kTransparent) != text;
+            wrong += (changed && v == kTransparent) || (!drawn && v != kTransparent);
+            inside += drawn && !changed && v != kTransparent;
         }
     CHECK(kept > 0);
     CHECK_EQ(wrong, 0);
+    CHECK(inside > 0);
     CHECK_EQ(c.palette[7], 0xBBBBBBu);  // EGA colours become the PC-98's
 }
 

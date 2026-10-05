@@ -881,7 +881,7 @@ int run(int argc, char** argv) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Graphics: no %s art found; the DOS screens are shown",
                             graphics::art_name(which));
             } else {
-                substitution->set_program_memory(machine.memory().ram());
+                substitution->attach(machine);  // program memory, and the draw tracker's watches
                 art = std::make_unique<Artwork>();
                 art->substitution = std::move(substitution);
                 SDL_Log("Graphics: %s art for %u screens", graphics::art_name(which),

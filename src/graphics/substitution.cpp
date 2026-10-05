@@ -9,6 +9,7 @@
 #include "assets/pc98_pic.h"
 #include "assets/pict.h"
 #include "graphics/dos_art.h"
+#include "graphics/draw_tracker.h"
 #include "graphics/game_state.h"
 #include "graphics/screen_handler.h"
 
@@ -62,6 +63,9 @@ struct ArtSpec {
     // Rectangles of the picture (its own coordinates) where the art has Japanese text and the DOS
     // picture English: with Options::english_text, the DOS pixels stay on top there.
     std::vector<IRect> japanese;
+    // Course map: the text panel the game fills in white for course N (DS:FD10), all DOS pixels. The
+    // draw tracker sees the fill too; this also holds without it.
+    std::vector<std::pair<int, IRect>> course_panels;
     Handler handler = Handler::None;  // code that adds what depends on the game's state
     int mask_pict = 0;                // Mac sprites: the 1-bit picture of their shape (black = opaque)
     bool bottom = false;              // Fit::Native: align bottom edges
@@ -195,7 +199,8 @@ std::vector<ScreenSpec> make_table() {
     {
         ArtSpec mac = mac_art(24055, Fit::Stretch);
         mac.handler = Handler::MacDash;
-        mac.remaps = {remap({224, 136, 96, 30}, {378, 52, 124, 33}, false, -1, 1u << 2),
+        // The clock and both message lines (rows 139-163) inside the Mac display's black (rows 55-81).
+        mac.remaps = {remap({224, 138, 96, 27}, {378, 55, 124, 27}, false, -1, 1u << 2),
                       remap({240, 120, 80, 15}, {376, 28, 128, 22}, false)};
         mac.hide = {{0, 120, 320, 80}};
         t.push_back(screen(Screen::Dash, nullptr, 0x100, {0, 120, 320, 80}, 320, 200, 0.6f, false, pc98_art("DASH.PIC"), mac));
@@ -212,8 +217,12 @@ std::vector<ScreenSpec> make_table() {
         ArtSpec mac = mac_art(26478, Fit::Contain);
         mac.handler = Handler::MacMap;
         mac.hide = {{0, 0, 640, 200}};
-        ScreenSpec s = screen(Screen::CourseMap, "MAPPIC.BIN", 0, {0, 0, 640, 200}, 640, 200, 0.6f, true,
-                              pc98_art("MAPPIC.PIC"), mac);
+        // The panels (3009:88AF, colour 15): course 4 has none. Where the map under a panel is white
+        // too, the panel doesn't differ from the picture, so without these the PC-98 map showed
+        // through the white as faint lines.
+        ArtSpec pc98 = pc98_art("MAPPIC.PIC");
+        pc98.course_panels = {{1, {160, 0, 320, 200}}, {2, {0, 60, 480, 140}}, {3, {0, 0, 288, 136}}};
+        ScreenSpec s = screen(Screen::CourseMap, "MAPPIC.BIN", 0, {0, 0, 640, 200}, 640, 200, 0.6f, true, pc98, mac);
         // The game highlights the course's part of the overview map by XORing colour 1 into the rest.
         s.area = {480, 0, 160, 60};
         s.xor_match = 1;
@@ -302,6 +311,45 @@ void close_mask(std::vector<std::uint8_t>& m, int w, int h) {
     pass(t, m, false, true);
     pass(m, t, true, false);   // erode
     pass(t, m, false, false);
+}
+
+// Art showing through the DOS drawing by chance: where the game drew over the picture in a colour
+// the picture has there too, the pixel matches and the art would show as a sliver or hairline
+// inside the drawing (a dissolve's blocks still to come show the art's lines where the picture is
+// black). An art pixel (0) most of whose 5x5 neighbourhood is the DOS frame's (1) is the frame's too.
+void support_mask(std::vector<std::uint8_t>& m, int w, int h) {
+    if (w <= 0 || h <= 0 || std::find(m.begin(), m.end(), std::uint8_t{1}) == m.end() ||
+        std::find(m.begin(), m.end(), std::uint8_t{0}) == m.end())
+        return;
+    constexpr int kR = 2;
+    const auto W = static_cast<std::size_t>(w);
+    // Per column, the DOS pixels in rows y-2..y+2 as they were before this pass; rows y-3..y-1 have
+    // changed by then, so their old states are kept in a ring.
+    std::vector<std::uint8_t> col(W, 0), ring(W * (kR + 2), 0);
+    for (int y = 0; y < std::min(h, kR); ++y)
+        for (std::size_t x = 0; x < W; ++x) col[x] = static_cast<std::uint8_t>(col[x] + (m[static_cast<std::size_t>(y) * W + x] == 1));
+    for (int y = 0; y < h; ++y) {
+        std::uint8_t* row = m.data() + static_cast<std::size_t>(y) * W;
+        if (y + kR < h) {
+            const std::uint8_t* add = m.data() + static_cast<std::size_t>(y + kR) * W;
+            for (std::size_t x = 0; x < W; ++x) col[x] = static_cast<std::uint8_t>(col[x] + (add[x] == 1));
+        }
+        if (y - kR - 1 >= 0) {
+            const std::uint8_t* sub = ring.data() + static_cast<std::size_t>((y - kR - 1) % (kR + 2)) * W;
+            for (std::size_t x = 0; x < W; ++x) col[x] = static_cast<std::uint8_t>(col[x] - (sub[x] == 1));
+        }
+        std::copy(row, row + W, ring.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(y % (kR + 2)) * W));
+        const int rows = std::min(h, y + kR + 1) - std::max(0, y - kR);
+        int sum = 0;  // columns x-2..x+2
+        for (int x = 0; x < std::min(w, kR); ++x) sum += col[static_cast<std::size_t>(x)];
+        for (int x = 0; x < w; ++x) {
+            if (x + kR < w) sum += col[static_cast<std::size_t>(x + kR)];
+            if (x - kR - 1 >= 0) sum -= col[static_cast<std::size_t>(x - kR - 1)];
+            if (row[x] != 0) continue;
+            const int cols = std::min(w, x + kR + 1) - std::max(0, x - kR);
+            if (2 * sum > rows * cols) row[x] = 1;
+        }
+    }
 }
 
 // Cuts the part of a moved piece that `cover` (later art) hides, when the cover takes a whole edge
@@ -423,6 +471,8 @@ struct Substitution::Impl {
     std::vector<Found> found;
     std::array<std::uint32_t, 16> pc98_palette{};
     const std::uint8_t* ram = nullptr;
+    std::unique_ptr<DrawTracker> tracker;
+    std::vector<std::uint8_t> tracked, tracked_cells;  // DrawTracker::overlay() of this frame
 
     void load(const ArtFiles& files);
     void refresh_program_picture(Entry& e);
@@ -595,6 +645,16 @@ const std::vector<Substitution::Found>& Substitution::found() const { return imp
 
 void Substitution::set_program_memory(const std::uint8_t* ram) { impl_->ram = ram; }
 
+void Substitution::attach(host::Machine& machine) {
+    impl_->ram = machine.memory().ram();
+    impl_->tracker.reset();
+    if (impl_->art != Art::Dos) impl_->tracker = std::make_unique<DrawTracker>(machine);
+}
+
+void Substitution::set_draw_log(std::function<void(const std::string&)> log) {
+    if (impl_->tracker) impl_->tracker->set_log(std::move(log));
+}
+
 bool Substitution::compose(const FrameView& f, Composite& out) {
     auto& m = *impl_;
     m.found.clear();
@@ -667,6 +727,7 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
 
     const int w = f.width, h = f.height;
     const auto n = static_cast<std::size_t>(w) * h;
+    const bool tracked_ok = m.tracker && m.tracker->overlay(f.pixels, w, h, m.tracked, m.tracked_cells);
     out = Composite{};
     out.frame_w = w;
     out.frame_h = h;
@@ -741,13 +802,42 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
                                                            (r.x + x - parent_rect.x)])
                     mask[static_cast<std::size_t>(y) * r.w + x] = 0;  // not drawn yet (a sprite wiping in)
             }
-        for (const Match* later = &match + 1; later != matches.data() + matches.size() && !all_hidden; ++later) {
-            const IRect c = clip(later->rect, w, h);
-            for (int y = std::max(c.y, r.y); y < std::min(c.y + c.h, r.y + r.h); ++y)
-                for (int x = std::max(c.x, r.x); x < std::min(c.x + c.w, r.x + r.w); ++x)
-                    mask[static_cast<std::size_t>(y - r.y) * r.w + (x - r.x)] = 0;
-        }
+        const auto later_insets = [&] {
+            for (const Match* later = &match + 1; later != matches.data() + matches.size() && !all_hidden; ++later) {
+                const IRect c = clip(later->rect, w, h);
+                for (int y = std::max(c.y, r.y); y < std::min(c.y + c.h, r.y + r.h); ++y)
+                    for (int x = std::max(c.x, r.x); x < std::min(c.x + c.w, r.x + r.w); ++x)
+                        mask[static_cast<std::size_t>(y - r.y) * r.w + (x - r.x)] = 0;
+            }
+        };
+        later_insets();
+        const std::vector<std::uint8_t> raw = tracked_ok ? mask : std::vector<std::uint8_t>{};
+        if (!all_hidden) support_mask(mask, r.w, r.h);
         if (a.close_holes && r.w > 0 && r.h > 0 && !all_hidden) close_mask(mask, r.w, r.h);
+        // What the game drew, exactly (draw_tracker.h): its text and sprite pixels stay on top whatever
+        // colour is under them, inside text cells nothing is guessed (no hole filling), and on the
+        // letterbox bars, outside the art, text keeps its DOS background so it stays readable. A
+        // sprite whose own art replaces it keeps its pixels hidden (text drawn over it stays).
+        if (tracked_ok && !all_hidden) {
+            const bool replaced_sprite = e.spec.parent != Screen::None;
+            const bool background = &match == &matches.front();
+            for (int y = 0; y < r.h; ++y)
+                for (int x = 0; x < r.w; ++x) {
+                    const std::size_t i = static_cast<std::size_t>(y) * r.w + x;
+                    if (mask[i] == 2) continue;
+                    const std::size_t p = static_cast<std::size_t>(r.y + y) * w + r.x + x;
+                    if (m.tracked_cells[p]) mask[i] = raw[i];
+                    if (const std::uint8_t t = m.tracked[p]; t != DrawTracker::kNone && !(replaced_sprite && t == DrawTracker::kSprite))
+                        mask[i] = 1;
+                    // A whole character cell outside or across the art's edge keeps its DOS background.
+                    if (const std::uint8_t cell = m.tracked_cells[p]; background && cell) {
+                        const float x0 = static_cast<float>((r.x + x) & ~7), x1 = x0 + 8;
+                        const float y0 = static_cast<float>(r.y + y - ((cell & 15) - 1)), y1 = y0 + static_cast<float>((cell >> 4) + 1);
+                        if (x0 < dst.x || y0 < dst.y || x1 > dst.x + dst.w || y1 > dst.y + dst.h) mask[i] = 1;
+                    }
+                }
+            later_insets();
+        }
         for (int y = 0; y < r.h && !all_hidden; ++y)
             for (int x = 0; x < r.w; ++x) {
                 const std::size_t p = static_cast<std::size_t>(r.y + y) * w + r.x + x;
@@ -755,6 +845,9 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
                 if (k != 2) out.over[p] = k ? f.pixels[p] : kTransparent;
             }
         std::vector<IRect> keep = a.keep;
+        if (m.ram && !a.course_panels.empty())
+            for (const auto& [course, panel] : a.course_panels)
+                if (course == read_map_course(m.ram)) keep.push_back(panel);
         if (m.options.english_text)
             for (const auto& j : a.japanese) keep.push_back({match.rect.x + j.x, match.rect.y + j.y, j.w, j.h});
         for (const auto& k : keep) {

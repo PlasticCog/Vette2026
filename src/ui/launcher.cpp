@@ -26,7 +26,7 @@ namespace vette::ui {
 namespace {
 
 enum Row {
-    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kSkyline, kGraphics, kEffects, kMusic, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
+    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
     kPlay, kQuit, kRows
 };
 
@@ -48,6 +48,7 @@ const char* label(int row) {
     case kScaling: return "Scaling";
     case kSkyline: return "Skyline";
     case kViewResolution: return "Resolution";
+    case kDepthBuffer: return "Depth buffer";
     case kGraphics: return "Graphics";
     case kEffects: return "Sound effects";
     case kMusic: return "Music";
@@ -61,6 +62,7 @@ const char* label(int row) {
 struct Extras {
     bool pc98 = false;
     bool mac = false;
+    bool depth_buffer = true;  // the GPU can draw the 3D view with one (Presenter::depth_buffer_available)
 };
 
 Extras find_extras(const GameDirSearch& search) {
@@ -100,6 +102,8 @@ std::string value(int row, const Settings& s, const GameDirSearch& search, const
     case kSkyline: return s.skyline == Settings::Skyline::Hills ? "Hills only" : "Painted (original)";
     case kViewResolution:
         return s.view_resolution == Settings::ViewResolution::Display ? "Display" : "Original 320x200";
+    case kDepthBuffer:
+        return !s.depth_buffer ? "Off (original order)" : x.depth_buffer ? "On" : "On - not available here";
     case kGraphics: {
         const std::string v = s.graphics == Settings::Graphics::Dos    ? "DOS (original)"
                               : s.graphics == Settings::Graphics::Pc98 ? "PC-98"
@@ -161,6 +165,12 @@ std::string_view help(int row, const Settings& s) {
                      "fine lines."
                    : "The long-distance 3D view is drawn at the original's 320x200 and enlarged like the rest "
                      "of the game, with every enhancement kept.";
+    case kDepthBuffer:
+        return s.depth_buffer
+                   ? "Nearer things always cover farther ones, and the whole city's traffic and pedestrians are "
+                     "drawn. Needs Direct3D 12, Vulkan or Metal; without, it works as Off."
+                   : "The original's back-to-front drawing. Traffic and pedestrians appear as you near them, as "
+                     "in the original, so none show through the scenery.";
     case kSkyline:
         return s.skyline == Settings::Skyline::Hills
                    ? "The backdrop behind the long-distance 3D view keeps only the hills: the real city stands in "
@@ -333,6 +343,9 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
                                     ? Settings::ViewResolution::Original
                                     : Settings::ViewResolution::Display;
             break;
+        case kDepthBuffer:
+            s.depth_buffer = !s.depth_buffer;
+            break;
         case kSkyline:
             s.skyline = s.skyline == Settings::Skyline::Hills ? Settings::Skyline::Painted : Settings::Skyline::Hills;
             break;
@@ -492,7 +505,8 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
         // Options and actions.
         const int value_x = m + kValueColumn * kGlyph;
         const size_t value_chars = static_cast<size_t>(std::max(0, (canvas.width - value_x - m) / kGlyph - 4));
-        const Extras extras = find_extras(search);
+        Extras extras = find_extras(search);
+        extras.depth_buffer = presenter.depth_buffer_available();
         for (int row = 0; row < kRows; ++row) {
             const int y = lay.row_y(row);
             const bool sel = row == selected;

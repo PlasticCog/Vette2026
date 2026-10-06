@@ -4,8 +4,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+#include <emmintrin.h>
+#endif
 
 #include "enhanced/scene_geometry.h"
 #include "enhanced/world_probe.h"
@@ -25,6 +29,11 @@ constexpr float kNear = 1;     // the original's near plane, z >= 1
 constexpr float kPixelOffset = 0.0f;
 constexpr double kDeg = 3.14159265358979323846 / 180.0;
 constexpr int kCells = kMapCells * kMapCells;
+constexpr int kMaxLayer = kMaxDepthLayer;
+// Vehicles and pedestrians narrower than this on screen (output pixels) are drawn as the original's far box.
+constexpr float kSmallModel = 8;
+// Coplanar enough to be painted on (world units, about 3 inches each).
+constexpr float kLayerTolerance = 4;
 
 // Data in DS (notes 03, 04, 05).
 constexpr uint16_t kViewLeft = 0x315E, kViewTop = 0x315A, kViewRight = 0x3160, kViewBottom = 0x315C;
@@ -306,6 +315,8 @@ struct SceneBuilder::Impl {
     std::vector<Sortable> sortables;
     std::array<int, 2 * kMapCells + 2> bucket_count{};
     std::vector<int> order, sorted;
+    int window_steps[6] = {-1, -1, -1, -1, -1, -1};  // the original's window this frame: its steps' map cells
+    std::vector<size_t> window_slots;
     std::vector<int32_t> entity_first;  // per DS offset: the first vehicle of that entity this frame
     bool compound_done = false;         // DS:2AC0 (original window mode without a hook)
     std::vector<std::array<int16_t, 3>> hook_angles;
@@ -442,8 +453,8 @@ struct SceneBuilder::Impl {
         }
         return m;
     }
-    void vertex(float x, float y, const SceneColour& c, float a) {
-        out->vertices.push_back({x, y, c.r, c.g, c.b, a});
+    void vertex(float x, float y, float z, const SceneColour& c, float a) {
+        out->vertices.push_back({x, y, c.r, c.g, c.b, a, depth(z)});
     }
     SceneVertex* grow_vertices(size_t n) {
         const size_t at = out->vertices.size();
@@ -455,6 +466,148 @@ struct SceneBuilder::Impl {
         out->indices.resize(at + n);
         return &out->indices[at];
     }
+    // Depth (SceneVertex::depth): kNear / z, raised by a layer bias, 1 + s * kDepthStep. A primitive's
+    // layer s is one above the highest of the earlier primitives of its group that it lies on (coplanar
+    // within kLayerTolerance and overlapping it on screen), else 0, and at least 1 for lines and markings:
+    // what is painted on a surface (markings on a road, windows on a wall, outlines on faces, a car's
+    // details) wins over it as in painter's order, while everything else is decided by its true depth.
+    // Groups: a cell's ground layer (list 1, the bridges' pieces) with, in turn, each of its sortables
+    // (list 2, vehicles: one's flat primitives may lie on the ground layer, not on another sortable); a
+    // freeway slice; a highway car; a window step (original window mode). The backdrop (the big tiles'
+    // ground, the water beyond the map, the freeway's plane, the mirror's sky) has depth 0: it never hides
+    // anything.
+    struct Layer {
+        float x0, y0, x1, y1;  // screen box (race pixels)
+        float mx, my;          // the outline's centre
+        uint32_t pts, pts_n;   // its outline on screen: layer_pts[pts .. pts + pts_n)
+        bool convex;           // ... made convex (make_convex)
+        V3 n;                  // polygon: unit normal; line: unit direction (camera space)
+        V3 p, q;               // polygon: centroid; line: its ends
+        float d;               // polygon: n . centroid
+        float len, tol2;       // line: length, twice the tolerance at its farther end
+        uint8_t kind;          // 0 neither (degenerate), 1 polygon, 2 line
+        uint16_t s;
+    };
+    std::vector<Layer> layers;  // the current group's primitives so far
+    // ... for the scan, as arrays: their boxes and orientations (faces: normal; lines: direction, length and
+    // twice the tolerance; line: 1 for a line).
+    struct LayerScan {
+        std::vector<float> x0, y0, x1, y1, nx, ny, nz, len, tol2, line;
+        size_t n = 0;
+        void push(const Layer& l) {
+            if (n == x0.size()) {
+                const size_t cap = std::max<size_t>(256, 2 * n);
+                for (std::vector<float>* v : {&x0, &y0, &x1, &y1, &nx, &ny, &nz, &len, &tol2, &line}) v->resize(cap);
+            }
+            x0[n] = l.x0;
+            y0[n] = l.y0;
+            x1[n] = l.x1;
+            y1[n] = l.y1;
+            nx[n] = l.n.x;
+            ny[n] = l.n.y;
+            nz[n] = l.n.z;
+            len[n] = l.len;
+            tol2[n] = l.tol2;
+            line[n] = l.kind == 2 ? 1.0f : 0.0f;
+            ++n;
+        }
+    } scan;
+    std::vector<uint32_t> candidates;
+    void find_candidates(const Layer& l);
+    std::vector<P2> layer_pts;
+    float bias = 1;             // 1 + s * kDepthStep of the primitive being emitted
+    bool backdrop = false;      // emitting the backdrop: depth 0
+    bool stripe = false;        // emitting a marking's stripe
+    bool small = false;         // a small vehicle: its far box, true depth only (lines one layer up), no layers
+    int group_top = 0;  // the group's highest layer so far
+    // A point to come back to in the group.
+    struct GroupMark {
+        size_t layers, pts;
+        int top;
+        float flat_lo, flat_hi;
+    };
+    GroupMark group_mark() const { return {layers.size(), layer_pts.size(), group_top, flat_lo, flat_hi}; }
+    void group_reset(const GroupMark& m) {
+        layers.resize(m.layers);
+        layer_pts.resize(m.pts);
+        scan.n = m.layers;
+        group_top = m.top;
+        own_from = m.layers;
+        flat_lo = m.flat_lo;
+        flat_hi = m.flat_hi;
+    }
+    // The heights (camera space, along up_cam) the group's flat primitives lie at.
+    float flat_lo = 1e30f, flat_hi = -1e30f;
+    // The group's primitives from here on are an object's own: before them (the ground layer), only a flat
+    // primitive of it is looked for what it lies on.
+    size_t own_from = 0;
+    void begin_group() {
+        group_top = 0;
+        own_from = 0;
+        flat_lo = 1e30f;
+        flat_hi = -1e30f;
+        layers.clear();
+        layer_pts.clear();
+        scan.n = 0;
+    }
+    bool no_depth = false;  // SceneOptions::depth off: every depth 0, no layers
+    float depth(float z) const { return backdrop || no_depth ? 0.0f : bias * (kNear / std::max(z, kNear)); }
+    static float tolerance(float z) { return kLayerTolerance + 1e-4f * std::fabs(z); }
+    bool lies_on(const Layer& l, const Layer& o) const;
+    void make_convex(Layer& l);
+    bool overlap(Layer& l, Layer& o);
+    bool inside(Layer& l, float x, float y);
+    void assign_layer(Layer& l, const float* sx, const float* sy, int ns);
+    // A polygon (camera-space points point(0..n-1)) whose outline on screen is (sx, sy)[0..ns).
+    template <typename Point>
+    void layer_polygon(int n, Point point, const float* sx, const float* sy, int ns) {
+        if (backdrop || no_depth) return;
+        if (small) {
+            bias = 1;
+            return;
+        }
+        Layer l{};
+        V3 nrm, c;
+        for (int k = 0, j = n - 1; k < n; j = k++) {
+            const V3 a = point(j), b = point(k);
+            nrm.x += (a.y - b.y) * (a.z + b.z);
+            nrm.y += (a.z - b.z) * (a.x + b.x);
+            nrm.z += (a.x - b.x) * (a.y + b.y);
+            c = c + a;
+        }
+        const float len = std::sqrt(dot(nrm, nrm));
+        c = {c.x / float(n), c.y / float(n), c.z / float(n)};
+        if (len > 1e-6f) {
+            l.kind = 1;
+            l.n = {nrm.x / len, nrm.y / len, nrm.z / len};
+            l.p = c;
+            l.d = dot(l.n, c);
+        }
+        assign_layer(l, sx, sy, ns);
+    }
+    // A line from a to b (camera space) drawn as the quad (sx, sy)[0..4).
+    void layer_line(V3 a, V3 b, const float* sx, const float* sy) {
+        if (backdrop || no_depth) return;
+        if (small) {
+            bias = 1 + kDepthStep;  // a line: on something
+            return;
+        }
+        Layer l{};
+        const V3 d = b - a;
+        const float len = std::sqrt(dot(d, d));
+        if (len > 1e-6f) {
+            l.kind = 2;
+            l.n = {d.x / len, d.y / len, d.z / len};
+            l.p = a;
+            l.q = b;
+            l.len = len;
+            l.tol2 = 2 * tolerance(std::max(std::fabs(a.z), std::fabs(b.z)));
+        }
+        assign_layer(l, sx, sy, 4);
+    }
+    std::vector<float> clip_points;  // emit_polygon: per clipped triangle, its count, then x, y, camera z each
+    std::vector<P2> hull_in, hull_out;
+
     void emit_polygon(const P3* pts, int n, const uint16_t* tri, uint32_t ntri, const SceneColour& c, float a);
     // A polygon whose points are cv[idx[k]] (projections sv[idx[k]]).
     void emit_indexed(const V3* cv, const P2* sv, const uint16_t* idx, int n, const uint16_t* tri, uint32_t ntri,
@@ -471,7 +624,7 @@ struct SceneBuilder::Impl {
         if (marking == 1) return;
         thin_line = marking == 2;
         if (cv[ia].z >= kNear && cv[ib].z >= kNear) {
-            emit_quad_2d(sv[ia].x, sv[ia].y, cv[ia].z, sv[ib].x, sv[ib].y, cv[ib].z, c);
+            emit_quad_2d(cv[ia], cv[ib], sv[ia].x, sv[ia].y, sv[ib].x, sv[ib].y, c);
         } else {
             emit_line({cv[ia].x, cv[ia].y, cv[ia].z}, {cv[ib].x, cv[ib].y, cv[ib].z}, c);
         }
@@ -487,7 +640,8 @@ struct SceneBuilder::Impl {
     int emit_ribbon(V3 a, V3 b, const SceneColour& c);
     void draw_prim(const Part& p, const Prim& prim, const PrimData& pr, const V3* cv, const P2* sv);
     bool visible(const Cull& cull) const;
-    void emit_quad_2d(float x0, float y0, float z0, float x1, float y1, float z1, const SceneColour& c);
+    // A line from a to b (camera space), at (x0, y0) and (x1, y1) on screen.
+    void emit_quad_2d(V3 a, V3 b, float x0, float y0, float x1, float y1, const SceneColour& c);
     // A line's half width in output pixels at depth z (SceneOptions::line_world_width).
     float line_half_width(float z) const {
         const float race_px = std::max(opt->pixel_w, opt->pixel_h);
@@ -1021,6 +1175,225 @@ bool SceneBuilder::Impl::box_visible(const float* b) const {
 
 // --- Emission -----------------------------------------------------------------------------------------------
 
+// Whether l lies on o: coplanar (a line: on the plane, or along the same line), within the tolerance.
+bool SceneBuilder::Impl::lies_on(const Layer& l, const Layer& o) const {
+    const auto on_plane = [](const Layer& pl, V3 v) { return std::fabs(dot(pl.n, v) - pl.d) <= tolerance(v.z); };
+    if (o.kind == 1) {
+        if (l.kind == 1) return std::fabs(dot(l.n, o.n)) > 0.999f && on_plane(o, l.p);
+        return l.kind == 2 && on_plane(o, l.p) && on_plane(o, l.q);
+    }
+    if (o.kind == 2) {
+        if (l.kind == 1) return on_plane(l, o.p) && on_plane(l, o.q);
+        if (l.kind == 2) {
+            // Along the same line (not merely meeting it at a corner).
+            const auto off = [&](V3 v) {
+                const V3 c = cross(v - o.p, o.n);
+                return dot(c, c) <= tolerance(v.z) * tolerance(v.z);
+            };
+            return off(l.p) && off(l.q);
+        }
+    }
+    return false;
+}
+
+// A layer's outline on screen as a convex polygon (in place): as drawn if it is convex already, else its
+// convex hull (monotone chain).
+void SceneBuilder::Impl::make_convex(Layer& l) {
+    if (l.convex) return;
+    l.convex = true;
+    P2* p = &layer_pts[l.pts];
+    const uint32_t n = l.pts_n;
+    if (n < 3) return;
+    const auto turn = [](const P2& o, const P2& a, const P2& b) {
+        return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    };
+    bool pos = false, neg = false;
+    for (uint32_t i = 0, j = n - 1, k = n - 2; i < n; k = j, j = i++) {
+        const float t = turn(p[k], p[j], p[i]);
+        pos |= t > 0;
+        neg |= t < 0;
+    }
+    if (!(pos && neg)) return;  // convex (or degenerate)
+    hull_in.assign(p, p + n);
+    std::sort(hull_in.begin(), hull_in.end(),
+              [](const P2& a, const P2& b) { return a.x < b.x || (a.x == b.x && a.y < b.y); });
+    hull_out.clear();
+    for (int pass = 0; pass < 2; ++pass) {
+        const size_t start = hull_out.size();
+        for (size_t i = 0; i < hull_in.size(); ++i) {
+            const P2 pt = hull_in[pass == 0 ? i : hull_in.size() - 1 - i];
+            while (hull_out.size() >= start + 2 && turn(hull_out[hull_out.size() - 2], hull_out.back(), pt) <= 0) {
+                hull_out.pop_back();
+            }
+            hull_out.push_back(pt);
+        }
+        hull_out.pop_back();  // the chains' last points start the other chain
+    }
+    std::copy(hull_out.begin(), hull_out.end(), p);
+    l.pts_n = static_cast<uint32_t>(hull_out.size());
+}
+
+// Whether their outlines on screen overlap (more than touch): no separating axis among their edges' normals.
+bool SceneBuilder::Impl::overlap(Layer& l, Layer& o) {
+    make_convex(l);
+    make_convex(o);
+    if (l.pts_n < 3 || o.pts_n < 3) return true;  // degenerate: the boxes overlap
+    const P2* a = &layer_pts[l.pts];
+    const P2* b = &layer_pts[o.pts];
+    const auto separated = [](const P2* p, uint32_t np, const P2* q, uint32_t nq) {
+        for (uint32_t i = 0, j = np - 1; i < np; j = i++) {
+            const P2 e0 = p[j], e1 = p[i];
+            const float ax = e0.y - e1.y, ay = e1.x - e0.x;  // the edge's normal
+            const float eps = 0.02f * (std::fabs(ax) + std::fabs(ay));
+            float pmin = 1e30f, pmax = -1e30f, qmin = 1e30f, qmax = -1e30f;
+            for (uint32_t k = 0; k < np; ++k) {
+                const float d = ax * p[k].x + ay * p[k].y;
+                pmin = std::min(pmin, d);
+                pmax = std::max(pmax, d);
+            }
+            for (uint32_t k = 0; k < nq; ++k) {
+                const float d = ax * q[k].x + ay * q[k].y;
+                qmin = std::min(qmin, d);
+                qmax = std::max(qmax, d);
+            }
+            if (pmax <= qmin + eps || qmax <= pmin + eps) return true;
+        }
+        return false;
+    };
+    return !separated(a, l.pts_n, b, o.pts_n) && !separated(b, o.pts_n, a, l.pts_n);
+}
+
+// Whether (x, y) is inside l's outline on screen, clear of its edges.
+bool SceneBuilder::Impl::inside(Layer& l, float x, float y) {
+    make_convex(l);
+    if (l.pts_n < 3) return false;
+    const P2* h = &layer_pts[l.pts];
+    bool pos = false, neg = false;
+    for (uint32_t i = 0, j = l.pts_n - 1; i < l.pts_n; j = i++) {
+        const P2 a = h[j], b = h[i];
+        const float ex = b.x - a.x, ey = b.y - a.y;
+        const float t = ex * (y - a.y) - ey * (x - a.x), eps = 0.05f * (std::fabs(ex) + std::fabs(ey));
+        if (std::fabs(t) <= eps) return false;
+        (t > 0 ? pos : neg) = true;
+    }
+    return !(pos && neg);
+}
+
+// The group's primitives whose boxes overlap l's and which could be coplanar with it by their orientation (a
+// face: a parallel face, or a line lying in its plane; a line: a face whose plane it lies in, or a parallel
+// line), in drawing order, into `candidates`.
+void SceneBuilder::Impl::find_candidates(const Layer& l) {
+    candidates.clear();
+    const size_t n = scan.n;
+    const float up = dot(l.n, up_cam);
+    const bool flat = l.kind == 1 ? std::fabs(up) > 0.999f : std::fabs(up) < 0.02f;
+    // A flat primitive of an object looks in the ground layer too, if it is at a height something lies at there.
+    const float height = dot(l.p, up_cam), tol = tolerance(l.p.z);
+    const bool ground = flat && height >= flat_lo - tol && height <= flat_hi + tol;
+    const float* bx0 = scan.x0.data();
+    const float* by0 = scan.y0.data();
+    const float* bx1 = scan.x1.data();
+    const float* by1 = scan.y1.data();
+    const float* nx = scan.nx.data();
+    const float* ny = scan.ny.data();
+    const float* nz = scan.nz.data();
+    const float* ln = scan.len.data();
+    const float* lt = scan.tol2.data();
+    const float* line = scan.line.data();
+    const bool face = l.kind == 1;
+    size_t i = ground ? 0 : std::min(own_from, n);
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+    const __m128 X0 = _mm_set1_ps(l.x0), Y0 = _mm_set1_ps(l.y0), X1 = _mm_set1_ps(l.x1), Y1 = _mm_set1_ps(l.y1);
+    const __m128 NX = _mm_set1_ps(l.n.x), NY = _mm_set1_ps(l.n.y), NZ = _mm_set1_ps(l.n.z);
+    const __m128 LEN = _mm_set1_ps(l.len), TOL2 = _mm_set1_ps(l.tol2), PARALLEL = _mm_set1_ps(0.999f);
+    const __m128 HALF = _mm_set1_ps(0.5f), SIGN = _mm_set1_ps(-0.0f);
+    for (; i + 4 <= n; i += 4) {
+        __m128 m = _mm_and_ps(_mm_cmplt_ps(_mm_loadu_ps(bx0 + i), X1), _mm_cmplt_ps(X0, _mm_loadu_ps(bx1 + i)));
+        m = _mm_and_ps(m, _mm_and_ps(_mm_cmplt_ps(_mm_loadu_ps(by0 + i), Y1), _mm_cmplt_ps(Y0, _mm_loadu_ps(by1 + i))));
+        if (_mm_movemask_ps(m) == 0) continue;
+        const __m128 dot = _mm_add_ps(
+            _mm_add_ps(_mm_mul_ps(NX, _mm_loadu_ps(nx + i)), _mm_mul_ps(NY, _mm_loadu_ps(ny + i))),
+            _mm_mul_ps(NZ, _mm_loadu_ps(nz + i)));
+        const __m128 d = _mm_andnot_ps(SIGN, dot);
+        const __m128 is_line = _mm_cmpgt_ps(_mm_loadu_ps(line + i), HALF);
+        const __m128 parallel = _mm_cmpgt_ps(d, PARALLEL);
+        // Faces: a parallel face, or a line whose direction lies in the plane (over its length, within the
+        // tolerance). Lines: a face whose plane the line lies in, or a parallel line.
+        const __m128 in_plane = face ? _mm_cmple_ps(_mm_mul_ps(d, _mm_loadu_ps(ln + i)), _mm_loadu_ps(lt + i))
+                                     : _mm_cmple_ps(_mm_mul_ps(d, LEN), TOL2);
+        const __m128 aligned = face ? _mm_or_ps(_mm_and_ps(is_line, in_plane), _mm_andnot_ps(is_line, parallel))
+                                   : _mm_or_ps(_mm_and_ps(is_line, parallel), _mm_andnot_ps(is_line, in_plane));
+        const int bits = _mm_movemask_ps(_mm_and_ps(m, aligned));
+        for (int k = 0; k < 4; ++k) {
+            if (bits >> k & 1) candidates.push_back(static_cast<uint32_t>(i + static_cast<size_t>(k)));
+        }
+    }
+#endif
+    for (; i < n; ++i) {
+        if (!(bx0[i] < l.x1 && l.x0 < bx1[i] && by0[i] < l.y1 && l.y0 < by1[i])) continue;
+        const float d = std::fabs(l.n.x * nx[i] + l.n.y * ny[i] + l.n.z * nz[i]);
+        const bool is_line = line[i] > 0.5f;
+        const bool aligned =
+            face ? (is_line ? d * ln[i] <= lt[i] : d > 0.999f) : (is_line ? d > 0.999f : d * l.len <= l.tol2);
+        if (aligned) candidates.push_back(static_cast<uint32_t>(i));
+    }
+}
+
+// The primitive's layer (see Layer): one above the highest earlier primitive of the group it lies on.
+void SceneBuilder::Impl::assign_layer(Layer& l, const float* sx, const float* sy, int ns) {
+    l.x0 = l.y0 = 1e30f;
+    l.x1 = l.y1 = -1e30f;
+    for (int k = 0; k < ns; ++k) {
+        l.x0 = std::min(l.x0, sx[k]);
+        l.y0 = std::min(l.y0, sy[k]);
+        l.x1 = std::max(l.x1, sx[k]);
+        l.y1 = std::max(l.y1, sy[k]);
+    }
+    if (l.kind == 2) {
+        l.mx = 0.25f * (sx[0] + sx[1] + sx[2] + sx[3]);  // a line's centre (its quad's)
+        l.my = 0.25f * (sy[0] + sy[1] + sy[2] + sy[3]);
+    }
+    // The outline is kept for faces only (a line's box and centre do).
+    l.pts = static_cast<uint32_t>(layer_pts.size());
+    l.pts_n = 0;
+    if (l.kind == 1) {
+        l.pts_n = static_cast<uint32_t>(ns);
+        for (int k = 0; k < ns; ++k) layer_pts.push_back({sx[k], sy[k]});
+    }
+
+    if (l.kind == 0) {
+        candidates.clear();  // degenerate: on nothing
+    } else {
+        find_candidates(l);
+    }
+    int s = 0;
+    for (size_t k = candidates.size(); k-- > 0 && s <= group_top;) {
+        Layer& o = layers[candidates[k]];
+        if (o.s < s || !lies_on(l, o)) continue;  // (can't raise it)
+        // A line on a face or along a line: their boxes overlap, that will do. A face over a line it contains:
+        // only if the line runs inside it (not along its edge: the outline of a neighbouring face). Faces: if
+        // their outlines overlap.
+        if (l.kind == 2 || (o.kind == 2 ? inside(l, o.mx, o.my) : overlap(l, o))) s = o.s + 1;
+    }
+    // Lines and markings are always drawn on something (a face's outline, the road): at least one layer up,
+    // also over a coplanar surface of another group (a neighbouring cell's road under a kerb line).
+    if (l.kind == 2 || stripe) s = std::max(s, 1);
+    s = std::min(s, kMaxLayer);
+    l.s = static_cast<uint16_t>(s);
+    layers.push_back(l);
+    scan.push(l);
+    group_top = std::max(group_top, s);
+    const float up = std::fabs(dot(l.n, up_cam));
+    if ((l.kind == 1 && up > 0.999f) || (l.kind == 2 && up < 0.02f)) {
+        const float height = dot(l.p, up_cam);
+        flat_lo = std::min(flat_lo, height);
+        flat_hi = std::max(flat_hi, height);
+    }
+    bias = 1 + static_cast<float>(s) * kDepthStep;
+    out->stats.max_layer = std::max(out->stats.max_layer, s);
+    ++out->stats.layers[static_cast<size_t>(s)];  // (s <= kMaxLayer)
+}
+
 void SceneBuilder::Impl::emit_polygon(const P3* pts, int n, const uint16_t* tri, uint32_t ntri, const SceneColour& c,
                                       float a) {
     bool all_front = true;
@@ -1028,27 +1401,51 @@ void SceneBuilder::Impl::emit_polygon(const P3* pts, int n, const uint16_t* tri,
     if (all_front) {
         float sx[256], sy[256];
         int outside = 0xF;
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
         for (int k = 0; k < n; ++k) {
             sx[k] = px(pts[k]);
             sy[k] = py(pts[k]);
             outside &= (sx[k] < vx0 ? 1 : 0) | (sx[k] > vx1 ? 2 : 0) | (sy[k] < vy0 ? 4 : 0) | (sy[k] > vy1 ? 8 : 0);
+            x0 = std::min(x0, sx[k]);
+            y0 = std::min(y0, sy[k]);
+            x1 = std::max(x1, sx[k]);
+            y1 = std::max(y1, sy[k]);
         }
         if (outside) return;  // entirely beyond one side of the view
+        layer_polygon(n, [&](int k) { return V3{pts[k].x, pts[k].y, pts[k].z}; }, sx, sy, n);
         SceneVertex* v = grow_vertices(static_cast<size_t>(n));
         const auto base = static_cast<int32_t>(out->vertices.size()) - n;
-        for (int k = 0; k < n; ++k) v[k] = {sx[k], sy[k], c.r, c.g, c.b, a};
+        for (int k = 0; k < n; ++k) v[k] = {sx[k], sy[k], c.r, c.g, c.b, a, depth(pts[k].z)};
         int32_t* ix = grow_indices(ntri * 3);
         for (uint32_t t = 0; t < ntri * 3; ++t) ix[t] = base + tri[t];
         out->stats.triangles += static_cast<int>(ntri);
         return;
     }
+    // Crossing the near plane: each triangle clipped (to a triangle or a quad).
+    clip_points.clear();
+    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
     for (uint32_t t = 0; t < ntri; ++t) {
         const P3 corner[3] = {pts[tri[3 * t]], pts[tri[3 * t + 1]], pts[tri[3 * t + 2]]};
         P3 cl[4];
         const int m = clip(corner, 3, cl);
         if (m < 3) continue;
+        clip_points.push_back(static_cast<float>(m));
+        for (int k = 0; k < m; ++k) {
+            const float x = px(cl[k]), y = py(cl[k]);
+            clip_points.insert(clip_points.end(), {x, y, cl[k].z});
+            x0 = std::min(x0, x);
+            y0 = std::min(y0, y);
+            x1 = std::max(x1, x);
+            y1 = std::max(y1, y);
+        }
+    }
+    if (clip_points.empty()) return;
+    const float bx[4] = {x0, x1, x1, x0}, by[4] = {y0, y0, y1, y1};  // (its box will do)
+    layer_polygon(n, [&](int k) { return V3{pts[k].x, pts[k].y, pts[k].z}; }, bx, by, 4);
+    for (size_t i = 0; i < clip_points.size();) {
+        const int m = static_cast<int>(clip_points[i++]);
         const auto base = static_cast<int32_t>(out->vertices.size());
-        for (int k = 0; k < m; ++k) vertex(px(cl[k]), py(cl[k]), c, a);
+        for (int k = 0; k < m; ++k, i += 3) vertex(clip_points[i], clip_points[i + 1], clip_points[i + 2], c, a);
         for (int k = 1; k + 1 < m; ++k) {
             out->indices.push_back(base);
             out->indices.push_back(base + k);
@@ -1071,11 +1468,17 @@ void SceneBuilder::Impl::emit_indexed(const V3* cv, const P2* sv, const uint16_t
     }
     if (all_front) {
         if (outside) return;
+        float sx[256], sy[256];
+        for (int k = 0; k < n; ++k) {
+            sx[k] = sv[idx[k]].x;
+            sy[k] = sv[idx[k]].y;
+        }
+        layer_polygon(n, [&](int k) { return cv[idx[k]]; }, sx, sy, n);
         SceneVertex* v = grow_vertices(static_cast<size_t>(n));
         const auto base = static_cast<int32_t>(out->vertices.size()) - n;
         for (int k = 0; k < n; ++k) {
             const P2 q = sv[idx[k]];
-            v[k] = {q.x, q.y, c.r, c.g, c.b, a};
+            v[k] = {q.x, q.y, c.r, c.g, c.b, a, depth(cv[idx[k]].z)};
         }
         int32_t* ix = grow_indices(ntri * 3);
         for (uint32_t t = 0; t < ntri * 3; ++t) ix[t] = base + tri[t];
@@ -1089,10 +1492,10 @@ void SceneBuilder::Impl::emit_indexed(const V3* cv, const P2* sv, const uint16_t
     emit_polygon(poly, n, tri, ntri, c, a);
 }
 
-void SceneBuilder::Impl::emit_quad_2d(float x0, float y0, float z0, float x1, float y1, float z1,
-                                     const SceneColour& c) {
-    // A segment as a quad line_half_width() wide at each end (z0, z1: the ends' depths), ending at its
-    // ends (butt caps).
+void SceneBuilder::Impl::emit_quad_2d(V3 ea, V3 eb, float x0, float y0, float x1, float y1, const SceneColour& c) {
+    // A segment as a quad line_half_width() wide at each end (at the ends' depths), ending at its ends
+    // (butt caps).
+    const float z0 = ea.z, z1 = eb.z;
     if ((x0 < vx0 && x1 < vx0) || (x0 > vx1 && x1 > vx1) || (y0 < vy0 && y1 < vy0) || (y0 > vy1 && y1 > vy1)) return;
     const float pw = opt->pixel_w, ph = opt->pixel_h;
     float dx = (x1 - x0) * pw, dy = (y1 - y0) * ph;
@@ -1117,12 +1520,15 @@ void SceneBuilder::Impl::emit_quad_2d(float x0, float y0, float z0, float x1, fl
     }
     const float ux = -dy / len, uy = dx / len;  // across, unit, output pixels
     const float ax = ux * h0 / pw, ay = uy * h0 / ph, bx = ux * h1 / pw, by = uy * h1 / ph;
+    const float qx[4] = {x0 + ax, x0 - ax, x1 - bx, x1 + bx}, qy[4] = {y0 + ay, y0 - ay, y1 - by, y1 + by};
+    layer_line(ea, eb, qx, qy);
+    const float d0 = depth(z0), d1 = depth(z1);
     SceneVertex* v = grow_vertices(4);
     const auto base = static_cast<int32_t>(out->vertices.size()) - 4;
-    v[0] = {x0 + ax, y0 + ay, c.r, c.g, c.b, 1};
-    v[1] = {x0 - ax, y0 - ay, c.r, c.g, c.b, 1};
-    v[2] = {x1 - bx, y1 - by, c.r, c.g, c.b, 1};
-    v[3] = {x1 + bx, y1 + by, c.r, c.g, c.b, 1};
+    v[0] = {x0 + ax, y0 + ay, c.r, c.g, c.b, 1, d0};
+    v[1] = {x0 - ax, y0 - ay, c.r, c.g, c.b, 1, d0};
+    v[2] = {x1 - bx, y1 - by, c.r, c.g, c.b, 1, d1};
+    v[3] = {x1 + bx, y1 + by, c.r, c.g, c.b, 1, d1};
     int32_t* ix = grow_indices(6);
     ix[0] = base;
     ix[1] = base + 1;
@@ -1172,7 +1578,9 @@ int SceneBuilder::Impl::emit_ribbon(V3 a, V3 b, const SceneColour& c) {
     const V3 q[4] = {a - side, a + side, b + side, b - side};
     const P3 pts[4] = {{q[0].x, q[0].y, q[0].z}, {q[1].x, q[1].y, q[1].z}, {q[2].x, q[2].y, q[2].z}, {q[3].x, q[3].y, q[3].z}};
     static constexpr uint16_t kQuad[6] = {0, 1, 2, 0, 2, 3};
+    stripe = true;
     emit_polygon(pts, 4, kQuad, 2, c, 1);
+    stripe = false;
     return std::min(wa, wb) >= 1.0f ? 1 : 2;
 }
 
@@ -1183,7 +1591,7 @@ void SceneBuilder::Impl::emit_line(P3 a, P3 b, const SceneColour& c) {
     } else if (b.z < kNear) {
         b = crossing(b, a);
     }
-    emit_quad_2d(px(a), py(a), a.z, px(b), py(b), b.z, c);
+    emit_quad_2d({a.x, a.y, a.z}, {b.x, b.y, b.z}, px(a), py(a), px(b), py(b), c);
 }
 
 // --- Objects ------------------------------------------------------------------------------------------------
@@ -1194,7 +1602,7 @@ void SceneBuilder::Impl::draw_model(int model, const M3& rotation, V3 origin_cam
     const bool saved_ribbons = ribbons;
     ribbons = false;
     // B9F6: beyond sort key 800h the original draws a generic box (original window mode only).
-    const bool far = opt->original_window && lod_key >= 0x800;
+    const bool far = (opt->original_window && lod_key >= 0x800) || small;
     const ModelMesh& mesh = far ? m.far_mesh : m.near_mesh;
     const MeshData& md = (far ? far_meshes : meshes)[static_cast<size_t>(model)];
     const M3 a = view * rotation;
@@ -1567,7 +1975,8 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
         std::copy(std::begin(s), std::end(s), steps);
     }
     nsteps = 6;
-    int window_cells[6] = {-1, -1, -1, -1, -1, -1};  // the map cells the window's steps drew
+    int (&window_cells)[6] = window_steps;  // the map cells the window's steps drew
+    std::fill(std::begin(window_cells), std::end(window_cells), -1);
     for (int si = 0; si < nsteps; ++si) {
         const WinCell& w = steps[si];
         const bool own = si == nsteps - 1;
@@ -1588,12 +1997,16 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
         }
         const int bt = row * cols + col;
         const uint16_t ci = static_cast<uint16_t>(bx * 16 + ax);
-        // Where the original draws this cell, as an absolute position.
-        const auto draw16_x = static_cast<uint16_t>(w.cx + ox), draw16_y = static_cast<uint16_t>(w.dx + oy);
-        const int32_t base_x = static_cast<int32_t>(std::lround(cam_x)) + static_cast<int16_t>(draw16_x - cam16_x);
-        const int32_t base_y = static_cast<int32_t>(std::lround(cam_y)) + static_cast<int16_t>(draw16_y - cam16_y);
-        const int cell = std::clamp(base_x / kCellSize, 0, kMapCells - 1) * kMapCells +
-                         std::clamp(base_y / kCellSize, 0, kMapCells - 1);
+        // The map cell the step draws, and where: the original draws it at its own position (two cells ahead
+        // 48 units short: 36D4 / 36F0), the Enhanced view at the cell's (where its scenery is).
+        const int gx = std::clamp(row * 16 + bx, 0, kMapCells - 1), gy = std::clamp(col * 16 + ax, 0, kMapCells - 1);
+        const int cell = gx * kMapCells + gy;
+        int32_t base_x = gx * kCellSize, base_y = gy * kCellSize;
+        if (opt->original_window) {
+            const auto draw16_x = static_cast<uint16_t>(w.cx + ox), draw16_y = static_cast<uint16_t>(w.dx + oy);
+            base_x = static_cast<int32_t>(std::lround(cam_x)) + static_cast<int16_t>(draw16_x - cam16_x);
+            base_y = static_cast<int32_t>(std::lround(cam_y)) + static_cast<int16_t>(draw16_y - cam16_y);
+        }
         window_cells[si] = cell;
         // List A (32F8 / 33C6).
         const uint16_t la = ram.d16(static_cast<uint16_t>(kListA + 2 * bt));
@@ -1798,22 +2211,31 @@ void SceneBuilder::Impl::draw_vehicle(int index) {
     const Vehicle& v = vehicles[static_cast<size_t>(index)];
     const auto [first, last] = vehicle_model_range[static_cast<size_t>(index)];
     lod_key = v.key;
-    ++out->stats.vehicles;
+    bool drawn = false;
+    const float scale = std::max(opt->pixel_w, opt->pixel_h);  // output pixels per race pixel
     for (uint32_t k = first; k < last; ++k) {
         const ModelDraw& md = vehicle_models[k];
-        const float r = meshes[static_cast<size_t>(md.model) % kModelCount].radius + 8;
-        if (!opt->original_window &&
-            !sphere_visible(to_camera(v.x + md.offset.x, v.y + md.offset.y, v.z + md.offset.z), r)) {
-            continue;
+        const float radius = meshes[static_cast<size_t>(md.model) % kModelCount].radius;
+        const V3 c = to_camera(v.x + md.offset.x, v.y + md.offset.y, v.z + md.offset.z);
+        if (!opt->original_window) {
+            if (!sphere_visible(c, radius + 8)) continue;
+            // A speck (narrower on screen than an output pixel): left out; it grows in from there.
+            if (c.z > 0 && 2 * radius * kFocal * scale < c.z) continue;
         }
         cam.clear();
-        draw_model(md.model, md.rotation, to_camera(v.x + md.offset.x, v.y + md.offset.y, v.z + md.offset.z), md.outline);
+        // Small (a few output pixels across): the original's far box (B9F6), by its true depth only.
+        small = !opt->original_window && c.z > 0 && 2 * radius * kFocal * scale < kSmallModel * c.z;
+        draw_model(md.model, md.rotation, c, md.outline);
+        small = false;
+        drawn = true;
     }
+    if (drawn) ++out->stats.vehicles;
 }
 
 // --- Cells --------------------------------------------------------------------------------------------------
 
 void SceneBuilder::Impl::draw_ground() {
+    backdrop = true;
     {
         // Beyond the map: water out to the horizon (every big tile on the map's edge is the bay or the
         // ocean), so the background's ground colour (the camera tile's) doesn't show as a band there.
@@ -1841,6 +2263,7 @@ void SceneBuilder::Impl::draw_ground() {
             emit_polygon(pts, 4, kQuad, 2, scene_colour(colour), 1);
         }
     }
+    backdrop = false;
 }
 
 void SceneBuilder::Impl::draw_cell_enhanced(int cell) {
@@ -1849,6 +2272,7 @@ void SceneBuilder::Impl::draw_cell_enhanced(int cell) {
     const TypeData& td = types[c.type];
     const int32_t ox = gx * kCellSize, oy = gy * kCellSize, oz = c.elevation * kElevationStep;
     ++out->stats.cells;
+    begin_group();
     const std::array<int16_t, 3> no16{};
     ribbons = !opt->original_window;  // the ground layer and the bridges: markings lie on the road
     for (const Entry& e : td.list1) {
@@ -1915,11 +2339,14 @@ void SceneBuilder::Impl::draw_cell_enhanced(int cell) {
     }
     for (int v = cell_head[static_cast<size_t>(cell)]; v >= 0; v = vehicles[static_cast<size_t>(v)].next) {
         const Vehicle& vh = vehicles[static_cast<size_t>(v)];
+        const V3 p = to_camera(vh.x, vh.y, vh.z);
+        // Only the window's (far_vehicles off): drawn where the original draws them (4686's culls), so that,
+        // without a depth buffer, nothing shows that the original wouldn't.
+        if (!opt->far_vehicles && (p.z < -0x80 || p.z >= 0x1400 || std::fabs(p.x) >= p.z + 0x80)) continue;
         Sortable s{};
         s.kind = 1;
         s.index = v;
-        const float z = to_camera(vh.x, vh.y, vh.z).z;
-        s.key = z < 0 ? float(0x400) : z;
+        s.key = p.z < 0 ? float(0x400) : p.z;
         sortables.push_back(s);
     }
     // Stable, far first (insertion sort; the lists are short).
@@ -1932,7 +2359,10 @@ void SceneBuilder::Impl::draw_cell_enhanced(int cell) {
         }
         sortables[j] = s;
     }
+    // Each one's layers: on the ground layer's primitives, and on its own; not on another sortable's.
+    const GroupMark ground_layer = group_mark();
     for (const Sortable& s : sortables) {
+        group_reset(ground_layer);
         if (s.kind == 0) {
             draw_entry(s.entry, s.x, s.y, s.z, no16, static_cast<uint16_t>(std::min(s.key, 32767.0f)), false, true);
         } else {
@@ -1983,6 +2413,7 @@ void SceneBuilder::Impl::draw_original_window() {
             if (++col >= cols) --col;
         }
         ++out->stats.cells;
+        begin_group();
         const Cell& c = world.cell(row * 16 + bx, col * 16 + ax);
         const TypeData& td = types[c.type];
         const auto draw16_x = static_cast<uint16_t>(w.cx + ox), draw16_y = static_cast<uint16_t>(w.dx + oy);
@@ -2012,7 +2443,8 @@ void SceneBuilder::Impl::draw_original_window() {
                 sortables.push_back(s);
             }
         }
-        const int cell = std::clamp(base_x / kCellSize, 0, kMapCells - 1) * kMapCells + std::clamp(base_y / kCellSize, 0, kMapCells - 1);
+        const int cell =
+            std::clamp(row * 16 + bx, 0, kMapCells - 1) * kMapCells + std::clamp(col * 16 + ax, 0, kMapCells - 1);
         for (int v = cell_head[static_cast<size_t>(cell)]; v >= 0; v = vehicles[static_cast<size_t>(v)].next) {
             const Vehicle& vh = vehicles[static_cast<size_t>(v)];
             const V3 p = to_camera(vh.x, vh.y, vh.z);
@@ -2069,7 +2501,9 @@ void SceneBuilder::Impl::draw_plane(int colour) {
                      to_camera(cam_x + kFar, cam_y + kFar, 0), to_camera(cam_x - kFar, cam_y + kFar, 0)};
     const P3 pts[4] = {{c[0].x, c[0].y, c[0].z}, {c[1].x, c[1].y, c[1].z}, {c[2].x, c[2].y, c[2].z}, {c[3].x, c[3].y, c[3].z}};
     static constexpr uint16_t kQuad[6] = {0, 1, 2, 0, 2, 3};
+    backdrop = true;
     emit_polygon(pts, 4, kQuad, 2, ega_colour(colour), 1);
+    backdrop = false;
 }
 
 // The slice types' geometry from the game's records (7A72[type]: {w vertices, w polygons, w block,
@@ -2256,6 +2690,7 @@ void SceneBuilder::Impl::draw_freeway() {
         if (!st.valid) continue;
         const M3 a = view * heading_rot[static_cast<size_t>(sl.heading)];
         const V3 t = to_camera(sl.x, sl.y, z);
+        begin_group();
         cam.clear();
         for (int k = 0; k < st.count; ++k) cam.push_back(fin(a(st.verts[k]) + t));
         project_from(0);
@@ -2327,6 +2762,7 @@ void SceneBuilder::Impl::draw_freeway() {
     std::sort(highway_objects.begin(), highway_objects.end(),
               [](const HighwayObject& a, const HighwayObject& b) { return a.dist > b.dist; });
     for (const HighwayObject& o : highway_objects) {
+        begin_group();
         if (o.player >= 0) {
             lod_key = 0;
             for (const ModelDraw& md : vehicle_models) {
@@ -2361,6 +2797,9 @@ void SceneBuilder::build(const uint8_t* ram, const SceneOptions& options, Scene&
     m.quantize = options.original_window;
     m.compound_done = false;
     m.tracer_loaded = false;
+    m.backdrop = false;
+    m.no_depth = !options.depth;
+    m.begin_group();
     {
         const Impl::CourseData& cd = m.courses[static_cast<size_t>(m.state.course)];
         m.piece_variant.assign(cd.pieces.size(), -2);
@@ -2375,8 +2814,9 @@ void SceneBuilder::build(const uint8_t* ram, const SceneOptions& options, Scene&
 
     // Vehicles and pedestrians, bound to cells.
     std::fill(m.cell_head.begin(), m.cell_head.end(), -1);
+    std::fill(std::begin(m.window_steps), std::end(m.window_steps), -1);
     if (city) {
-        m.collect_vehicles(!options.original_window);
+        m.collect_vehicles(!options.original_window && options.far_vehicles);
         m.trace_vehicles();
         for (size_t i = m.vehicles.size(); i-- > 0;) {
             Impl::Vehicle& v = m.vehicles[i];
@@ -2432,6 +2872,24 @@ void SceneBuilder::build(const uint8_t* ram, const SceneOptions& options, Scene&
             const int gx = cell / kMapCells, gy = cell % kMapCells;
             const int d = std::min(std::abs(gx - cam_cx) + std::abs(gy - cam_cy), 2 * kMapCells + 1);
             m.sorted[static_cast<size_t>(pos[static_cast<size_t>(d)]++)] = cell;
+        }
+        if (!options.depth) {
+            // Painter's order: the cells of the original's window among themselves in its order (so its
+            // traffic and pedestrians are hidden as the original hides them), in the places the walk has
+            // for them.
+            m.window_slots.clear();
+            const int* steps = m.window_steps;
+            for (size_t i = 0; i < m.sorted.size(); ++i) {
+                if (std::find(steps, steps + 6, m.sorted[i]) != steps + 6) m.window_slots.push_back(i);
+            }
+            size_t k = 0;
+            for (int si = 0; si < 6 && k < m.window_slots.size(); ++si) {
+                const int cell = steps[si];
+                if (cell < 0 || std::find(steps, steps + si, cell) != steps + si) continue;  // (once)
+                bool listed = false;
+                for (const size_t slot : m.window_slots) listed |= m.sorted[slot] == cell;
+                if (listed) m.sorted[m.window_slots[k++]] = cell;
+            }
         }
         for (const int cell : m.sorted) m.draw_cell_enhanced(cell);
     }

@@ -59,7 +59,8 @@ constexpr const char* kUsage =
     "                 [--draw-distance original|extended|maximum] [--cpu-hz <n>] [--[no-]joystick]\n"
     "                 [--effects off|speaker|adlib|mac] [--music off|original|pc98] [--no-sound]\n"
     "                 [--graphics dos|pc98|mac] [--scaling sharp|smooth] [--resolution display|original]\n"
-    "                 [--skyline hills|painted] [--manual-check] [--dump-frame <file.bmp>]\n"
+    "                 [--skyline hills|painted] [--depth-buffer on|off] [--manual-check]\n"
+    "                 [--dump-frame <file.bmp>]\n"
     "Settings come from the launch menu (saved in settings.ini); these flags override them for one run.\n"
     "  --launcher           show the launch menu even if it's switched off (--no-launcher: skip it)\n"
     "  --game <dir>         folder with the DOS VETTE! files (default: search for Game/)\n"
@@ -84,6 +85,9 @@ constexpr const char* kUsage =
     "  --skyline hills      (default) with the extended or maximum draw distance, the horizon backdrop\n"
     "                       keeps only the hills, trees and water, behind the real city; painted: the\n"
     "                       original's backdrop, with its painted skyline and bridges\n"
+    "  --depth-buffer on    (default) the Enhanced 3D view on the GPU with a depth buffer: nearer things\n"
+    "                       always cover farther ones, with the whole city's traffic; off: the original's\n"
+    "                       drawing order, with traffic and pedestrians only near the car\n"
     "  --scaling sharp      (default) the pictures simply enlarged, every pixel a solid block; smooth:\n"
     "                       the edges between pixels softened\n"
     "  --graphics dos       (default) the DOS screens; pc98 or mac: that version's art in their place\n"
@@ -148,6 +152,7 @@ struct Options {
     std::optional<Settings::Scaling> scaling;
     std::optional<Settings::ViewResolution> view_resolution;
     std::optional<Settings::Skyline> skyline;
+    std::optional<bool> depth_buffer;
     std::vector<ScriptedKey> keys;
     std::vector<ScriptedPoke> pokes;     // sorted by time
     std::vector<std::uint64_t> shots;    // emulated ns, sorted
@@ -179,6 +184,8 @@ struct Options {
             s.view_resolution = *view_resolution;
         if (skyline)
             s.skyline = *skyline;
+        if (depth_buffer)
+            s.depth_buffer = *depth_buffer;
     }
 };
 
@@ -220,6 +227,9 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                                          std::string_view(argv[i + 1]) == "original")) {
             opts.view_resolution = std::string_view(argv[++i]) == "display" ? Settings::ViewResolution::Display
                                                                             : Settings::ViewResolution::Original;
+        } else if (arg == "--depth-buffer" && has_value && (std::string_view(argv[i + 1]) == "on" ||
+                                                           std::string_view(argv[i + 1]) == "off")) {
+            opts.depth_buffer = std::string_view(argv[++i]) == "on";
         } else if (arg == "--skyline" && has_value && (std::string_view(argv[i + 1]) == "hills" ||
                                                       std::string_view(argv[i + 1]) == "painted")) {
             opts.skyline = std::string_view(argv[++i]) == "hills" ? Settings::Skyline::Hills : Settings::Skyline::Painted;
@@ -306,7 +316,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--poke" ||
                                      arg == "--wav" || arg == "--effects" || arg == "--music" ||
                                      arg == "--graphics" || arg == "--scaling" ||
-                                     arg == "--resolution" || arg == "--skyline";
+                                     arg == "--resolution" || arg == "--skyline" ||
+                                     arg == "--depth-buffer";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
                          argv[i], kUsage);
             return std::nullopt;
@@ -450,7 +461,9 @@ struct EnhancedView {
             return false;
         enhanced::SceneOptions options;
         options.radius = radius;
-        options.replicas = radius >= enhanced::kMapCells;  // Maximum: the whole city, all its traffic included
+        // With the depth buffer, all of the city's traffic and pedestrians (nothing pops in); without,
+        // only those near the car, where the original draws them (none show through the scenery).
+        options.depth = options.replicas = options.far_vehicles = presenter.depth_buffer();
         presenter.frame_scale(layers.under.width, layers.under.height, options.pixel_w, options.pixel_h);
         if (presenter.original_resolution())
             options.line_width = 1;  // the original's one-pixel lines
@@ -814,6 +827,7 @@ int run(int argc, char** argv) {
         presenter.set_fullscreen(settings.fullscreen);
         presenter.set_smooth_scaling(settings.scaling == Settings::Scaling::Smooth);
         presenter.set_original_resolution(settings.view_resolution == Settings::ViewResolution::Original);
+        presenter.set_depth_buffer(settings.depth_buffer);
         Gamepad gamepad;
 
         // The launch menu: when it's switched on, or to let the player find the game files.
@@ -878,10 +892,11 @@ int run(int argc, char** argv) {
                 view->radius = kExtendedRadius;
             view->hills = settings.skyline == Settings::Skyline::Hills;
         }
-        SDL_Log("Frame rate: %s; draw distance: %s%s; emulated CPU %.0f MHz",
+        SDL_Log("Frame rate: %s; draw distance: %s%s%s; emulated CPU %.0f MHz",
                 smooth_fps ? "smooth (display refresh)" : "original",
                 !enhanced_view ? "original" : view->radius == kExtendedRadius ? "extended" : "maximum",
                 !enhanced_view ? "" : view->hills ? ", hills skyline" : ", painted skyline",
+                !enhanced_view ? "" : presenter.depth_buffer() ? ", depth buffer" : ", original order",
                 static_cast<double>(config.cpu_hz) / 1e6);
 
         // Sound: the emulated PC speaker, or a replacement driven by the game's sound events.
@@ -938,8 +953,11 @@ int run(int argc, char** argv) {
                     static_cast<unsigned long long>(smooth->stats().replays),
                     smooth->stats().replay_ms / static_cast<double>(smooth->stats().replays));
         if (view && view->frames)
-            SDL_Log("Enhanced view: %llu frames, %.2f ms per scene, %.0f vehicles and pedestrians drawn",
-                    static_cast<unsigned long long>(view->frames), view->build_ms / static_cast<double>(view->frames),
+            SDL_Log("Enhanced view: %llu frames (%llu with the depth buffer), %.2f ms per scene, %.0f vehicles and "
+                    "pedestrians drawn",
+                    static_cast<unsigned long long>(view->frames),
+                    static_cast<unsigned long long>(presenter.depth_buffer_frames()),
+                    view->build_ms / static_cast<double>(view->frames),
                     static_cast<double>(view->vehicles) / static_cast<double>(view->frames));
         return 0;
     } catch (const std::exception& e) {

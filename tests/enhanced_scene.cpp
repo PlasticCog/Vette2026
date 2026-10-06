@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <utility>
 #include <vector>
 
 #include "enhanced/scene.h"
@@ -706,4 +707,74 @@ TEST(enhanced_scene_ground_markings_lie_flat) {
         const float far = std::fabs(white[0].y - white[1].y), near = std::fabs(white[2].y - white[3].y);
         CHECK(close(near, far, 0.05));  // a constant width
     }
+}
+
+namespace {
+
+// The depth of the vertices drawn in a colour: (lowest, highest).
+std::pair<float, float> depth_range(const Scene& s, const SceneColour& c) {
+    float lo = 1e9f, hi = -1e9f;
+    for (const SceneVertex& v : s.vertices) {
+        if (!close(v.r, c.r) || !close(v.g, c.g) || !close(v.b, c.b)) continue;
+        lo = std::min(lo, v.depth);
+        hi = std::max(hi, v.depth);
+    }
+    return {lo, hi};
+}
+
+} // namespace
+
+TEST(enhanced_scene_depth) {
+    // A red wall facing the camera 4096 units ahead with, painted on it, a blue window and a white line along
+    // its top edge; then a green wall in front of it (not on it). Depth is 1 / z, raised one step for what
+    // lies on an earlier primitive of its group (the window on the wall; the line on the wall or the window),
+    // not for the green wall or for a face drawn after a line along its edge. The ground is the backdrop: 0.
+    SyntheticWorld sw;
+    Routine r;
+    r.address = 0x3010;
+    Variant& v = r.variants.emplace_back();
+    Part& p = v.parts.emplace_back();
+    p.source = Part::Source::Packed;
+    p.verts = {{0, -512, 0},   {0, 512, 0},   {0, 512, 256},  {0, -512, 256},   // the wall
+               {0, -100, 50},  {0, 100, 50},  {0, 100, 150},  {0, -100, 150},   // the window on it
+               {-100, -50, 0}, {-100, 50, 0}, {-100, 50, 60}, {-100, -50, 60},  // a wall in front
+               {0, 512, 256},  {0, 512, 400}, {0, -512, 400}};                  // a face above the line
+    p.indices = {0, 1, 2, 3, 4, 5, 6, 7, 3, 2, 8, 9, 10, 11, 12, 13, 14, 3};
+    const auto prim = [](Prim::Kind kind, uint8_t colour, uint32_t first, uint16_t count) {
+        Prim q;
+        q.kind = kind;
+        q.colour.raw = colour;
+        q.first = first;
+        q.count = count;
+        return q;
+    };
+    p.prims = {prim(Prim::Kind::Polygon, 4, 0, 4), prim(Prim::Kind::Polygon, 1, 4, 4), prim(Prim::Kind::Line, 15, 8, 2),
+               prim(Prim::Kind::Polygon, 2, 10, 4), prim(Prim::Kind::Polygon, 5, 14, 4)};
+    v.primitives = 5;
+    sw.world.routines.push_back(std::move(r));
+    sw.place(42, 40, 1, {}, {{0x3010, 1024, 1024, 0}});
+    SceneBuilder builder(sw.world);
+    Scene scene;
+    SceneOptions o;
+    builder.build(sw.ram.data(), o, scene);
+    const float step = 1 + kDepthStep;
+    const auto red = depth_range(scene, ega_colour(4)), blue = depth_range(scene, ega_colour(1));
+    const auto white = depth_range(scene, ega_colour(15)), green = depth_range(scene, ega_colour(2));
+    const auto magenta = depth_range(scene, ega_colour(5)), ground = depth_range(scene, ega_colour(7));
+    CHECK(close(red.first, 1.0 / 4096, 1e-9) && close(red.second, 1.0 / 4096, 1e-9));
+    CHECK(close(blue.first, step / 4096, 1e-9) && close(blue.second, step / 4096, 1e-9));
+    CHECK(close(white.first, step / 4096, 1e-9) && close(white.second, step / 4096, 1e-9));  // on the wall only
+    CHECK(close(green.first, 1.0 / 3996, 1e-9) && close(green.second, 1.0 / 3996, 1e-9));
+    CHECK(close(magenta.first, 1.0 / 4096, 1e-9) && close(magenta.second, 1.0 / 4096, 1e-9));
+    CHECK(ground.first == 0 && ground.second == 0);
+    CHECK_EQ(scene.stats.max_layer, 1);
+    CHECK_EQ(scene.stats.layers[0], 3);
+    CHECK_EQ(scene.stats.layers[1], 2);
+
+    // The mirror's sky is backdrop too.
+    mirror_viewports(sw);
+    o.mirror = true;
+    builder.build(sw.ram.data(), o, scene);
+    const auto sky = depth_range(scene, ega_colour(11));
+    CHECK(sky.first == 0 && sky.second == 0);
 }

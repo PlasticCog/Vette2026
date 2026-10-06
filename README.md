@@ -56,7 +56,7 @@ one at a time, each verified against the original (see [docs/PORTING.md](docs/PO
 
 **Launch menu.** VETTE! 2026 opens with a launch menu. Choose a preset there (**Classic**, VETTE!
 exactly as in 1989, or **Enhanced**), or set each option: frame rate, PC speed, draw distance, its
-resolution and skyline, the manual check, joystick, window or fullscreen, scaling (sharp pixels, or smooth), sound, and whether the
+resolution, depth buffer and skyline, the manual check, joystick, window or fullscreen, scaling (sharp pixels, or smooth), sound, and whether the
 menu appears at startup. **Game folder** shows
 where your game files were found; select it to choose another folder. If the files aren't found, the
 menu opens anyway and asks for the folder. It works with the keyboard, mouse or gamepad. Choices
@@ -76,14 +76,21 @@ shows only the frames the game draws itself.
 **Draw distance.** The original draws only the few city blocks around the car, about two blocks ahead.
 With **Maximum** (the Enhanced preset), VETTE! 2026 draws the race view's 3D world itself, with the
 whole city in view to the horizon at once: every building, road and landmark with its most detailed
-model, and all of the game's traffic and pedestrians (they repeat across the city in a pattern every
-four blocks), so nothing pops in as you drive. **Extended** draws eight blocks around the car. The city is
-taken from your own copy of the game when it starts (about 0.1 s). It is drawn in the original's
-back-to-front order, so things hide each other just as they do in the original. The rear-view mirrors and
-the freeway sections are drawn the same way (at Maximum, the freeway's whole route). Road markings are
-painted flat on the road; edges and cables are thin, crisp lines. The dash and messages are still the
-game's own. With PC-98 or Mac graphics the mirror is the original's. `--draw-distance
-original|extended|maximum` overrides the setting for one run.
+model, and (with the depth buffer, below) all of the game's traffic and pedestrians, which repeat across
+the city in a pattern every four blocks, so nothing pops in as you drive. **Extended** draws eight blocks
+around the car. The city is taken from your own copy of the game when it starts (about 0.1 s). The
+rear-view mirrors and the freeway sections are drawn the same way (at Maximum, the freeway's whole
+route). Road markings are painted flat on the road; edges and cables are thin, crisp lines. The dash and
+messages are still the game's own. With PC-98 or Mac graphics the mirror is the original's.
+`--draw-distance original|extended|maximum` overrides the setting for one run.
+
+**Depth buffer.** With **On** (the default), the long-distance view is drawn on the GPU with a depth
+buffer: nearer things always cover farther ones, so nothing shows through the scenery or flips in front
+of something else as you drive, and the whole city's traffic and pedestrians are drawn. Things lying on
+each other (road markings, outlines, windows) still go on top in the original's order. It needs
+Direct3D 12, Vulkan or Metal; without, the game works as with **Off**: the original's back-to-front
+drawing order, with traffic and pedestrians only near the car, where the original draws them, so they
+appear as you get close (`--depth-buffer off`).
 
 **Resolution.** The long-distance view is drawn at your display's full resolution. With **Original
 320x200**, it is drawn at the original's own 320x200 instead and enlarged like the rest of the picture:

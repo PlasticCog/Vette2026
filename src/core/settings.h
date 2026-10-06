@@ -41,6 +41,10 @@ struct Settings {
     // display's, or the original's 320x200, then enlarged like the rest of the picture.
     enum class ViewResolution { Display, Original };
     ViewResolution view_resolution = ViewResolution::Display;
+    // The Enhanced 3D view with a depth buffer: nearer things always cover farther ones, and the whole
+    // city's traffic and pedestrians are drawn. Off (or without a GPU that can): the original's
+    // back-to-front order, with traffic and pedestrians only near the car, where the original has them.
+    bool depth_buffer = true;
     Effects effects = Effects::AdLib;
     Music music = Music::Original;
     Graphics graphics = Graphics::Dos;

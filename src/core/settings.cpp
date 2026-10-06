@@ -98,6 +98,7 @@ std::string Settings::serialize() const {
     out << kScaling.key << " = " << kScaling.names[static_cast<size_t>(scaling)] << "\n";
     out << kSkyline.key << " = " << kSkyline.names[static_cast<size_t>(skyline)] << "\n";
     out << kViewResolution.key << " = " << kViewResolution.names[static_cast<size_t>(view_resolution)] << "\n";
+    out << "depth_buffer = " << kOnOff[depth_buffer] << "\n";
     out << kEffects.key << " = " << kEffects.names[static_cast<size_t>(effects)] << "\n";
     out << kMusic.key << " = " << kMusic.names[static_cast<size_t>(music)] << "\n";
     out << kGraphics.key << " = " << kGraphics.names[static_cast<size_t>(graphics)] << "\n";
@@ -126,6 +127,7 @@ Settings Settings::parse(const std::string& text) {
         read(kScaling, key, value, s.scaling);
         read(kSkyline, key, value, s.skyline);
         read(kViewResolution, key, value, s.view_resolution);
+        read_bool("depth_buffer", kOnOff, key, value, s.depth_buffer);
         read(kEffects, key, value, s.effects);
         read(kMusic, key, value, s.music);
         read(kGraphics, key, value, s.graphics);

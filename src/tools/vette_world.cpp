@@ -33,6 +33,10 @@
 //                      (in highway mode, all of these work on the freeway: the memory before
 //                      highway_frame, 3009:03B4, against the image after highway_draw_cars, 0405;
 //                      --scene-compare also compares the mirror's view, from 074F to 075F)
+// --scene-depth        ... the shots' panels: the whole map with traffic everywhere, in painter's order and with a
+//                      depth buffer (as a GPU: SceneVertex::depth, test >=)
+// --scene-off          ... the shots' panels: the whole map without the depth buffer (SceneOptions::depth and
+//                      far_vehicles off: traffic only where the original draws it), and with it
 // --bridge-check       at the race frame of --teleport-at (default 40 s), sweep the camera along every
 //                      bridge (on the deck both ways and to the sides, and from the helicopter's height)
 //                      and compare the original's view with the Enhanced scene where the original drew;
@@ -48,9 +52,16 @@
 //                      height), each with the painted skyline above the Hills skyline (enhanced/backdrop.h),
 //                      at --scene-scale and at the original's 320x200 enlarged (<label>_sky_NAME.png)
 // --sky-sweep         ... and from three places all the way round (every 40 degrees)
-// --sky-view x,y,z,yaw,pitch,NAME   ... this view instead (repeatable; z above the ground)
+// --sky-view x,y,z,yaw,pitch,NAME   ... this view instead (repeatable; z above the ground, =z: absolute)
 // --replicas           ... with traffic and pedestrians in every cell of their pattern (SceneOptions::replicas,
 //                      as the game's Maximum draw distance draws them)
+// --depth-views        the Enhanced view (whole map, traffic and pedestrians everywhere) at the views of
+//                      --sky-views (or --sky-view), drawn in painter's order and with a depth buffer
+//                      (SceneVertex::depth, test >=), at --scene-scale and at 320x200, with the mirror;
+//                      the depth buffer twice: exactly, and as a GPU does it (vertices snapped to 1/256 of
+//                      an output pixel, depth interpolated in float), to show depth fighting
+//                      (<label>_depth_NAME.png: painter's | depth | what changed)
+// --depth-bench        ... instead, the build times at --scene-scale: with depth, without, and the Off mode's
 // --horizon-dump       write the three panoramas from video memory and their Hills versions
 //                      (<label>_horizon{0,1,2}_{painted,hills}.bin: 24 rows x 3200 EGA colour indices) and
 //                      PNGs of both
@@ -623,6 +634,85 @@ public:
         }
     }
 
+    // With a depth buffer (`zbuf`, w x h, cleared to 0 by the caller): a pixel is drawn where the triangle's
+    // depth (SceneVertex::depth, interpolated linearly on screen) is >= the buffer's, which then takes it
+    // (translucent faces too). `gpu`: as a GPU would, the vertices snapped to 1/256 of an output pixel and
+    // the depth interpolated in float from the first vertex; else exactly (double).
+    static void draw_rgb_depth(const en::Scene& s, float scale, int w, int h, float ox, float oy, std::vector<uint32_t>& img,
+                               std::vector<float>& zbuf, bool gpu) {
+        const int cx0 = std::max(0, static_cast<int>(std::lround((s.view_x0 - ox) * scale)));
+        const int cy0 = std::max(0, static_cast<int>(std::lround((s.view_y0 - oy) * scale)));
+        const int cx1 = std::min(w, static_cast<int>(std::lround((s.view_x1 - ox) * scale)));
+        const int cy1 = std::min(h, static_cast<int>(std::lround((s.view_y1 - oy) * scale)));
+        for (size_t t = 0; t + 2 < s.indices.size(); t += 3) {
+            const en::SceneVertex* v[3] = {&s.vertices[static_cast<size_t>(s.indices[t])], &s.vertices[static_cast<size_t>(s.indices[t + 1])],
+                                           &s.vertices[static_cast<size_t>(s.indices[t + 2])]};
+            double X[3], Y[3], D[3];
+            for (int k = 0; k < 3; ++k) {
+                X[k] = (v[k]->x - ox) * scale;
+                Y[k] = (v[k]->y - oy) * scale;
+                if (gpu) {
+                    X[k] = std::round(X[k] * 256) / 256;
+                    Y[k] = std::round(Y[k] * 256) / 256;
+                }
+                D[k] = v[k]->depth;
+            }
+            double area = (X[1] - X[0]) * (Y[2] - Y[0]) - (Y[1] - Y[0]) * (X[2] - X[0]);
+            if (area == 0) continue;
+            if (area < 0) {
+                std::swap(X[1], X[2]);
+                std::swap(Y[1], Y[2]);
+                std::swap(D[1], D[2]);
+                area = -area;
+            }
+            // The depth's plane, from the first vertex: d = d0 + gx (x - x0) + gy (y - y0).
+            const double gxd = ((D[1] - D[0]) * (Y[2] - Y[0]) - (D[2] - D[0]) * (Y[1] - Y[0])) / area;
+            const double gyd = ((D[2] - D[0]) * (X[1] - X[0]) - (D[1] - D[0]) * (X[2] - X[0])) / area;
+            const float gxf = static_cast<float>(gxd), gyf = static_cast<float>(gyd), d0f = static_cast<float>(D[0]);
+            const float x0f = static_cast<float>(X[0]), y0f = static_cast<float>(Y[0]);
+            const uint32_t sr = static_cast<uint32_t>(std::lround(v[0]->r * 255)), sg = static_cast<uint32_t>(std::lround(v[0]->g * 255)),
+                           sb = static_cast<uint32_t>(std::lround(v[0]->b * 255));
+            const float alpha = v[0]->a;
+            const auto edge = [](double px, double py, double qx, double qy, double rx, double ry) {
+                return (qx - px) * (ry - py) - (qy - py) * (rx - px);
+            };
+            const auto top_left = [](double px, double py, double qx, double qy) { return qy < py || (qy == py && qx > px); };
+            const bool t0 = top_left(X[1], Y[1], X[2], Y[2]), t1 = top_left(X[2], Y[2], X[0], Y[0]), t2 = top_left(X[0], Y[0], X[1], Y[1]);
+            const int minx = std::max(cx0, static_cast<int>(std::floor(std::min({X[0], X[1], X[2]}))));
+            const int maxx = std::min(cx1 - 1, static_cast<int>(std::ceil(std::max({X[0], X[1], X[2]}))));
+            const int miny = std::max(cy0, static_cast<int>(std::floor(std::min({Y[0], Y[1], Y[2]}))));
+            const int maxy = std::min(cy1 - 1, static_cast<int>(std::ceil(std::max({Y[0], Y[1], Y[2]}))));
+            for (int y = miny; y <= maxy; ++y) {
+                const double py = y + 0.5;
+                for (int x = minx; x <= maxx; ++x) {
+                    const double px = x + 0.5;
+                    const double w0 = edge(X[1], Y[1], X[2], Y[2], px, py);
+                    const double w1 = edge(X[2], Y[2], X[0], Y[0], px, py);
+                    const double w2 = edge(X[0], Y[0], X[1], Y[1], px, py);
+                    if (!((w0 > 0 || (w0 == 0 && t0)) && (w1 > 0 || (w1 == 0 && t1)) && (w2 > 0 || (w2 == 0 && t2)))) continue;
+                    float d;
+                    if (gpu) {
+                        d = d0f + gxf * (static_cast<float>(px) - x0f) + gyf * (static_cast<float>(py) - y0f);
+                    } else {
+                        d = static_cast<float>((w0 * D[0] + w1 * D[1] + w2 * D[2]) / area);
+                    }
+                    const size_t i = static_cast<size_t>(y * w + x);
+                    if (d < zbuf[i]) continue;
+                    zbuf[i] = d;
+                    uint32_t& o = img[i];
+                    if (alpha >= 1) {
+                        o = sr << 16 | sg << 8 | sb;
+                    } else {
+                        const auto mix = [&](uint32_t dst, uint32_t src) {
+                            return static_cast<uint32_t>(std::lround(alpha * float(src) + (1 - alpha) * float(dst)));
+                        };
+                        o = mix(o >> 16 & 255, sr) << 16 | mix(o >> 8 & 255, sg) << 8 | mix(o & 255, sb);
+                    }
+                }
+            }
+        }
+    }
+
     // At 1x: per pixel, the set of EGA colours it may show (a dithered pair; screen-door adds the base
     // colour to what was under it). `masks` starts as the background's colours.
     static void draw_masks(const en::Scene& s, std::vector<uint16_t>& masks) {
@@ -738,6 +828,8 @@ struct SceneCheck {
     std::vector<double> shots;           // emulated seconds
     double bench_from = -1, bench_to = -1;
     int scale = 6;
+    bool depth = false;  // --scene-depth: the shots' panels are the whole map in painter's order and with depth
+    bool depth_off = false;  // --scene-off: ... the whole map with the depth buffer off (SceneOptions), and on
 
     en::SceneBuilder builder{world};
     OriginalChooser chooser{world};
@@ -1030,20 +1122,35 @@ struct SceneCheck {
         for (int k = 0; k < 2; ++k) {
             upscale(pre, plane * static_cast<size_t>(k + 1));
             en::SceneOptions o;
-            o.radius = k == 0 ? 8 : en::kMapCells;
+            o.radius = k == 0 && !depth && !depth_off ? 8 : en::kMapCells;
+            o.replicas = depth || (depth_off && k == 1);
             o.pixel_w = o.pixel_h = static_cast<float>(scale);
+            if (depth_off && k == 0) {
+                o.far_vehicles = false;
+                o.depth = false;
+            }
             std::vector<uint32_t> part(img.begin() + static_cast<std::ptrdiff_t>(plane * static_cast<size_t>(k + 1)),
                                        img.begin() + static_cast<std::ptrdiff_t>(plane * static_cast<size_t>(k + 2)));
+            std::vector<float> zbuf((depth || depth_off) && k == 1 ? part.size() : 0, 0.0f);
+            const auto draw = [&](const en::Scene& sp) {
+                if (zbuf.empty()) {
+                    SceneRaster::draw_rgb(sp, static_cast<float>(scale), w, h, static_cast<float>(x0), static_cast<float>(y0), part);
+                } else {
+                    SceneRaster::draw_rgb_depth(sp, static_cast<float>(scale), w, h, static_cast<float>(x0), static_cast<float>(y0), part,
+                                                zbuf, true);
+                }
+            };
             builder.build(ram.data(), o, scene);
             tris[k] = scene.stats.triangles;
             ms[k] = scene.stats.milliseconds;
-            SceneRaster::draw_rgb(scene, static_cast<float>(scale), w, h, static_cast<float>(x0), static_cast<float>(y0), part);
+            draw(scene);
             if (mirror_drawn) {
                 o.mirror = true;
                 builder.build(ram.data(), o, scene);
                 mirror_tris[k] = scene.stats.triangles;
                 mirror_ms[k] = scene.stats.milliseconds;
-                SceneRaster::draw_rgb(scene, static_cast<float>(scale), w, h, static_cast<float>(x0), static_cast<float>(y0), part);
+                std::fill(zbuf.begin(), zbuf.end(), 0.0f);  // (the mirror's own: it covers its viewport)
+                draw(scene);
             }
             std::copy(part.begin(), part.end(), img.begin() + static_cast<std::ptrdiff_t>(plane * static_cast<size_t>(k + 1)));
         }
@@ -1301,6 +1408,7 @@ struct SkyView {
     int32_t x = 0, y = 0, z = 10;  // z above the ground
     int yaw = 0, pitch = 0;
     std::string name;
+    bool absolute = false;  // z is absolute
 };
 std::vector<SkyView> default_sky_views(bool sweep) {
     // Map coordinates: x north, y east (big tiles of 8000h; the city is in the south-west 3 x 3); yaw 0 north,
@@ -1340,7 +1448,7 @@ int run_sky_views(const World& world, Machine& machine, Teleporter& teleporter, 
     en::Scene scene;
     en::Backdrop backdrop;
     for (const SkyView& v : views) {
-        const int32_t z = world.ground_z(v.x, v.y) + v.z;
+        const int32_t z = v.absolute ? v.z : world.ground_z(v.x, v.y) + v.z;
         if (!teleporter.view(v.x, v.y, z, v.yaw, v.pitch)) {
             std::printf("sky view %s: the original did not finish\n", v.name.c_str());
             continue;
@@ -1403,6 +1511,118 @@ int run_sky_views(const World& world, Machine& machine, Teleporter& teleporter, 
     return 0;
 }
 
+// --depth-views: painter's order against the depth buffer.
+int run_depth_views(const World& world, Teleporter& teleporter, Validator& tval, const std::filesystem::path& out_dir,
+                    const std::string& label, const std::vector<SkyView>& views, int scale, bool depth_bench) {
+    en::SceneBuilder builder(world);
+    en::Scene scene, mirror;
+    int worst_layer = 0;
+    long long fights_total = 0;
+    for (const SkyView& v : views) {
+        const int32_t z = v.absolute ? v.z : world.ground_z(v.x, v.y) + v.z;
+        if (!teleporter.view(v.x, v.y, z, v.yaw, v.pitch)) {
+            std::printf("depth view %s: the original did not finish\n", v.name.c_str());
+            continue;
+        }
+        if (depth_bench) {
+            // Build times at `scale`: the depth buffer's scene (traffic everywhere), without depth, and the
+            // Off mode's (the window's traffic only, no depth).
+            double t[3] = {0, 0, 0};
+            int veh[3] = {0, 0, 0};
+            for (int rep = 0; rep < 5; ++rep) {
+                for (int m = 0; m < 3; ++m) {
+                    en::SceneOptions o;
+                    o.pixel_w = o.pixel_h = static_cast<float>(scale);
+                    o.replicas = o.far_vehicles = m != 2;
+                    o.depth = m == 0;
+                    builder.build(tval.ram.data(), o, scene);
+                    if (rep > 0) t[m] += scene.stats.milliseconds / 4;
+                    veh[m] = scene.stats.vehicles;
+                }
+            }
+            std::printf("depth bench %s: depth %.2f ms (%d vehicles), no depth %.2f ms, off %.2f ms (%d vehicles)\n",
+                        v.name.c_str(), t[0], veh[0], t[1], t[2], veh[2]);
+            continue;
+        }
+        // Rows: the display's resolution (scale), the original's (1, enlarged). Columns: painter's, depth (as a
+        // GPU), what changed (yellow: depth against painter's; red: GPU against exact depth).
+        const int vy0 = 0, vy1 = 120;
+        const int w = 320 * scale, h = (vy1 - vy0) * scale, gap = 6;
+        const int W = 3 * w + 2 * gap, H = 2 * h + gap;
+        std::vector<uint32_t> out(static_cast<size_t>(W) * static_cast<size_t>(H), 0x202020);
+        int changed[2] = {0, 0}, fights[2] = {0, 0}, layer = 0, tris = 0;
+        double ms = 0;
+        for (int row = 0; row < 2; ++row) {
+            const int sc = row == 0 ? scale : 1;
+            const int rw = 320 * sc, rh = (vy1 - vy0) * sc;
+            en::SceneOptions o;
+            o.replicas = true;
+            o.pixel_w = o.pixel_h = static_cast<float>(sc);
+            if (sc == 1) o.line_width = 1;
+            builder.build(tval.ram.data(), o, scene);
+            o.mirror = true;
+            builder.build(tval.ram.data(), o, mirror);
+            layer = std::max({layer, scene.stats.max_layer, mirror.stats.max_layer});
+            if (row == 0) {
+                std::string hist;
+                for (int k = 0; k <= scene.stats.max_layer; ++k) {
+                    hist += " " + std::to_string(k) + ":" + std::to_string(scene.stats.layers[static_cast<size_t>(k)]);
+                }
+                std::printf("  %s layers%s\n", v.name.c_str(), hist.c_str());
+            }
+            tris = scene.stats.triangles;
+            ms = scene.stats.milliseconds;
+            std::vector<uint32_t> base(static_cast<size_t>(rw) * static_cast<size_t>(rh));
+            for (int yy = 0; yy < rh; ++yy) {
+                for (int xx = 0; xx < rw; ++xx) {
+                    base[static_cast<size_t>(yy * rw + xx)] = kEga[tval.pre.pixels[static_cast<size_t>((yy / sc + vy0) * 320 + xx / sc)] & 15];
+                }
+            }
+            std::vector<uint32_t> painter = base, exact = base, gpu = base;
+            std::vector<float> ze(base.size(), 0.0f), zg(base.size(), 0.0f);
+            for (const en::Scene* sp : {&scene, &mirror}) {
+                if (sp == &mirror) {
+                    // The mirror's own depth buffer: cleared in its viewport.
+                    for (int yy = std::max(0, (sp->view_y0 - vy0) * sc); yy < std::min(rh, (sp->view_y1 - vy0) * sc); ++yy) {
+                        for (int xx = std::max(0, sp->view_x0 * sc); xx < std::min(rw, sp->view_x1 * sc); ++xx) {
+                            ze[static_cast<size_t>(yy * rw + xx)] = zg[static_cast<size_t>(yy * rw + xx)] = 0;
+                        }
+                    }
+                }
+                SceneRaster::draw_rgb(*sp, static_cast<float>(sc), rw, rh, 0, static_cast<float>(vy0), painter);
+                SceneRaster::draw_rgb_depth(*sp, static_cast<float>(sc), rw, rh, 0, static_cast<float>(vy0), exact, ze, false);
+                SceneRaster::draw_rgb_depth(*sp, static_cast<float>(sc), rw, rh, 0, static_cast<float>(vy0), gpu, zg, true);
+            }
+            const int oy = row * (h + gap);
+            for (int yy = 0; yy < h; ++yy) {
+                for (int xx = 0; xx < w; ++xx) {
+                    const size_t i = static_cast<size_t>((yy * rh / h) * rw + (xx * rw / w));
+                    const size_t o0 = static_cast<size_t>((oy + yy) * W + xx);
+                    out[o0] = painter[i];
+                    out[o0 + static_cast<size_t>(w + gap)] = gpu[i];
+                    const bool fight = gpu[i] != exact[i], change = exact[i] != painter[i];
+                    out[o0 + static_cast<size_t>(2 * (w + gap))] = fight ? 0xFF2020 : change ? 0xFFFF40 : (painter[i] >> 2 & 0x3F3F3F);
+                }
+            }
+            for (size_t i = 0; i < base.size(); ++i) {
+                changed[row] += exact[i] != painter[i];
+                fights[row] += gpu[i] != exact[i];
+            }
+        }
+        char name[160];
+        std::snprintf(name, sizeof name, "%s_depth_%s.png", label.c_str(), v.name.c_str());
+        write_png(out_dir / name, W, H, out);
+        worst_layer = std::max(worst_layer, layer);
+        fights_total += fights[0] + fights[1];
+        std::printf("depth view %s: %d triangles (%.2f ms), highest layer %d; depth changes %d px at %dx, %d at 1x; "
+                    "depth fighting (GPU against exact) %d px at %dx, %d at 1x; %s\n",
+                    v.name.c_str(), tris, ms, layer, changed[0], scale, changed[1], fights[0], scale, fights[1], name);
+    }
+    std::printf("depth views: highest layer %d (bias %.3f%%), %lld pixels of depth fighting in all\n", worst_layer,
+                100.0 * worst_layer * en::kDepthStep, fights_total);
+    return 0;
+}
+
 // --horizon-dump: the panoramas as the game holds them, and their Hills versions.
 int dump_horizons(Machine& machine, const std::filesystem::path& out_dir, const std::string& label) {
     std::vector<uint8_t> buffer(static_cast<size_t>(en::kPanoramas * en::kPanoramaRows * en::kPanoramaWidth));
@@ -1452,6 +1672,7 @@ int main(int argc, char* argv[]) {
     double scene_from = -1, scene_to = -1, bench_from = -1, bench_to = -1;
     std::vector<double> scene_shots;
     int scene_scale = 6;
+    bool scene_depth = false, scene_off = false;
     struct KeyEvent {
         uint64_t at_ms;
         uint8_t scancode;
@@ -1466,7 +1687,7 @@ int main(int argc, char* argv[]) {
     std::vector<double> frame_shots;
     std::vector<uint16_t> watch_words;
     std::vector<int> bridge_view;  // --bridge-view x,y,z,yaw,pitch: only this view of the sweep
-    bool sky_views = false, sky_sweep = false, horizon_dump = false, replicas = false;
+    bool sky_views = false, sky_sweep = false, horizon_dump = false, replicas = false, depth_views = false, depth_bench = false;
     std::vector<SkyView> sky_list;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1489,6 +1710,10 @@ int main(int argc, char* argv[]) {
             sky_views = sky_sweep = true;
         } else if (a == "--horizon-dump") {
             horizon_dump = true;
+        } else if (a == "--depth-views") {
+            depth_views = true;
+        } else if (a == "--depth-bench") {
+            depth_views = depth_bench = true;
         } else if (a == "--sky-view" && v) {
             sky_views = true;
             std::string r = argv[++i];
@@ -1499,8 +1724,9 @@ int main(int argc, char* argv[]) {
                 p0 = p1 + 1;
             }
             if (f.size() != 6) return usage();
-            sky_list.push_back({std::atoi(f[0].c_str()), std::atoi(f[1].c_str()), std::atoi(f[2].c_str()),
-                                std::atoi(f[3].c_str()), std::atoi(f[4].c_str()), f[5]});
+            const bool absolute = !f[2].empty() && f[2][0] == '=';
+            sky_list.push_back({std::atoi(f[0].c_str()), std::atoi(f[1].c_str()), std::atoi(f[2].c_str() + (absolute ? 1 : 0)),
+                                std::atoi(f[3].c_str()), std::atoi(f[4].c_str()), f[5], absolute});
         } else if (a == "--bridge-view" && v) {
             bridge_check = true;
             std::string r = argv[++i];
@@ -1556,6 +1782,10 @@ int main(int argc, char* argv[]) {
                 p0 = p1 + 1;
             }
             std::sort(scene_shots.begin(), scene_shots.end());
+        } else if (a == "--scene-depth") {
+            scene_depth = true;
+        } else if (a == "--scene-off") {
+            scene_off = true;
         } else if (a == "--scene-scale" && v) {
             scene_scale = std::max(1, std::atoi(argv[++i]));
         } else if (a == "--recheck") {
@@ -1771,7 +2001,7 @@ int main(int argc, char* argv[]) {
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
     const bool scene_mode = scene_from >= 0 || bench_from >= 0 || !scene_shots.empty();
-    const bool at_race_frame = bridge_check || sky_views || horizon_dump;
+    const bool at_race_frame = bridge_check || sky_views || horizon_dump || depth_views;
     if (val_from < 0 && teleports == 0 && !scene_mode && frame_shots.empty() && !at_race_frame) {
         return 0;
     }
@@ -1816,6 +2046,8 @@ int main(int argc, char* argv[]) {
     sc.bench_to = bench_to;
     sc.shots = scene_shots;
     sc.scale = scene_scale;
+    sc.depth = scene_depth;
+    sc.depth_off = scene_off;
     if (scene_mode) {
         sc.log.open(out_dir / (label + "_scene.txt"));
         sc.install();
@@ -1927,6 +2159,15 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         dump_horizons(machine, out_dir, label);
+    }
+    if (depth_views) {
+        if (!teleporter.ready()) {
+            std::printf("depth views: no race frame reached by %.1f s\n", teleport_at);
+            return 1;
+        }
+        run_depth_views(world, teleporter, tval, out_dir, label,
+                        sky_list.empty() ? default_sky_views(sky_sweep) : sky_list, scene_scale, depth_bench);
+        if (!sky_views) return 0;
     }
     if (sky_views) {
         if (!teleporter.ready()) {

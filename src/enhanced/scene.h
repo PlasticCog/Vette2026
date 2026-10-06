@@ -23,7 +23,17 @@ namespace vette::enhanced {
 struct SceneVertex {
     float x = 0, y = 0;
     float r = 0, g = 0, b = 0, a = 1;  // the layout of SDL_FColor
+    // For the GPU's depth test: larger is nearer, 0 never hides anything. Test: greater or equal, against a
+    // buffer cleared to 0 (written by translucent faces too). depth = kNear / z * (1 + s * kDepthStep): z the
+    // vertex's camera depth (kNear = 1, the near plane, where the primitive was clipped), interpolated linearly
+    // on screen (1/z is affine there); s the primitive's layer, 0..kMaxDepthLayer: one above the highest
+    // earlier primitive of its group that it lies on (coplanar and overlapping on screen: a marking on a road,
+    // a window on a wall, an outline on a face), else 0. The backdrop (ground, water, sky) is 0. At most
+    // 1 + kMaxDepthLayer * kDepthStep.
+    float depth = 0;
 };
+inline constexpr float kDepthStep = 1.0f / 1536;
+inline constexpr int kMaxDepthLayer = 7;
 
 struct Scene {
     std::vector<SceneVertex> vertices;
@@ -45,6 +55,8 @@ struct Scene {
         int models = 0;        // segment-245A model instances (static and vehicles)
         int slices = 0;        // freeway road slices drawn (highway mode)
         bool city = false;     // the city was drawn (not a freeway alone)
+        int max_layer = 0;     // the highest depth layer used (SceneVertex::depth)
+        std::array<int, kMaxDepthLayer + 1> layers{};  // primitives per depth layer
     } stats;
 
     void clear() {
@@ -85,6 +97,12 @@ struct SceneOptions {
     // pedestrians show only in the original's window. On: every cell of its pattern within the radius,
     // the window's cells as the original binds them: the whole city populated, nothing popping in.
     bool replicas = false;
+    // Off: traffic and pedestrians only in the original's window, where the original draws them (they
+    // appear as the camera nears). Without a depth buffer, far ones could show through the scenery.
+    bool far_vehicles = true;
+    // SceneVertex::depth for a depth buffer. Off: every depth is 0 (drawn in painter's order; it saves the
+    // layer bookkeeping).
+    bool depth = true;
     // The ground quad of every big tile in its ground colour (DS:8556), drawn first, over water that
     // extends beyond the map's edge to the horizon.
     bool ground = true;

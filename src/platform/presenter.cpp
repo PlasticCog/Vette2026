@@ -3,11 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <type_traits>
 #include <vector>
 
 #include "enhanced/scene.h"
 #include "graphics/composite.h"
+#include "platform/scene_shaders.inc"
 #include "ui/app_icon.h"
 
 namespace vette {
@@ -41,20 +45,216 @@ void set_window_icon(SDL_Window* window) {
 
 }  // namespace
 
+// The Enhanced 3D view drawn with a depth buffer: SDL's GPU API, on the device of the "gpu" renderer, into
+// a texture of that renderer (so it's shown like any other). Its pipeline tests SceneVertex::depth
+// (larger is nearer, ties to the later triangle) against a buffer cleared to 0, and blends the scenes'
+// colours premultiplied, so translucent faces work as before.
+struct Presenter::Gpu {
+    SDL_GPUDevice* device = nullptr;
+    SDL_GPUShader* vertex_shader = nullptr;
+    SDL_GPUShader* pixel_shader = nullptr;
+    SDL_GPUTextureFormat depth_format = SDL_GPU_TEXTUREFORMAT_INVALID;
+    SDL_GPUTextureFormat color_format = SDL_GPU_TEXTUREFORMAT_INVALID;  // the pipelines' target format
+    SDL_GPUGraphicsPipeline* scene = nullptr;  // depth tested and written, blended
+    SDL_GPUGraphicsPipeline* fill = nullptr;   // the mirror's sky: written whatever the depth (0), opaque
+    SDL_GPUTexture* depth = nullptr;
+    int depth_w = 0, depth_h = 0;
+    SDL_GPUBuffer* vertices = nullptr;
+    SDL_GPUBuffer* indices = nullptr;
+    SDL_GPUTransferBuffer* transfer = nullptr;
+    Uint32 vertex_bytes = 0, index_bytes = 0, transfer_bytes = 0;  // their sizes
+    SdlPtr<SDL_Texture> target;  // what it draws into, the renderer's
+    int target_w = 0, target_h = 0;
+    bool failed = false;  // set by a draw that couldn't be done: the depth pass is then dropped
+
+    SDL_Texture* fail() {
+        failed = true;
+        return nullptr;
+    }
+
+    ~Gpu() {
+        release_pipelines();
+        if (vertex_shader)
+            SDL_ReleaseGPUShader(device, vertex_shader);
+        if (pixel_shader)
+            SDL_ReleaseGPUShader(device, pixel_shader);
+        if (depth)
+            SDL_ReleaseGPUTexture(device, depth);
+        if (vertices)
+            SDL_ReleaseGPUBuffer(device, vertices);
+        if (indices)
+            SDL_ReleaseGPUBuffer(device, indices);
+        if (transfer)
+            SDL_ReleaseGPUTransferBuffer(device, transfer);
+    }
+
+    void release_pipelines() {
+        if (scene)
+            SDL_ReleaseGPUGraphicsPipeline(device, scene);
+        if (fill)
+            SDL_ReleaseGPUGraphicsPipeline(device, fill);
+        scene = fill = nullptr;
+        color_format = SDL_GPU_TEXTUREFORMAT_INVALID;
+    }
+
+    // The shaders in a format the device takes, and a depth format; false if there's none.
+    bool init() {
+        const SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(device);
+        SDL_GPUShaderCreateInfo vs{};
+        SDL_GPUShaderCreateInfo ps{};
+        if (formats & SDL_GPU_SHADERFORMAT_DXIL) {
+            vs.code = kSceneVertexDxil;
+            vs.code_size = sizeof kSceneVertexDxil;
+            ps.code = kScenePixelDxil;
+            ps.code_size = sizeof kScenePixelDxil;
+            vs.format = ps.format = SDL_GPU_SHADERFORMAT_DXIL;
+            vs.entrypoint = "vs_main";
+            ps.entrypoint = "ps_main";
+        } else if (formats & SDL_GPU_SHADERFORMAT_SPIRV) {
+            vs.code = kSceneVertexSpirv;
+            vs.code_size = sizeof kSceneVertexSpirv;
+            ps.code = kScenePixelSpirv;
+            ps.code_size = sizeof kScenePixelSpirv;
+            vs.format = ps.format = SDL_GPU_SHADERFORMAT_SPIRV;
+            vs.entrypoint = ps.entrypoint = "main";
+        } else if (formats & SDL_GPU_SHADERFORMAT_MSL) {
+            vs.code = ps.code = reinterpret_cast<const Uint8*>(kSceneMetal);
+            vs.code_size = ps.code_size = std::strlen(kSceneMetal);
+            vs.format = ps.format = SDL_GPU_SHADERFORMAT_MSL;
+            vs.entrypoint = "vs_main";
+            ps.entrypoint = "fs_main";
+        } else {
+            SDL_SetError("no shader format for this GPU device");
+            return false;
+        }
+        vs.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+        vs.num_uniform_buffers = 1;
+        ps.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+        vertex_shader = SDL_CreateGPUShader(device, &vs);
+        pixel_shader = SDL_CreateGPUShader(device, &ps);
+        if (!vertex_shader || !pixel_shader)
+            return false;
+        // Float depth: the far city's depths are around 4e-6, too fine for a 24-bit buffer.
+        depth_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+        if (!SDL_GPUTextureSupportsFormat(device, depth_format, SDL_GPU_TEXTURETYPE_2D,
+                                          SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET)) {
+            SDL_SetError("no 32-bit float depth buffer");
+            return false;
+        }
+        return true;
+    }
+
+    bool make_pipelines(SDL_GPUTextureFormat format) {
+        release_pipelines();
+        const SDL_GPUVertexBufferDescription buffer{0, sizeof(enhanced::SceneVertex), SDL_GPU_VERTEXINPUTRATE_VERTEX, 0};
+        const SDL_GPUVertexAttribute attributes[] = {
+            {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(enhanced::SceneVertex, x)},
+            {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(enhanced::SceneVertex, r)},
+            {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, offsetof(enhanced::SceneVertex, depth)},
+        };
+        SDL_GPUColorTargetDescription target_desc{};
+        target_desc.format = format;
+        SDL_GPUColorTargetBlendState& blend = target_desc.blend_state;
+        blend.enable_blend = true;
+        blend.src_color_blendfactor = blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.dst_color_blendfactor = blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.color_blend_op = blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+        SDL_GPUGraphicsPipelineCreateInfo info{};
+        info.vertex_shader = vertex_shader;
+        info.fragment_shader = pixel_shader;
+        info.vertex_input_state.vertex_buffer_descriptions = &buffer;
+        info.vertex_input_state.num_vertex_buffers = 1;
+        info.vertex_input_state.vertex_attributes = attributes;
+        info.vertex_input_state.num_vertex_attributes = 3;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.rasterizer_state.enable_depth_clip = true;
+        info.depth_stencil_state.enable_depth_test = true;
+        info.depth_stencil_state.enable_depth_write = true;
+        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
+        info.target_info.color_target_descriptions = &target_desc;
+        info.target_info.num_color_targets = 1;
+        info.target_info.depth_stencil_format = depth_format;
+        info.target_info.has_depth_stencil_target = true;
+        scene = SDL_CreateGPUGraphicsPipeline(device, &info);
+        blend.enable_blend = false;
+        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_ALWAYS;
+        fill = SDL_CreateGPUGraphicsPipeline(device, &info);
+        if (!scene || !fill) {
+            release_pipelines();
+            return false;
+        }
+        color_format = format;
+        return true;
+    }
+
+    // A buffer at least `bytes` big (doubling, so it settles quickly).
+    template <class Buffer, class Create>
+    bool reserve(Buffer*& buffer, Uint32& size, Uint32 bytes, Create create) {
+        if (buffer && size >= bytes)
+            return true;
+        Uint32 n = std::max<Uint32>(size, 1u << 16);
+        while (n < bytes)
+            n *= 2;
+        Buffer* fresh = create(n);
+        if (!fresh)
+            return false;
+        if (buffer) {
+            if constexpr (std::is_same_v<Buffer, SDL_GPUTransferBuffer>)
+                SDL_ReleaseGPUTransferBuffer(device, buffer);
+            else
+                SDL_ReleaseGPUBuffer(device, buffer);
+        }
+        buffer = fresh;
+        size = n;
+        return true;
+    }
+};
+
 Presenter::Presenter(const char* title) {
-    SDL_Window* window = nullptr;
-    SDL_Renderer* renderer = nullptr;
-    if (!SDL_CreateWindowAndRenderer(title, kWindowWidth, kWindowHeight,
-                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY, &window, &renderer))
-        throw_sdl_error("SDL_CreateWindowAndRenderer");
+    SDL_Window* window = SDL_CreateWindow(title, kWindowWidth, kWindowHeight, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!window)
+        throw_sdl_error("SDL_CreateWindow");
     window_.reset(window);
-    renderer_.reset(renderer);
     set_window_icon(window);
+
+    // SDL's GPU renderer, for the depth buffer; without one that can (or with SDL_RENDER_DRIVER set), the
+    // platform's default renderer.
+    SDL_Renderer* renderer = nullptr;
+    if (!SDL_GetHint(SDL_HINT_RENDER_DRIVER)) {
+        renderer = SDL_CreateRenderer(window, "gpu");
+        if (renderer) {
+            auto gpu = std::make_unique<Gpu>();
+            gpu->device = static_cast<SDL_GPUDevice*>(
+                SDL_GetPointerProperty(SDL_GetRendererProperties(renderer), SDL_PROP_RENDERER_GPU_DEVICE_POINTER, nullptr));
+            if (gpu->device && gpu->init()) {
+                gpu_ = std::move(gpu);
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_RENDER, "No depth buffer: %s", SDL_GetError());
+                gpu.reset();
+                SDL_DestroyRenderer(renderer);
+                renderer = nullptr;
+            }
+        }
+    }
+    if (!renderer)
+        renderer = SDL_CreateRenderer(window, nullptr);
+    if (!renderer)
+        throw_sdl_error("SDL_CreateRenderer");
+    renderer_.reset(renderer);
 
     if (!SDL_SetRenderVSync(renderer, 1))
         SDL_LogWarn(SDL_LOG_CATEGORY_RENDER, "VSync unavailable: %s", SDL_GetError());
-    SDL_Log("Renderer: %s", SDL_GetRendererName(renderer));
+    if (gpu_) {
+        SDL_Log("Renderer: %s (%s), with a depth buffer", SDL_GetRendererName(renderer), SDL_GetGPUDeviceDriver(gpu_->device));
+    } else {
+        SDL_Log("Renderer: %s", SDL_GetRendererName(renderer));
+    }
 }
+
+// The members' order destroys the depth pass (and its texture) before the renderer.
+Presenter::~Presenter() = default;
 
 // Largest 4:3 rect that fits the output, centered: both EGA modes filled a 4:3 CRT.
 SDL_FRect Presenter::fit() const {
@@ -182,6 +382,19 @@ void Presenter::draw_scene_layers(SDL_Texture* under, int frame_w, int frame_h, 
                                   const enhanced::Scene* inset, const SDL_FRect& dst) {
     SDL_Renderer* renderer = renderer_.get();
     SDL_RenderTexture(renderer, under, nullptr, &dst);
+    if (depth_buffer()) {
+        const int w = std::max(1, static_cast<int>(std::lround(dst.w)));
+        const int h = std::max(1, static_cast<int>(std::lround(dst.h)));
+        if (SDL_Texture* drawn = draw_depth_tested(scene, inset, frame_w, frame_h, w, h)) {
+            SDL_RenderTexture(renderer, drawn, nullptr, &dst);
+            ++depth_frames_;
+            return;
+        }
+        if (gpu_->failed) {  // from now on the triangles in their order, as without a depth buffer
+            SDL_LogWarn(SDL_LOG_CATEGORY_RENDER, "Depth buffer dropped: %s", SDL_GetError());
+            gpu_.reset();
+        }
+    }
     draw_triangles(scene, frame_w, frame_h, dst);
     if (inset) {
         // Nothing of the main view may show in the mirror: its viewport is filled first (with its sky,
@@ -225,6 +438,149 @@ void Presenter::draw_triangles(const enhanced::Scene& scene, int frame_w, int fr
                           static_cast<int>(scene.indices.size()), static_cast<int>(sizeof(std::int32_t)));
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderClipRect(renderer, nullptr);
+}
+
+// The scene (and the mirror's) into the depth pass's target, `w` x `h` pixels for the whole frame: the
+// scene in its viewport; then the mirror's viewport filled with its sky (as draw_scene_layers() does),
+// its depth reset, and its scene. Null if the GPU fails: the caller then draws the triangles in order.
+SDL_Texture* Presenter::draw_depth_tested(const enhanced::Scene& scene, const enhanced::Scene* inset, int frame_w,
+                                          int frame_h, int w, int h) {
+    Gpu& g = *gpu_;
+    SDL_GPUDevice* device = g.device;
+    if (!g.target || g.target_w != w || g.target_h != h) {
+        g.target = create_texture(renderer_.get(), SDL_TEXTUREACCESS_TARGET, w, h, SDL_SCALEMODE_NEAREST);
+        SDL_SetTextureBlendMode(g.target.get(), SDL_BLENDMODE_BLEND_PREMULTIPLIED);
+        g.target_w = w;
+        g.target_h = h;
+    }
+    auto* color = static_cast<SDL_GPUTexture*>(
+        SDL_GetPointerProperty(SDL_GetTextureProperties(g.target.get()), SDL_PROP_TEXTURE_GPU_TEXTURE_POINTER, nullptr));
+    const SDL_GPUTextureFormat format = SDL_GetGPUTextureFormatFromPixelFormat(g.target->format);
+    if (!color || (format != g.color_format && !g.make_pipelines(format)))
+        return g.fail();
+    if (!g.depth || g.depth_w != w || g.depth_h != h) {
+        if (g.depth)
+            SDL_ReleaseGPUTexture(device, g.depth);
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = g.depth_format;
+        info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+        info.width = static_cast<Uint32>(w);
+        info.height = static_cast<Uint32>(h);
+        info.layer_count_or_depth = 1;
+        info.num_levels = 1;
+        g.depth = SDL_CreateGPUTexture(device, &info);
+        g.depth_w = g.depth ? w : 0;
+        g.depth_h = g.depth ? h : 0;
+        if (!g.depth)
+            return g.fail();
+    }
+
+    // The vertices and indices: the scene's, the mirror's, and the mirror's sky (a quad over the frame).
+    const size_t sv = scene.vertices.size(), si = scene.indices.size();
+    const size_t mv = inset ? inset->vertices.size() : 0, mi = inset ? inset->indices.size() : 0;
+    const float fw = static_cast<float>(frame_w), fh = static_cast<float>(frame_h);
+    const enhanced::SceneVertex sky = inset && !inset->vertices.empty() ? inset->vertices.front()
+                                                                        : enhanced::SceneVertex{0, 0, 0, 0, 0x55 / 255.0f, 1, 0};
+    const enhanced::SceneVertex quad[4] = {{0, 0, sky.r, sky.g, sky.b, 1, 0},
+                                           {fw, 0, sky.r, sky.g, sky.b, 1, 0},
+                                           {fw, fh, sky.r, sky.g, sky.b, 1, 0},
+                                           {0, fh, sky.r, sky.g, sky.b, 1, 0}};
+    static constexpr std::int32_t kQuad[6] = {0, 1, 2, 0, 2, 3};
+    const size_t nv = sv + mv + (inset ? 4 : 0), ni = si + mi + (inset ? 6 : 0);
+    if (ni == 0)
+        return nullptr;  // nothing to draw
+    const auto vbytes = static_cast<Uint32>(nv * sizeof(enhanced::SceneVertex));
+    const auto ibytes = static_cast<Uint32>(ni * sizeof(std::int32_t));
+    const auto make_buffer = [device](SDL_GPUBufferUsageFlags usage) {
+        return [device, usage](Uint32 size) {
+            const SDL_GPUBufferCreateInfo info{usage, size, 0};
+            return SDL_CreateGPUBuffer(device, &info);
+        };
+    };
+    if (!g.reserve(g.vertices, g.vertex_bytes, vbytes, make_buffer(SDL_GPU_BUFFERUSAGE_VERTEX)) ||
+        !g.reserve(g.indices, g.index_bytes, ibytes, make_buffer(SDL_GPU_BUFFERUSAGE_INDEX)) ||
+        !g.reserve(g.transfer, g.transfer_bytes, vbytes + ibytes, [device](Uint32 size) {
+            const SDL_GPUTransferBufferCreateInfo info{SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, size, 0};
+            return SDL_CreateGPUTransferBuffer(device, &info);
+        }))
+        return g.fail();
+    auto* bytes = static_cast<std::uint8_t*>(SDL_MapGPUTransferBuffer(device, g.transfer, true));
+    if (!bytes)
+        return g.fail();
+    auto* v = reinterpret_cast<enhanced::SceneVertex*>(bytes);
+    std::memcpy(v, scene.vertices.data(), sv * sizeof *v);
+    if (inset) {
+        std::memcpy(v + sv, inset->vertices.data(), mv * sizeof *v);
+        std::memcpy(v + sv + mv, quad, sizeof quad);
+    }
+    auto* ix = reinterpret_cast<std::int32_t*>(bytes + vbytes);
+    std::memcpy(ix, scene.indices.data(), si * sizeof *ix);
+    if (inset) {
+        std::memcpy(ix + si, inset->indices.data(), mi * sizeof *ix);
+        std::memcpy(ix + si + mi, kQuad, sizeof kQuad);
+    }
+    SDL_UnmapGPUTransferBuffer(device, g.transfer);
+
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device);
+    if (!cmd)
+        return g.fail();
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    const SDL_GPUTransferBufferLocation from_v{g.transfer, 0}, from_i{g.transfer, vbytes};
+    const SDL_GPUBufferRegion to_v{g.vertices, 0, vbytes}, to_i{g.indices, 0, ibytes};
+    SDL_UploadToGPUBuffer(copy, &from_v, &to_v, true);
+    SDL_UploadToGPUBuffer(copy, &from_i, &to_i, true);
+    SDL_EndGPUCopyPass(copy);
+
+    SDL_GPUColorTargetInfo target{};
+    target.texture = color;
+    target.clear_color = {0, 0, 0, 0};
+    target.load_op = SDL_GPU_LOADOP_CLEAR;
+    target.store_op = SDL_GPU_STOREOP_STORE;
+    target.cycle = true;
+    SDL_GPUDepthStencilTargetInfo depth{};
+    depth.texture = g.depth;
+    depth.clear_depth = 0;
+    depth.load_op = SDL_GPU_LOADOP_CLEAR;
+    depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+    depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+    depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    depth.cycle = true;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &target, 1, &depth);
+    const SDL_GPUBufferBinding vb{g.vertices, 0}, ib{g.indices, 0};
+    SDL_BindGPUVertexBuffers(pass, 0, &vb, 1);
+    SDL_BindGPUIndexBuffer(pass, &ib, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+    const float transform[4] = {2 / fw, -2 / fh, -1, 1};  // frame -> clip space, y up
+    SDL_PushGPUVertexUniformData(cmd, 0, transform, sizeof transform);
+    // A viewport in frame coordinates, in target pixels (rounded as draw_triangles() clips).
+    const float sx = static_cast<float>(w) / fw, sy = static_cast<float>(h) / fh;
+    const auto rect = [&](int x0, int y0, int x1, int y1) {
+        const int l = std::clamp(static_cast<int>(std::lround(static_cast<float>(x0) * sx)), 0, w);
+        const int t = std::clamp(static_cast<int>(std::lround(static_cast<float>(y0) * sy)), 0, h);
+        const int r = std::clamp(static_cast<int>(std::lround(static_cast<float>(x1) * sx)), 0, w);
+        const int b = std::clamp(static_cast<int>(std::lround(static_cast<float>(y1) * sy)), 0, h);
+        return SDL_Rect{l, t, std::max(0, r - l), std::max(0, b - t)};
+    };
+    SDL_BindGPUGraphicsPipeline(pass, g.scene);
+    if (si > 0) {
+        const SDL_Rect clip = rect(scene.view_x0, scene.view_y0, scene.view_x1, scene.view_y1);
+        SDL_SetGPUScissor(pass, &clip);
+        SDL_DrawGPUIndexedPrimitives(pass, static_cast<Uint32>(si), 1, 0, 0, 0);
+    }
+    if (inset) {
+        const SDL_Rect clip = rect(inset->view_x0, inset->view_y0, inset->view_x1, inset->view_y1);
+        SDL_SetGPUScissor(pass, &clip);
+        SDL_BindGPUGraphicsPipeline(pass, g.fill);
+        SDL_DrawGPUIndexedPrimitives(pass, 6, 1, static_cast<Uint32>(si + mi), static_cast<Sint32>(sv + mv), 0);
+        if (mi > 0) {
+            SDL_BindGPUGraphicsPipeline(pass, g.scene);
+            SDL_DrawGPUIndexedPrimitives(pass, static_cast<Uint32>(mi), 1, static_cast<Uint32>(si), static_cast<Sint32>(sv), 0);
+        }
+    }
+    SDL_EndGPURenderPass(pass);
+    if (!SDL_SubmitGPUCommandBuffer(cmd))
+        return g.fail();
+    return g.target.get();
 }
 
 void Presenter::present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over,

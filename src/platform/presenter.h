@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -27,13 +28,15 @@ namespace vette {
 class Presenter {
 public:
     explicit Presenter(const char* title);
+    ~Presenter();
 
     void present(const Framebuffer& fb);
     void present(const ui::Canvas& canvas);
     // The race view with the Enhanced 3D view: `under` (the game's view without its world), then
     // `scene` clipped to its viewport at the output's full resolution, then `inset` (the rear-view
     // mirror's scene, if any) clipped to its own viewport, then `over` wherever its pixels aren't
-    // kTransparentPixel. All are in the frame's coordinates, placed as present() would.
+    // kTransparentPixel. All are in the frame's coordinates, placed as present() would. With the depth
+    // buffer, the scenes' triangles hide each other by their SceneVertex::depth; else in their order.
     static constexpr std::uint8_t kTransparentPixel = 0xFF;
     void present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over,
                  const enhanced::Scene* inset = nullptr);
@@ -56,6 +59,12 @@ public:
     // 320x200), then enlarged like the frame; frame_scale() is then 1.
     void set_original_resolution(bool on) { original_resolution_ = on; }
     bool original_resolution() const { return original_resolution_; }
+    // The Enhanced 3D view drawn with a depth buffer on the GPU (SDL's GPU API: Direct3D 12, Vulkan or
+    // Metal), when available and wanted.
+    bool depth_buffer_available() const { return gpu_ != nullptr; }
+    void set_depth_buffer(bool on) { depth_buffer_ = on; }
+    bool depth_buffer() const { return depth_buffer_ && gpu_ != nullptr; }
+    std::uint64_t depth_buffer_frames() const { return depth_frames_; }  // drawn with it so far
     void toggle_fullscreen();
     void set_fullscreen(bool on);
     bool fullscreen() const;
@@ -88,6 +97,9 @@ private:
     void draw_scene_layers(SDL_Texture* under, int frame_w, int frame_h, const enhanced::Scene& scene,
                            const enhanced::Scene* inset, const SDL_FRect& dst);
     void draw_triangles(const enhanced::Scene& scene, int frame_w, int frame_h, const SDL_FRect& dst);
+    struct Gpu;
+    SDL_Texture* draw_depth_tested(const enhanced::Scene& scene, const enhanced::Scene* inset, int frame_w,
+                                   int frame_h, int w, int h);
     void draw_composite(const graphics::Composite& c, const SDL_FRect& dst);
     SDL_Texture* art_texture(const graphics::Image& image);
     SDL_FRect fit() const;  // the 4:3 picture rect in render output pixels
@@ -96,6 +108,7 @@ private:
     // Destroyed in reverse order: textures, then renderer, then window.
     SdlPtr<SDL_Window> window_;
     SdlPtr<SDL_Renderer> renderer_;
+    std::unique_ptr<Gpu> gpu_;  // the depth-buffer pass, on the renderer's GPU device
     Layer base_;  // present()'s frame, and the layered view's `under`
     Layer over_;  // the layered view's `over`
     Layer art_base_, art_over_, art_moved_;  // a Composite's DOS pixels
@@ -112,6 +125,8 @@ private:
     bool system_cursor_shown_ = true;
     bool smooth_ = false;
     bool original_resolution_ = false;
+    bool depth_buffer_ = true;
+    std::uint64_t depth_frames_ = 0;
 };
 
 }  // namespace vette

@@ -37,6 +37,10 @@
 //                      depth buffer (as a GPU: SceneVertex::depth, test >=)
 // --scene-off          ... the shots' panels: the whole map without the depth buffer (SceneOptions::depth and
 //                      far_vehicles off: traffic only where the original draws it), and with it
+// --replica-watch A:B  between emulated seconds A and B, follow the copies of traffic and pedestrians
+//                      (SceneOptions::replicas, whole map) from frame to frame: how many the layout rule leaves
+//                      out, and how many appear or vanish in view, with the rule and without it (the log: each
+//                      one a car's length of 2 pixels or more on screen)
 // --bridge-check       at the race frame of --teleport-at (default 40 s), sweep the camera along every
 //                      bridge (on the deck both ways and to the sides, and from the helicopter's height)
 //                      and compare the original's view with the Enhanced scene where the original drew;
@@ -61,6 +65,8 @@
 //                      the depth buffer twice: exactly, and as a GPU does it (vertices snapped to 1/256 of
 //                      an output pixel, depth interpolated in float), to show depth fighting
 //                      (<label>_depth_NAME.png: painter's | depth | what changed)
+//                      and the copies of traffic and pedestrians the layout rule leaves out, ringed in red
+//                      on the depth panel (<label>_replicas_NAME.png)
 // --depth-bench        ... instead, the build times at --scene-scale: with depth, without, and the Off mode's
 // --horizon-dump       write the three panoramas from video memory and their Hills versions
 //                      (<label>_horizon{0,1,2}_{painted,hills}.bin: 24 rows x 3200 EGA colour indices) and
@@ -830,6 +836,7 @@ struct SceneCheck {
     int scale = 6;
     bool depth = false;  // --scene-depth: the shots' panels are the whole map in painter's order and with depth
     bool depth_off = false;  // --scene-off: ... the whole map with the depth buffer off (SceneOptions), and on
+    double watch_from = -1, watch_to = -1;  // --replica-watch
 
     en::SceneBuilder builder{world};
     OriginalChooser chooser{world};
@@ -865,6 +872,24 @@ struct SceneCheck {
         int max_tris_map = 0;
     } bench;
 
+    // --replica-watch: the copies of traffic and pedestrians, this frame's and the last one's.
+    using Copy = en::SceneObserver::Copy;
+    struct Copies : en::SceneObserver {
+        std::vector<Copy> list;
+        void copy(const Copy& c) override { list.push_back(c); }
+    } copies;
+    std::vector<Copy> last_copies;
+    bool have_last = false;
+    struct Watch {
+        int frames = 0;
+        uint64_t considered = 0, dropped = 0, window = 0;
+        // In view, by a car's length on screen (>= 8, 2..8, < 2 race-frame pixels): copies that appear or
+        // vanish from one frame to the next, with the layout rule [0] and without it [1]; and of those with
+        // the rule, the ones the rule's decision made (a copy there, considered in both frames).
+        std::array<std::array<uint64_t, 3>, 2> appear{}, vanish{};
+        std::array<uint64_t, 3> decided{};
+    } watch;
+
     SceneCheck(Machine& m, const World& w) : machine(m), world(w) {}
 
     double now() const { return static_cast<double>(machine.emulated_ns()) / 1e9; }
@@ -874,7 +899,8 @@ struct SceneCheck {
     }
     bool wanted() const {
         const double t = now();
-        return (t >= from && t <= to) || (t >= bench_from && t <= bench_to) || (next_shot < shots.size() && t >= shots[next_shot]);
+        return (t >= from && t <= to) || (t >= bench_from && t <= bench_to) || (t >= watch_from && t <= watch_to) ||
+               (next_shot < shots.size() && t >= shots[next_shot]);
     }
 
     bool highway_mode() { return machine.memory().read8(Cpu::linear(kData, 0x2AD4)) == 0xFF; }
@@ -956,6 +982,7 @@ struct SceneCheck {
         const double t = now();
         if (t >= from && t <= to) compare(ram, ram, pre, post, false, cmp, "");
         if (t >= bench_from && t <= bench_to) time_builds();
+        if (t >= watch_from && t <= watch_to) watch_replicas();
         if (next_shot < shots.size() && t >= shots[next_shot]) {
             pending_shot = static_cast<int>(next_shot);  // taken at the frame's end, with the mirror
             while (next_shot < shots.size() && shots[next_shot] <= t) ++next_shot;
@@ -1058,6 +1085,68 @@ struct SceneCheck {
             std::snprintf(name, sizeof name, "%s_compare%s%04d.png", label.c_str(), tag, frame);
             write_png(out_dir / name, W, H, img);
         }
+    }
+
+    // In view (the 3D view's half width of 160 pixels at 256 / z, and a little), by a car's length on screen
+    // (160 units): >= 8 pixels 0, 2..8 1, less 2; else -1.
+    static int size_class(const Copy& c) {
+        if (c.view_z < 16 || std::fabs(c.view_x) * 256 > 176 * c.view_z) return -1;
+        const float px = 160 * 256 / c.view_z;
+        return px >= 8 ? 0 : px >= 2 ? 1 : 2;
+    }
+
+    void watch_replicas() {
+        en::SceneOptions o;
+        o.pixel_w = o.pixel_h = static_cast<float>(scale);
+        o.replicas = true;
+        o.observer = &copies;
+        copies.list.clear();
+        builder.build(ram.data(), o, scene);
+        std::sort(copies.list.begin(), copies.list.end(), [](const Copy& a, const Copy& b) { return a.entity < b.entity; });
+        ++watch.frames;
+        for (const Copy& c : copies.list) {
+            watch.window += c.window ? 1 : 0;
+            watch.considered += c.window ? 0 : 1;
+            watch.dropped += !c.window && !c.kept ? 1 : 0;
+        }
+        if (have_last) {
+            const auto by_entity = [](const std::vector<Copy>& v, uint16_t e) {
+                return std::equal_range(v.begin(), v.end(), Copy{e}, [](const Copy& a, const Copy& b) { return a.entity < b.entity; });
+            };
+            for (int rule = 0; rule < 2; ++rule) {
+                const auto shown = [&](const Copy& c) { return rule == 1 || c.kept; };
+                // A copy of the same entity where `a` is (within 384 units: its own, moved on), in `other`.
+                const auto near = [&](const std::vector<Copy>& other, const Copy& a, bool any) {
+                    const auto [lo, hi] = by_entity(other, a.entity);
+                    for (auto it = lo; it != hi; ++it) {
+                        if ((any || shown(*it)) && std::abs(it->x - a.x) < 384 && std::abs(it->y - a.y) < 384) return true;
+                    }
+                    return false;
+                };
+                for (int dir = 0; dir < 2; ++dir) {  // 0: vanish (last frame's, gone), 1: appear
+                    const std::vector<Copy>& from_list = dir == 0 ? last_copies : copies.list;
+                    const std::vector<Copy>& to_list = dir == 0 ? copies.list : last_copies;
+                    for (const Copy& a : from_list) {
+                        if (!shown(a)) continue;
+                        const int sz = size_class(a);
+                        if (sz < 0 || near(to_list, a, false)) continue;
+                        (dir == 0 ? watch.vanish : watch.appear)[static_cast<size_t>(rule)][static_cast<size_t>(sz)]++;
+                        const bool decided = rule == 0 && near(to_list, a, true);
+                        if (decided) ++watch.decided[static_cast<size_t>(sz)];
+                        if (rule == 0 && sz <= 1 && log) {
+                            char buf[200];
+                            std::snprintf(buf, sizeof buf, "replica %s t=%7.3f entity %04X cell %d,%d at %d,%d ahead %.0f (%.1f px)%s%s" "\n",
+                                          dir == 0 ? "vanish" : "appear", now(), a.entity, a.cell / en::kMapCells, a.cell % en::kMapCells,
+                                          a.x, a.y, a.view_z, 160 * 256 / a.view_z, a.window ? " window" : "",
+                                          decided ? " (the rule)" : "");
+                            log << buf;
+                        }
+                    }
+                }
+            }
+        }
+        last_copies = copies.list;
+        have_last = true;
     }
 
     void time_builds() {
@@ -1181,6 +1270,29 @@ struct SceneCheck {
                         100.0 * static_cast<double>(t->differing) / static_cast<double>(std::max<uint64_t>(t->pixels, 1)),
                         100.0 * static_cast<double>(t->structural) / static_cast<double>(std::max<uint64_t>(t->pixels, 1)),
                         t->worst_frame, t->worst, t->unmatched);
+        }
+        if (watch.frames) {
+            const double n = watch.frames;
+            std::printf("replica watch %s: %d frames; %.1f copies considered per frame, %.1f left out by the layout rule "
+                        "(%.1f%%), %.1f drawn by the window\n",
+                        label.c_str(), watch.frames, double(watch.considered) / n, double(watch.dropped) / n,
+                        100.0 * double(watch.dropped) / double(std::max<uint64_t>(watch.considered, 1)), double(watch.window) / n);
+            for (int rule = 0; rule < 2; ++rule) {
+                std::printf("replica watch %s: %s the rule, in view, appear / vanish by a car's length on screen: "
+                            ">= 8 px %llu / %llu, 2-8 px %llu / %llu, < 2 px %llu / %llu",
+                            label.c_str(), rule == 0 ? "with" : "without",
+                            static_cast<unsigned long long>(watch.appear[static_cast<size_t>(rule)][0]),
+                            static_cast<unsigned long long>(watch.vanish[static_cast<size_t>(rule)][0]),
+                            static_cast<unsigned long long>(watch.appear[static_cast<size_t>(rule)][1]),
+                            static_cast<unsigned long long>(watch.vanish[static_cast<size_t>(rule)][1]),
+                            static_cast<unsigned long long>(watch.appear[static_cast<size_t>(rule)][2]),
+                            static_cast<unsigned long long>(watch.vanish[static_cast<size_t>(rule)][2]));
+                if (rule == 0) {
+                    std::printf(" (the rule's own: %llu, %llu, %llu)", static_cast<unsigned long long>(watch.decided[0]),
+                                static_cast<unsigned long long>(watch.decided[1]), static_cast<unsigned long long>(watch.decided[2]));
+                }
+                std::printf("\n");
+            }
         }
         if (bench.frames) {
             const double n = bench.frames;
@@ -1518,6 +1630,11 @@ int run_depth_views(const World& world, Teleporter& teleporter, Validator& tval,
     en::Scene scene, mirror;
     int worst_layer = 0;
     long long fights_total = 0;
+    struct Copies : en::SceneObserver {
+        std::vector<Copy> list;
+        void copy(const Copy& c) override { list.push_back(c); }
+    } copies;
+    std::vector<uint32_t> ringed;  // the depth panel at `scale`, with the copies left out
     for (const SkyView& v : views) {
         const int32_t z = v.absolute ? v.z : world.ground_z(v.x, v.y) + v.z;
         if (!teleporter.view(v.x, v.y, z, v.yaw, v.pitch)) {
@@ -1559,7 +1676,17 @@ int run_depth_views(const World& world, Teleporter& teleporter, Validator& tval,
             o.replicas = true;
             o.pixel_w = o.pixel_h = static_cast<float>(sc);
             if (sc == 1) o.line_width = 1;
+            copies.list.clear();
+            if (row == 0) o.observer = &copies;
             builder.build(tval.ram.data(), o, scene);
+            o.observer = nullptr;
+            if (row == 0) {
+                int kept = 0, left_out = 0, window = 0;
+                for (const auto& c : copies.list) (c.window ? window : c.kept ? kept : left_out)++;
+                std::printf("  %s copies of traffic and pedestrians: %d kept, %d left out by the layout rule, %d drawn by the window"
+                            "\n",
+                            v.name.c_str(), kept, left_out, window);
+            }
             o.mirror = true;
             builder.build(tval.ram.data(), o, mirror);
             layer = std::max({layer, scene.stats.max_layer, mirror.stats.max_layer});
@@ -1592,6 +1719,36 @@ int run_depth_views(const World& world, Teleporter& teleporter, Validator& tval,
                 SceneRaster::draw_rgb(*sp, static_cast<float>(sc), rw, rh, 0, static_cast<float>(vy0), painter);
                 SceneRaster::draw_rgb_depth(*sp, static_cast<float>(sc), rw, rh, 0, static_cast<float>(vy0), exact, ze, false);
                 SceneRaster::draw_rgb_depth(*sp, static_cast<float>(sc), rw, rh, 0, static_cast<float>(vy0), gpu, zg, true);
+            }
+            if (row == 0) {
+                // Ring each copy the rule left out (in view, ahead) where it would have stood.
+                ringed = gpu;
+                const float cx = static_cast<float>(static_cast<int16_t>(tval.ram[(static_cast<size_t>(kData) << 4) + 0x3169] |
+                                                                         tval.ram[(static_cast<size_t>(kData) << 4) + 0x316A] << 8));
+                const float cy = static_cast<float>(static_cast<int16_t>(tval.ram[(static_cast<size_t>(kData) << 4) + 0x316B] |
+                                                                         tval.ram[(static_cast<size_t>(kData) << 4) + 0x316C] << 8));
+                int shown = 0;
+                for (const auto& c : copies.list) {
+                    if (c.window || c.kept || c.view_z < 16) continue;
+                    const float px = (cx + c.view_x * 256 / c.view_z) * static_cast<float>(sc);
+                    const float py = (cy + c.view_y * 256 / c.view_z - static_cast<float>(vy0)) * static_cast<float>(sc);
+                    // Only where it would have shown: on screen, nothing nearer in front of its base.
+                    const int bx = static_cast<int>(px), by = static_cast<int>(py) - 2 * sc;
+                    if (bx < 0 || by < 0 || bx >= rw || by >= rh || zg[static_cast<size_t>(by * rw + bx)] > 1.05f / c.view_z) continue;
+                    ++shown;
+                    const float rad = std::clamp(80.0f * 256 / c.view_z * static_cast<float>(sc), 4.0f, 40.0f);
+                    for (int a = 0; a < 96; ++a) {
+                        const float t = static_cast<float>(a) * 6.2831853f / 96;
+                        for (float dr = 0; dr < 2.5f; dr += 0.5f) {
+                            const int xx = static_cast<int>(px + (rad + dr) * std::cos(t)), yy = static_cast<int>(py - rad * 0.5f + (rad + dr) * std::sin(t));
+                            if (xx >= 0 && yy >= 0 && xx < rw && yy < rh) ringed[static_cast<size_t>(yy * rw + xx)] = 0xFF2020;
+                        }
+                    }
+                }
+                std::printf("  %s copies left out that would have shown (in view, not hidden): %d\n", v.name.c_str(), shown);
+                char rname[160];
+                std::snprintf(rname, sizeof rname, "%s_replicas_%s.png", label.c_str(), v.name.c_str());
+                write_png(out_dir / rname, rw, rh, ringed);
             }
             const int oy = row * (h + gap);
             for (int yy = 0; yy < h; ++yy) {
@@ -1669,7 +1826,7 @@ int main(int argc, char* argv[]) {
     uint32_t seed = 1989;
     bool recheck = false;
     std::string label = "drive";
-    double scene_from = -1, scene_to = -1, bench_from = -1, bench_to = -1;
+    double scene_from = -1, scene_to = -1, bench_from = -1, bench_to = -1, watch_from = -1, watch_to = -1;
     std::vector<double> scene_shots;
     int scene_scale = 6;
     bool scene_depth = false, scene_off = false;
@@ -1768,6 +1925,11 @@ int main(int argc, char* argv[]) {
             png_every = std::atoi(argv[++i]);
         } else if (a == "--png-over" && v) {
             png_over = std::atof(argv[++i]);
+        } else if (a == "--replica-watch" && v) {
+            const std::string r = argv[++i];
+            const size_t c = r.find(':');
+            watch_from = std::atof(r.substr(0, c).c_str());
+            watch_to = c == std::string::npos ? watch_from : std::atof(r.substr(c + 1).c_str());
         } else if ((a == "--scene-compare" || a == "--scene-bench") && v) {
             const std::string r = argv[++i];
             const size_t c = r.find(':');
@@ -2000,7 +2162,7 @@ int main(int argc, char* argv[]) {
         std::printf("map_topdown.png written (%.0f ms)\n",
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
-    const bool scene_mode = scene_from >= 0 || bench_from >= 0 || !scene_shots.empty();
+    const bool scene_mode = scene_from >= 0 || bench_from >= 0 || watch_from >= 0 || !scene_shots.empty();
     const bool at_race_frame = bridge_check || sky_views || horizon_dump || depth_views;
     if (val_from < 0 && teleports == 0 && !scene_mode && frame_shots.empty() && !at_race_frame) {
         return 0;
@@ -2048,6 +2210,8 @@ int main(int argc, char* argv[]) {
     sc.scale = scene_scale;
     sc.depth = scene_depth;
     sc.depth_off = scene_off;
+    sc.watch_from = watch_from;
+    sc.watch_to = watch_to;
     if (scene_mode) {
         sc.log.open(out_dir / (label + "_scene.txt"));
         sc.install();
@@ -2073,7 +2237,7 @@ int main(int argc, char* argv[]) {
     }
 
     double end_s = std::max(val_to, teleports > 0 || at_race_frame ? teleport_at : 0.0) + 0.5;
-    end_s = std::max({end_s, scene_to + 0.5, bench_to + 0.5, scene_shots.empty() ? 0.0 : scene_shots.back() + 1.0,
+    end_s = std::max({end_s, scene_to + 0.5, bench_to + 0.5, watch_to + 0.5, scene_shots.empty() ? 0.0 : scene_shots.back() + 1.0,
                       frame_shots.empty() ? 0.0 : *std::max_element(frame_shots.begin(), frame_shots.end()) + 0.1});
     const uint64_t end_ms = static_cast<uint64_t>((seconds > 0 ? seconds : end_s) * 1000);
     size_t next = 0, next_poke = 0, next_frame_shot = 0;

@@ -107,9 +107,10 @@ TEST(enhanced_lane_lines_real_city) {
     CHECK(!lanes->find(6200, 4320, 90).has_value());
 }
 
-// Placed in the right lane 3 degrees off due north (41 s), throttle held, no steering: the original drifts
-// left across the road; with Lane Centering the heading comes back to north and the car to the lane's
-// centre, at most 3 degrees a second.
+// Placed in the right lane (41 s), throttle held, no steering. 3 degrees off due north, the original
+// drifts left across the road; with Lane Centering the heading comes back to north a degree at a time
+// (three turns, never back) and the car to the lane's centre. 20 units off the centre, heading north:
+// it glides over without turning at all.
 TEST(enhanced_lane_centering_real_game) {
     const fs::path dir = game_dir();
     if (!have_game(dir)) {
@@ -117,10 +118,11 @@ TEST(enhanced_lane_centering_real_game) {
     }
     struct Result {
         int y = 0, heading = 0;
-        double max_rate = 0;
+        int turns = 0, reversals = 0, heading_changes = 0;
+        double max_glide = 0;
         bool lane_seen = false;
     };
-    const auto drive = [&](bool centering) {
+    const auto drive = [&](bool centering, uint16_t heading, uint16_t y) {
         Result r;
         auto m = boot(dir);
         if (!m) {
@@ -130,9 +132,21 @@ TEST(enhanced_lane_centering_real_game) {
         if (centering) {
             driving.set_lanes(city_lanes(*m));
         }
-        driving.on_frame = [&r](const Driving::Telemetry& t) {
-            r.max_rate = std::max(r.max_rate, std::fabs(t.assist_rate));
+        int last_heading = -1, last_dir = 0;
+        driving.on_frame = [&](const Driving::Telemetry& t) {
+            if (static_cast<double>(t.t_ns) < 41.05e9) {
+                return;
+            }
+            r.max_glide = std::max(r.max_glide, std::fabs(t.lane_glide));
             r.lane_seen = r.lane_seen || t.lane;
+            r.turns = t.assist_turns;
+            if (last_heading >= 0 && t.heading != last_heading) {
+                ++r.heading_changes;
+                const int dir = ((t.heading - last_heading + 540) % 360 - 180) > 0 ? 1 : -1;
+                r.reversals += last_dir != 0 && dir != last_dir;
+                last_dir = dir;
+            }
+            last_heading = t.heading;
         };
         struct Key {
             double at;
@@ -159,8 +173,8 @@ TEST(enhanced_lane_centering_real_game) {
                 m->key(keys[next].sc);
             }
             if (ms == 41'000) {
-                vette::game::wr16(m->memory(), kDataSeg, 0x2D37, 4320);
-                vette::game::wr16(m->memory(), kDataSeg, 0x2D3B, 357);
+                vette::game::wr16(m->memory(), kDataSeg, 0x2D37, y);
+                vette::game::wr16(m->memory(), kDataSeg, 0x2D3B, heading);
             }
             m->run_for(1'000'000);
         }
@@ -168,14 +182,22 @@ TEST(enhanced_lane_centering_real_game) {
         r.heading = vette::game::rd16(m->memory(), kDataSeg, 0x2D3B);
         return r;
     };
-    const Result off = drive(false), on = drive(true);
+    const vette::game::DrivingTuning tuning;
+    const Result off = drive(false, 357, 4320), on = drive(true, 357, 4320), glide = drive(true, 0, 4300);
     std::printf("  hands-off at 357 degrees from y 4320: original ends at y %d heading %d; lane centering at y %d "
-                "heading %d (fastest correction %.1f deg/s)\n",
-                off.y, off.heading, on.y, on.heading, on.max_rate);
+                "heading %d (%d turns, %d reversals); from y 4300 heading 0: y %d, %d heading changes, glide up "
+                "to %.1f units/s\n",
+                off.y, off.heading, on.y, on.heading, on.turns, on.reversals, glide.y, glide.heading_changes,
+                glide.max_glide);
     CHECK(off.y < 4224);  // across the centre line
     CHECK_EQ(off.heading, 357);
     CHECK(on.lane_seen);
     CHECK_EQ(on.heading, 0);
-    CHECK(std::abs(on.y - 4320) <= 8);
-    CHECK(on.max_rate <= vette::game::DrivingTuning{}.lane_max_rate + 1e-6);
+    CHECK(std::abs(on.y - 4320) <= 4);
+    CHECK(on.turns <= 3);  // (the first may come before 41.05 s)
+    CHECK_EQ(on.reversals, 0);
+    CHECK_EQ(glide.heading_changes, 0);
+    CHECK_EQ(glide.heading, 0);
+    CHECK(std::abs(glide.y - 4320) <= 4);
+    CHECK(glide.max_glide > 0 && glide.max_glide <= tuning.lane_centre_rate + 1e-9);
 }

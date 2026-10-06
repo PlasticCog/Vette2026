@@ -16,10 +16,11 @@
 //    flies under gravity, without steering or traction, its nose (and the cockpit view) following its
 //    flight path, until it meets the ground again. A hard landing is reported (on_hard_landing) for the
 //    landing thud.
-// Lane Centering: while the wheel is centred, a slight heading correction (a few degrees a second at
-// most) toward the direction and centre of the lane the car is in, found from the road's lane markings
-// (LaneMap, built from the extracted city: enhanced/lanes.h). Any steering suspends it at once; it stays
-// off on the freeway.
+// Lane Centering: while the wheel is centred, the lane the car is in (found from the road's lane
+// markings: LaneMap, built from the extracted city, enhanced/lanes.h) guides it gently: the heading
+// lines up with the lane's direction a degree at a time, a few times a second at most, and the car
+// glides sideways toward the lane's centre a few units a second (no heading change for that, so the
+// view doesn't swing). Any steering suspends it at once; it stays off on the freeway.
 // Both: the original rounds each frame's step down on both axes (3009:3CE7), so a car a degree off an
 // axis creeps sideways one way and not at all the other. The sideways part of what the rounding loses
 // is carried over instead, so the car goes where it points (the speed along the road is unchanged).
@@ -27,12 +28,14 @@
 // Per-second quantities are scaled by the game's own frame rate (DS:2CD3), so the feel doesn't change
 // with the emulated PC's speed. The tuning constants are DrivingTuning's members.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "host/machine.h"
@@ -53,25 +56,28 @@ struct DrivingTuning {
     float drift_scrub = 5.0f;      // speed lost per second, per degree of slip (units/s^2); double on rough ground
 
     // Jumps (world units: 1 unit is about 3 inches; speed 16 units/s is 3 mph).
-    float gravity = 128.7f;        // units/s^2: 9.81 m/s^2
-    float lift_off = 25.0f;        // units/s: how much faster than the car the ground may fall away before
-                                   // the car leaves it (the suspension). Higher: fewer, smaller jumps
-    float jump_min_speed = 450.0f; // units/s (84 mph): below this the car always keeps to the ground
+    float gravity = 115.0f;        // units/s^2: about 0.9 g, a little floaty (128.7 would be 9.81 m/s^2)
+    float lift_off = 0.0f;         // units/s the suspension takes off the car's climb at a take-off. Higher:
+                                   // fewer, smaller jumps (0: it flies wherever the road drops away from
+                                   // its path by more than a unit)
+    float jump_min_speed = 267.0f; // units/s (50 mph): below this the car always keeps to the ground
     float hard_landing = 45.0f;    // units/s downward relative to the ground: a hard landing (thud)
     float air_pitch_rate = 20.0f;  // degrees per second the nose follows the flight path
     float air_pitch_max = 12.0f;   // degrees
     float air_view_max = 10.0f;    // degrees the cockpit view tilts with the nose in flight (0: level)
 
-    // Lane centering. More assist: raise lane_max_rate (and the gains); less: lower them.
-    // The assist steers toward the lane's direction plus a small angle toward its centre, at most
-    // lane_max_rate degrees a second.
-    float lane_max_rate = 3.0f;        // degrees per second of heading correction, at most
-    float lane_heading_gain = 1.0f;    // per second: how quickly a heading error is corrected
-    float lane_offset_gain = 0.25f;    // degrees toward the centre per unit off it (lanes are 64 units wide)
-    float lane_max_correction = 4.0f;  // degrees: the most it angles toward the centre
-    float lane_tolerance = 6.0f;       // units: this close to the centre it only keeps the lane's direction
-    float lane_max_angle = 15.0f;      // degrees: only this close to the lane's direction
-    float lane_min_speed = 60.0f;    // units/s (11 mph)
+    // Lane centering. The heading only lines up with the lane's direction (whole degrees, like the
+    // roads); the centring is a sideways glide. More assist: raise lane_align_rate and lane_centre_rate;
+    // less: lower them (lane_centre_rate 0: direction only).
+    float lane_align_rate = 3.0f;     // degrees per second: one 1-degree turn at most every 1/rate s
+    float lane_resume_delay = 0.4f;   // seconds the wheel must be centred before the assist resumes
+    float lane_centre_gain = 0.6f;    // per second: sideways speed per unit off the centre (eases in)
+    float lane_centre_rate = 10.0f;   // units/s: the fastest sideways glide (lanes are 64 units wide)
+    float lane_centre_angle = 2.0f;   // degrees: and never faster than a path this far off the lane's
+                                      // direction would drift at the car's speed
+    float lane_centre_slack = 2.0f;   // units: this close to the centre it doesn't glide
+    float lane_max_angle = 15.0f;     // degrees: only this close to the lane's direction
+    float lane_min_speed = 60.0f;     // units/s (11 mph)
 };
 
 // Sets the DrivingTuning member called `name` (as spelled above); false if there is none.
@@ -104,6 +110,27 @@ public:
 private:
     std::vector<LaneLine> lines_;
     std::vector<std::vector<uint32_t>> cells_;  // line indices per cell (cx * kCells + cy)
+};
+
+// Lane Centering's decisions for one frame, while the assist acts (hands off, on a marked road): pure,
+// so tests can drive it without the game. Turns the heading toward the lane's direction a degree at a
+// time, and asks for a sideways glide toward the lane's centre.
+class LaneKeeper {
+public:
+    explicit LaneKeeper(const DrivingTuning& tuning) : tuning_(tuning) {}
+    struct Step {
+        int turn = 0;       // -1, 0 or +1 degree for the heading now
+        int error = 0;      // the lane's direction (whole degrees) minus the heading
+        double glide = 0;   // units/s sideways toward the centre, along the lane's right (+) or left (-)
+    };
+    // `dt`: this frame's length. Call every frame (with `fix` nullopt off the marked roads) so the time
+    // between turns counts.
+    Step update(const std::optional<LaneMap::Fix>& fix, int heading, double speed, double dt);
+
+private:
+    const DrivingTuning& tuning_;
+    double align_wait_ = 1e9;  // seconds since the last turn
+    int target_ = -1;          // the lane's direction in whole degrees, kept unless it moves 0.75 away
 };
 
 class Driving {
@@ -144,8 +171,11 @@ public:
         int heading = 0, travel = 0, pitch = 0, speed = 0, steer = 0;
         double slip = 0;       // degrees, facing minus travel direction
         bool skid = false;     // the skid flag (sound)
-        bool lane = false;     // a lane was found (lane centering)
-        double lane_offset = 0, lane_error = 0, assist_rate = 0;  // units, degrees, degrees/s
+        bool lane = false;     // a lane was found and the assist is acting (lane centering)
+        double lane_offset = 0;  // units: the lane centre's position across the car (+ = right)
+        int lane_error = 0;      // degrees: the lane's direction (whole degrees) minus the heading
+        double lane_glide = 0;   // units/s: the sideways glide toward the centre (+ = right)
+        int assist_turns = 0;    // 1-degree heading turns the assist has made
         int landings = 0, hard_landings = 0, jumps = 0;
         double last_impact = 0;  // units/s, the last landing's
     };
@@ -185,6 +215,13 @@ private:
     bool landed_ = false;    // landed on the last player step
     double z_ = 0, vz_ = 0, pitch_ = 0, launch_pitch_ = 0, air_time_ = 0;
     int ground_prev_ = 0;
+    // The ground's heights over the last few frames (time, z), for its climb rate over kClimbWindowNs.
+    std::array<std::pair<uint64_t, int>, 16> ground_history_{};
+    size_t ground_history_n_ = 0;
+    // On the ground: the path the car would fly on had it left the ground (its suspension's lift_off
+    // taken off), from the last frame the ground kept up with it.
+    bool free_path_ = false;
+    double free_z_ = 0, free_vz_ = 0;
     double x_prev_ = 0, y_prev_ = 0;
     uint64_t last_ns_ = 0;
     int speed_before_ = 0;   // before this frame's drivetrain step
@@ -194,7 +231,10 @@ private:
     uint64_t step_ns_ = 0;
 
     // Lane centering.
-    double assist_ = 0;  // fractional degrees carried over
+    LaneKeeper keeper_{tuning_};
+    double hands_off_ = 0;      // seconds the wheel has been centred (and the assist could act)
+    double glide_x_ = 0, glide_y_ = 0;  // this frame's sideways glide (units/s, world axes)
+    double shift_x_ = 0, shift_y_ = 0;  // ... and its fractions of a unit carried over
 
     Telemetry tm_;
 };

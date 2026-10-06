@@ -67,6 +67,17 @@ constexpr uint16_t kHelicopter = 0x2ACF;      // b: FFh in the helicopter view
 constexpr double kPi = 3.14159265358979323846;
 constexpr uint64_t kGapNs = 400'000'000;      // no player frame for this long: start the state afresh
 constexpr double kTeleport = 600;             // units moved in one frame: the game placed the car
+// The ground's heights are whole units, so its climb measured frame to frame wobbles by a unit a frame
+// (30 units/s at 30 frames a second). On the ground the car's vz is the climb over this window, and it
+// takes off only when the ground is more than kHeightStep below the path it would fly on.
+constexpr uint64_t kClimbWindowNs = 100'000'000;
+constexpr double kHeightStep = 1;             // units
+// A change of the ground's height in one frame beyond what a slope gives (a quarter of the distance
+// moved, about 14 degrees, plus kJoltSlack): a step, or the original placing the car (a crash, a single
+// frame of the next cell's height at a ramp's foot). The car then takes the ground's height as the original
+// does, and the jump state starts afresh, so such a frame can never launch it.
+constexpr double kJoltSlope = 0.25;
+constexpr double kJoltSlack = 4;              // units
 
 double wrap180(double a) {
     a = std::fmod(a + 180.0, 360.0);
@@ -108,11 +119,12 @@ bool set_tuning(DrivingTuning& t, std::string_view name, float value) {
         {"air_pitch_rate", &DrivingTuning::air_pitch_rate},
         {"air_pitch_max", &DrivingTuning::air_pitch_max},
         {"air_view_max", &DrivingTuning::air_view_max},
-        {"lane_max_rate", &DrivingTuning::lane_max_rate},
-        {"lane_heading_gain", &DrivingTuning::lane_heading_gain},
-        {"lane_offset_gain", &DrivingTuning::lane_offset_gain},
-        {"lane_max_correction", &DrivingTuning::lane_max_correction},
-        {"lane_tolerance", &DrivingTuning::lane_tolerance},
+        {"lane_align_rate", &DrivingTuning::lane_align_rate},
+        {"lane_resume_delay", &DrivingTuning::lane_resume_delay},
+        {"lane_centre_gain", &DrivingTuning::lane_centre_gain},
+        {"lane_centre_rate", &DrivingTuning::lane_centre_rate},
+        {"lane_centre_angle", &DrivingTuning::lane_centre_angle},
+        {"lane_centre_slack", &DrivingTuning::lane_centre_slack},
         {"lane_max_angle", &DrivingTuning::lane_max_angle},
         {"lane_min_speed", &DrivingTuning::lane_min_speed},
     };
@@ -264,6 +276,9 @@ void Driving::exact_step() {
     if (!ready() || rd16(m, kData, kVehicle) != 0 || rd8(m, kData, kHighway)) {
         return;  // another vehicle, or the freeway (its own coordinates and lanes)
     }
+    const int dx0 = s16(rd16(m, kData, kStepDx)), dy0 = s16(rd16(m, kData, kStepDy));
+    int dx = dx0, dy = dy0;
+
     // The original rounds each step's dx and dy down (3CE7), so a car a degree or two off an axis
     // creeps sideways one way at a unit a frame and not at all the other way. Carry the sideways part
     // of what the rounding lost over to later frames instead: the car goes where it points. (The part
@@ -274,28 +289,43 @@ void Driving::exact_step() {
         lateral_ = 0;
     }
     step_ns_ = now;
-    if (d == 0) {
-        return;
+    if (d != 0) {
+        const double h = s16(rd16(m, kData, kTravel)) * kPi / 180;
+        const double along = d * std::cos(s16(rd16(m, kData, kTravelPitch)) * kPi / 180);
+        const double nx = -std::sin(h), ny = std::cos(h);  // the travel direction's right
+        lateral_ += (along * std::cos(h) - dx) * nx + (along * std::sin(h) - dy) * ny;
+        lateral_ = std::clamp(lateral_, -3.0, 3.0);
+        if (std::fabs(lateral_) >= 1) {
+            // A unit along the axis nearest the sideways direction.
+            const bool on_x = std::fabs(nx) >= std::fabs(ny);
+            const double n = on_x ? nx : ny;
+            const int unit = (lateral_ > 0) == (n > 0) ? 1 : -1;
+            (on_x ? dx : dy) += unit;
+            lateral_ -= unit * n;
+        }
     }
-    const double h = s16(rd16(m, kData, kTravel)) * kPi / 180;
-    const double along = d * std::cos(s16(rd16(m, kData, kTravelPitch)) * kPi / 180);
-    const double nx = -std::sin(h), ny = std::cos(h);  // the travel direction's right
-    const int dx = s16(rd16(m, kData, kStepDx)), dy = s16(rd16(m, kData, kStepDy));
-    lateral_ += (along * std::cos(h) - dx) * nx + (along * std::sin(h) - dy) * ny;
-    lateral_ = std::clamp(lateral_, -3.0, 3.0);
-    if (std::fabs(lateral_) < 1) {
-        return;
-    }
-    // A unit along the axis nearest the sideways direction.
-    const bool on_x = std::fabs(nx) >= std::fabs(ny);
-    const double n = on_x ? nx : ny;
-    const int unit = (lateral_ > 0) == (n > 0) ? 1 : -1;
-    if (on_x) {
-        wr16(m, kData, kStepDx, u16(dx + unit));
+
+    // Lane Centering's glide toward the lane's centre (lane_assist), whole units at a time; the smooth
+    // renderer blends them between game frames.
+    if (glide_x_ != 0 || glide_y_ != 0) {
+        const double dt = frame_dt();
+        shift_x_ += glide_x_ * dt;
+        shift_y_ += glide_y_ * dt;
+        const int ix = static_cast<int>(shift_x_), iy = static_cast<int>(shift_y_);  // toward zero
+        shift_x_ -= ix;
+        shift_y_ -= iy;
+        dx += ix;
+        dy += iy;
     } else {
-        wr16(m, kData, kStepDy, u16(dy + unit));
+        shift_x_ = shift_y_ = 0;
     }
-    lateral_ -= unit * n;
+
+    if (dx != dx0) {
+        wr16(m, kData, kStepDx, u16(dx));
+    }
+    if (dy != dy0) {
+        wr16(m, kData, kStepDy, u16(dy));
+    }
 }
 
 double Driving::frame_dt() const {
@@ -309,6 +339,7 @@ void Driving::heading_update(Cpu& c) {
     }
     // A new frame (the sound dispatcher, which reads flying(), has run).
     landed_ = false;
+    glide_x_ = glide_y_ = 0;  // lane_assist sets it again while it acts
     if (airborne_ && (rd8(machine_.memory(), kData, kHighway) || machine_.emulated_ns() - last_ns_ > kGapNs)) {
         // On the freeway (the game sets its own heights there) or after a pause: back on the ground.
         airborne_ = false;
@@ -429,27 +460,55 @@ void Driving::after_ground() {
     if (gap || speed == 0) {
         slip_ = 0;  // a stopped car (a crash) sets off straight
     }
+    const bool jolt = std::fabs(static_cast<double>(ground - ground_prev_)) >
+                      kJoltSlope * std::fabs(static_cast<double>(speed)) * dt + kJoltSlack;
     if (gap || !options_.improved) {
         valid_ = true;
         airborne_ = false;
         z_ = ground;
         vz_ = 0;
         pitch_ = ground_pitch;
+    } else if (jolt && !airborne_) {
+        z_ = ground;
+        vz_ = 0;
+        pitch_ = ground_pitch;
+        free_path_ = false;
+        ground_history_n_ = 0;
     } else {
-        const double ground_vz = (ground - ground_prev_) / dt;
+        const double ground_vz = (ground - ground_prev_) / dt;  // this frame's (for landings)
+        // The climb over about kClimbWindowNs (at least the last frame).
+        double climb = ground_vz;
+        for (size_t i = ground_history_n_; i-- > 0;) {
+            const auto& [t, z] = ground_history_[i];
+            if (now - t >= kClimbWindowNs || i == 0) {
+                climb = (ground - z) / (static_cast<double>(now - t) / 1e9);
+                break;
+            }
+        }
         if (!airborne_) {
-            // On the ground the car rises and falls with it. When the ground drops away faster than the
-            // suspension can follow (over a crest at speed), the car keeps its vertical speed and flies.
-            if (speed >= tuning_.jump_min_speed && vz_ - ground_vz > tuning_.lift_off) {
+            // On the ground the car rises and falls with it. When the ground drops away below the path the
+            // car would fly on (over a crest at speed, the suspension's lift_off taken off), it flies.
+            if (free_path_) {
+                free_vz_ -= tuning_.gravity * dt;
+                free_z_ += free_vz_ * dt;
+            }
+            if (speed >= tuning_.jump_min_speed && free_path_ && ground < free_z_ - kHeightStep) {
                 airborne_ = true;
-                vz_ -= tuning_.lift_off;
+                free_path_ = false;
+                z_ = free_z_;
+                vz_ = free_vz_;
                 air_time_ = 0;
                 launch_pitch_ = pitch_;
                 ++tm_.jumps;
             } else {
                 z_ = ground;
-                vz_ = ground_vz;
+                vz_ = climb;
                 pitch_ = ground_pitch;
+                if (!free_path_ || ground >= free_z_) {  // the ground keeps up with the car
+                    free_path_ = true;
+                    free_z_ = ground;
+                    free_vz_ = vz_ - tuning_.lift_off;
+                }
             }
         }
         if (airborne_) {
@@ -461,7 +520,7 @@ void Driving::after_ground() {
             const double target = std::clamp<double>(path, -tuning_.air_pitch_max, tuning_.air_pitch_max);
             const double rate = tuning_.air_pitch_rate * dt;
             pitch_ += std::clamp(target - pitch_, -rate, rate);
-            if (z_ <= ground) {
+            if (z_ <= ground && !jolt) {  // (not on a frame the ground jolts: see kJoltSlope)
                 const double impact = ground_vz - vz_;
                 airborne_ = false;
                 landed_ = true;
@@ -481,6 +540,17 @@ void Driving::after_ground() {
             wr16(m, kData, kPitch, u16(static_cast<int>(std::lround(pitch_))));
         }
     }
+    if (gap || airborne_ || !options_.improved) {
+        free_path_ = false;
+    }
+    if (gap) {
+        ground_history_n_ = 0;
+    }
+    if (ground_history_n_ == ground_history_.size()) {
+        std::move(ground_history_.begin() + 1, ground_history_.end(), ground_history_.begin());
+        --ground_history_n_;
+    }
+    ground_history_[ground_history_n_++] = {now, ground};
     ground_prev_ = ground;
     x_prev_ = x;
     y_prev_ = y;
@@ -504,43 +574,73 @@ void Driving::after_ground() {
     if (on_frame) on_frame(tm_);
 }
 
+LaneKeeper::Step LaneKeeper::update(const std::optional<LaneMap::Fix>& fix, int heading, double speed, double dt) {
+    Step step;
+    const double interval = tuning_.lane_align_rate > 0 ? 1.0 / tuning_.lane_align_rate : 0;
+    align_wait_ = std::min(align_wait_ + dt, std::max(interval, dt));
+    if (!fix) {
+        target_ = -1;
+        return step;
+    }
+    // The heading lines up with the lane's direction in whole degrees (the roads run at whole degrees,
+    // a few diagonals at 153.4), one degree at a time. The target is kept while the measured direction
+    // stays within 0.75 degrees of it, so the heading never flips a degree and back.
+    if (target_ < 0 || std::fabs(wrap180(fix->direction - target_)) > 0.75) {
+        target_ = wrap360(static_cast<int>(std::lround(fix->direction)));
+    }
+    step.error = static_cast<int>(std::lround(wrap180(target_ - heading)));
+    if (step.error != 0 && interval > 0 && align_wait_ >= interval) {
+        step.turn = step.error > 0 ? 1 : -1;
+        align_wait_ = 0;
+    }
+    // Toward the lane's centre by a sideways glide, easing in as it gets there: no heading change, so
+    // the view doesn't swing back and forth. (A lane off a whole degree, 153.4, drifts the car a little
+    // across it; the glide takes that up too.)
+    const double off = fix->offset;
+    if (std::fabs(off) > tuning_.lane_centre_slack) {
+        const double cap = std::min<double>(tuning_.lane_centre_rate,
+                                            speed * std::sin(tuning_.lane_centre_angle * kPi / 180));
+        step.glide = std::clamp<double>(
+            tuning_.lane_centre_gain * (off - std::copysign(tuning_.lane_centre_slack, off)), -cap, cap);
+    }
+    return step;
+}
+
 void Driving::lane_assist() {
     Memory& m = machine_.memory();
+    const double dt = frame_dt();
     tm_.lane = false;
-    tm_.assist_rate = 0;
+    tm_.lane_glide = 0;
     const int speed = s16(rd16(m, kData, kSpeed));
     const int steer = s16(rd16(m, kData, kSteer));
     if (!lanes_ || steer != 0 || std::fabs(slip_) >= 2 || speed < tuning_.lane_min_speed ||
         rd8(m, kData, kHighway) || rd8(m, kData, kStartLight) < 5 || rd8(m, kData, kReverse)) {
-        assist_ = 0;  // the player steers (or there's nothing to follow): hands off at once
+        hands_off_ = 0;  // the player steers (or there's nothing to follow): hands off at once
+        keeper_.update(std::nullopt, 0, 0, dt);
         return;
+    }
+    hands_off_ += dt;
+    if (hands_off_ < tuning_.lane_resume_delay) {
+        keeper_.update(std::nullopt, 0, 0, dt);
+        return;  // a tap of the keys is left to take effect first
     }
     const int heading = rd16(m, kData, kHeading);
     const auto fix = lanes_->find(absolute(m, kX, kRow), absolute(m, kY, kCol), heading, tuning_.lane_max_angle);
+    const LaneKeeper::Step step = keeper_.update(fix, heading, speed, dt);
     if (!fix) {
-        assist_ = 0;
         return;
     }
-    // Toward the lane's direction, angled a little toward its centre. (The heading is whole degrees and
-    // the original's move rounds down, so a car angled 1 degree off may not move sideways at all: the
-    // angle toward the centre has to reach 2 degrees to get it there.)
-    const double error = wrap180(fix->direction - heading);
-    const double toward = std::fabs(fix->offset) <= tuning_.lane_tolerance
-                              ? 0
-                              : std::clamp<double>(tuning_.lane_offset_gain * fix->offset, -tuning_.lane_max_correction,
-                                                   tuning_.lane_max_correction);
-    const double rate = std::clamp<double>(tuning_.lane_heading_gain * (error + toward), -tuning_.lane_max_rate,
-                                           tuning_.lane_max_rate);
-    assist_ += rate * frame_dt();
-    const int turn = static_cast<int>(assist_);  // whole degrees; the rest carries over
-    assist_ -= turn;
-    if (turn != 0) {
-        wr16(m, kData, kHeading, u16(wrap360(heading + turn)));
+    if (step.turn != 0) {
+        wr16(m, kData, kHeading, u16(wrap360(heading + step.turn)));
+        ++tm_.assist_turns;
     }
+    const double dir = fix->direction * kPi / 180;
+    glide_x_ = step.glide * -std::sin(dir);  // along the lane's right; exact_step moves the car
+    glide_y_ = step.glide * std::cos(dir);
     tm_.lane = true;
     tm_.lane_offset = fix->offset;
-    tm_.lane_error = error;
-    tm_.assist_rate = rate;
+    tm_.lane_error = step.error;
+    tm_.lane_glide = step.glide;
 }
 
 } // namespace vette::game

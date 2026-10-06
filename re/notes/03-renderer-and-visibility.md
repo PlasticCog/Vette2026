@@ -397,6 +397,24 @@ against the original's frames shows 0.002 % of the view's pixels structurally di
    show. The repetition (same car every 8192 units) becomes visible at long range, so offer it alongside a "bound
    cells only" mode that draws each entity once at the cell the visibility pass bound it to. Either way the draw pass
    must not write the list cells.
+   Done as `SceneOptions::replicas` (Maximum with the depth buffer), with one restriction. The pattern ignores the
+   roads: the AI drives every car as if each cell had two-way roads along its west (y 0..256) and north (x 1792..2048)
+   edges (notes 04 §7), and the lists cover whole big tiles, so most copies would land on the water, in parks, on the
+   concrete strips round the bay, on one-way streets (29548 / 29380 instead of 29464 / 29296: no yellow centre line)
+   or on a bridge's approach, driving off-road or against the lane. A copy is therefore kept only in a cell where the
+   road along the entity's way is the one its moves were made for. The way: for a car whose route closes (its cell
+   moves get back to the start: the city's loops) both edge roads of every cell of the loop, which doesn't change as
+   the car goes round, so a copy that is kept stays kept; else (the bridges' straight routes) its position, target
+   and next target; for a pedestrian its 0x11A square. Under each point of the way: the ground-level (within 16
+   units of the cell's ground) flat faces of road (colour 8; pavement 7 or 8 for pedestrians) of every list 1 object
+   and course compound piece, by their bounds, named by routine and cell height. Of the entity's 4×4-pattern cells in
+   every big tile with its list, those with the most of the way on road were made for it, and their commonest roads
+   (all of the commonest, on a tie) are the ones a copy needs. No camera or window in it: no copy pops when the
+   window's binding moves. The window keeps the original's binding (the emulated game collides with what it binds),
+   so where it binds an entity in a cell the rule refuses, the entity appears at the window's edge as in the original.
+   About three quarters of the copies are left out (water and parks most of them; on the README drive, of 14 cars'
+   1344 pattern cells, 948 are off road along the loop and 159 on other roads); vette_world `--replica-watch` counts
+   them and the copies that appear or vanish in view, `--depth-views` rings them.
 6. Horizon: draw it first as now. With far geometry the painted skyline (bridges, downtown) will double up. Options:
    re-project the panorama at the true angular scale, or treat it as a sky/hill backdrop behind a draw distance of ~25000.
    Done as the latter: the Hills skyline (above). The backdrop still scrolls at its own 8 px/degree.

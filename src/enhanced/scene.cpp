@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
 #include <emmintrin.h>
 #endif
@@ -284,6 +286,58 @@ struct SceneBuilder::Impl {
     std::vector<ModelDraw> vehicle_models;
     std::vector<std::pair<uint32_t, uint32_t>> vehicle_model_range;  // per vehicle
     std::vector<uint16_t> seen_entities;
+    void observe_window(uint16_t e, int cell, int32_t x, int32_t y, int16_t z) {
+        const V3 v = to_camera(x, y, z);
+        opt->observer->copy({e, cell, x, y, v.x, v.y, v.z, true, true});
+    }
+
+    // Replicas (SceneOptions::replicas). The traffic AI drives its lanes as if every cell had the same
+    // roads (two-way, along the cell's edges, notes 04 section 7), and a pedestrian walks its square as if on
+    // the same pavement; the original's window shows them wherever it looks. A copy is kept only in a cell
+    // where the road along the entity's way (relative to the cell) is the one in the cells its moves were
+    // made for: of all the cells of its pattern, those where most of the way is on road (pavement for a
+    // pedestrian), and of these the commonest road (choose_replicas). It doesn't depend on the camera, so a
+    // copy stays as long as its way does: a car's whole loop is checked (rotating round it changes nothing).
+    // The road: every object's flat faces of road (colour 8) or pavement (7 or 8) at ground level (within
+    // kGroundLevel of its cell's ground: not a freeway deck), by the object's bounds; listed per cell.
+    static constexpr int kGroundLevel = 16;
+    struct RoadBox {
+        float x0, y0, x1, y1;
+        uint64_t kind;  // the object's routine and its cell's height
+        bool road;      // else pavement only
+    };
+    int roads_course = -1;
+    std::vector<RoadBox> road_boxes;
+    std::vector<uint32_t> road_start, road_index;  // per cell (CSR): the boxes over it
+    void prepare_roads();
+    // What lies under a point: 0 nothing (for traffic: no road), else the sum of its objects' kinds.
+    uint64_t road_at(int32_t wx, int32_t wy, bool traffic) const {
+        if (wx < 0 || wy < 0 || wx >= world.cells_x() * kCellSize || wy >= world.cells_y() * kCellSize) return 0;
+        const size_t c = static_cast<size_t>(wx / kCellSize * world.cells_y() + wy / kCellSize);
+        uint64_t k = 0;
+        const float x = static_cast<float>(wx), y = static_cast<float>(wy);
+        for (uint32_t i = road_start[c]; i < road_start[c + 1]; ++i) {
+            const RoadBox& b = road_boxes[road_index[i]];
+            if ((b.road || !traffic) && x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1) k += b.kind;
+        }
+        return k;
+    }
+    // An entity's copies: which cells of its pattern keep one (per big tile, the 16 cells of its class), for
+    // the state it was decided in.
+    struct ReplicaChoice {
+        uint64_t state = 0;
+        std::array<uint16_t, 25> keep{};  // per big tile, a bit per class cell (i * 4 + j: cell (c + 4i, c + 4j))
+    };
+    std::unordered_map<uint16_t, ReplicaChoice> replica_choices;
+    std::vector<std::array<int32_t, 2>> samples;
+    struct PatternCell {
+        uint64_t signature = 0;  // what lies under the way, in order
+        int score = 0;           // points of the way on road (pavement)
+        int tile = 0, bit = 0;
+    };
+    std::vector<PatternCell> pattern;
+    const ReplicaChoice& choose_replicas(uint16_t e, bool traffic, uint16_t ec, uint16_t list, const uint16_t* lists, int tiles,
+                                         int cols);
     std::unique_ptr<Tracer> tracer;
     bool tracer_loaded = false;  // holds this build's memory
     void load_tracer() {
@@ -2034,6 +2088,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
             entity_xyz(e, x, y, z);
             add_vehicle(e, ram.d16(e), cell, base_x + (x & 0x7FF), base_y + (y & 0x7FF), z, true);
             vehicles.back().window = true;
+            if (opt->observer && slot >= 3) observe_window(e, cell, base_x + (x & 0x7FF), base_y + (y & 0x7FF), z);
         }
         // List B (34D6): pedestrians, positions already cell-relative.
         const uint16_t lb = ram.d16(static_cast<uint16_t>(kListB + 2 * bt));
@@ -2048,6 +2103,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
             int16_t z;
             entity_xyz(e, x, y, z);
             add_vehicle(e, ram.d16(e), cell, base_x + static_cast<int16_t>(x), base_y + static_cast<int16_t>(y), z, true);
+            if (opt->observer) observe_window(e, cell, base_x + static_cast<int16_t>(x), base_y + static_cast<int16_t>(y), z);
         }
     }
     if (!fallback) return;
@@ -2067,7 +2123,9 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
     // A replica isn't placed in the window's cells: there, the original's own binding (above) has drawn
     // the cell's traffic and pedestrians already.
     std::vector<uint16_t> replicated;
-    const auto place = [&](uint16_t e, int row, int col, uint16_t ec, bool cell_relative, bool replica) {
+    if (opt->replicas) prepare_roads();
+    const auto place = [&](uint16_t e, int row, int col, uint16_t ec, bool cell_relative, bool replica,
+                           const ReplicaChoice* choice) {
         if (row < 0 || col < 0 || row >= rows || col >= cols) return;
         const int gx = row * 16 + (ec >> 4 & 15), gy = col * 16 + (ec & 15);
         if (!in_radius(gx, gy)) return;
@@ -2078,11 +2136,22 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
         int16_t z;
         entity_xyz(e, x, y, z);
         const int32_t bx = gx * kCellSize, by = gy * kCellSize;
-        if (cell_relative) {
-            add_vehicle(e, ram.d16(e), gx * kMapCells + gy, bx + static_cast<int16_t>(x), by + static_cast<int16_t>(y), z, false);
-        } else {
-            add_vehicle(e, ram.d16(e), gx * kMapCells + gy, bx + (x & 0x7FF), by + (y & 0x7FF), z, false);
+        const int32_t wx = cell_relative ? bx + static_cast<int16_t>(x) : bx + (x & 0x7FF);
+        const int32_t wy = cell_relative ? by + static_cast<int16_t>(y) : by + (y & 0x7FF);
+        if (choice) {
+            ++out->stats.replicas;
+            const int k = (ec >> 6 & 3) * 4 + (ec >> 2 & 3);
+            const bool keep = (choice->keep[static_cast<size_t>(row * cols + col)] >> k & 1) != 0;
+            if (opt->observer) {
+                const V3 v = to_camera(wx, wy, z);
+                opt->observer->copy({e, gx * kMapCells + gy, wx, wy, v.x, v.y, v.z, keep, false});
+            }
+            if (!keep) {
+                ++out->stats.replicas_dropped;
+                return;
+            }
         }
+        add_vehicle(e, ram.d16(e), gx * kMapCells + gy, wx, wy, z, false);
     };
     // The list entries of every big tile; an entity shared by several lists is drawn once.
     for (int bt = 0; bt < rows * cols; ++bt) {
@@ -2099,24 +2168,26 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
                 if (seen(e)) continue;
                 seen_entities.push_back(e);
                 if (slot == 0) {
-                    place(e, ram.s16(kPlayerRow), ram.s16(kPlayerCol), ec, false, false);
+                    place(e, ram.s16(kPlayerRow), ram.s16(kPlayerCol), ec, false, false, nullptr);
                 } else if (slot == 1 && opponent_ok) {
-                    place(e, opp_tile / 5, opp_tile % 5, ec, false, false);
+                    place(e, opp_tile / 5, opp_tile % 5, ec, false, false, nullptr);
                 } else if (slot == 2 && chase) {
-                    place(e, chase_tile / 5, chase_tile % 5, ec, false, false);
+                    place(e, chase_tile / 5, chase_tile % 5, ec, false, false, nullptr);
                 }
                 continue;
             }
             if (slot == 3 && chase) continue;
             if (ram.d16(static_cast<uint16_t>(e + 0x1C)) == 0) continue;
             if (opt->replicas) {
-                // Every cell of its pattern (but the window's: place()).
+                // Every cell of its pattern (but the window's: place()) laid out along its route as the cells
+                // its route was made for (choose_replicas).
                 if (std::find(replicated.begin(), replicated.end(), e) != replicated.end()) continue;
                 replicated.push_back(e);
+                const ReplicaChoice& choice = choose_replicas(e, true, ec, la, lists_a, rows * cols, cols);
                 for (int t = 0; t < rows * cols; ++t) {
                     if (lists_a[t] != la) continue;
                     for (int c = 0; c < 256; ++c) {
-                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), false, true);
+                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), false, true, &choice);
                     }
                 }
             } else {
@@ -2134,7 +2205,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
                         best = t;
                     }
                 }
-                if (best >= 0) place(e, best / cols, best % cols, ec, false, false);
+                if (best >= 0) place(e, best / cols, best % cols, ec, false, false, nullptr);
             }
         }
     }
@@ -2151,15 +2222,252 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
                 const uint16_t ec = ram.d16(static_cast<uint16_t>(at + 2));
                 if (std::find(replicated.begin(), replicated.end(), e) != replicated.end()) continue;
                 replicated.push_back(e);
+                const ReplicaChoice& choice = choose_replicas(e, false, ec, lb, lists_b, rows * cols, cols);
                 for (int t = 0; t < rows * cols; ++t) {
                     if (lists_b[t] != lb) continue;
                     for (int c = 0; c < 256; ++c) {
-                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), true, true);
+                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), true, true, &choice);
                     }
                 }
             }
         }
     }
+}
+
+// The road boxes (see RoadBox), for the course being raced.
+void SceneBuilder::Impl::prepare_roads() {
+    if (roads_course == state.course && !road_start.empty()) return;
+    roads_course = state.course;
+    replica_choices.clear();
+    road_boxes.clear();
+    const auto mix = [](uint64_t h) {
+        h ^= h >> 33;
+        h *= 0xFF51AFD7ED558CCDull;
+        h ^= h >> 33;
+        h *= 0xC4CEB9FE1A85EC53ull;
+        h ^= h >> 33;
+        return h;
+    };
+    // Per routine: the height of its most detailed variant's flat road face (colour 8) and pavement face
+    // (7 or 8), if it has one.
+    constexpr int32_t kNone = INT32_MIN;
+    std::vector<std::array<int32_t, 2>> surface(world.routines.size(), {kNone, kNone});
+    for (size_t r = 0; r < world.routines.size(); ++r) {
+        const Routine& rt = world.routines[r];
+        if (rt.compound || rt.variants.empty()) continue;
+        for (const Part& part : rt.variants.front().parts) {
+            if (part.source == Part::Source::Model || part.rotation != Part::Rotation::None) continue;
+            for (const Prim& pr : part.prims) {
+                if (pr.kind == Prim::Kind::Line || pr.count < 3 || pr.colour.dithered()) continue;
+                const int c = pr.colour.base();
+                if (c != 7 && c != 8) continue;
+                const int32_t z0 = part.verts[part.indices[pr.first]].z + part.origin.z;
+                bool flat = true;
+                for (uint32_t k = 1; k < pr.count && flat; ++k) flat = part.verts[part.indices[pr.first + k]].z + part.origin.z == z0;
+                if (!flat) continue;
+                if (c == 8 && surface[r][0] == kNone) surface[r][0] = z0;
+                if (surface[r][1] == kNone) surface[r][1] = z0;
+            }
+        }
+    }
+    // Each object once: a structure several cells list at one place is one object.
+    std::unordered_set<uint64_t> placed;
+    const auto add = [&](int routine, int32_t x, int32_t y, int32_t dz, int elevation) {
+        if (routine < 0) return;
+        const RoutineData& rd = routines[static_cast<size_t>(routine)];
+        const auto& sf = surface[static_cast<size_t>(routine)];
+        const bool road = sf[0] != kNone && std::abs(sf[0] + dz) <= kGroundLevel;
+        const bool paved = sf[1] != kNone && std::abs(sf[1] + dz) <= kGroundLevel;
+        if ((!road && !paved) || rd.lo.x > rd.hi.x) return;
+        const uint64_t id = mix(static_cast<uint64_t>(routine) << 40 ^ static_cast<uint64_t>(static_cast<uint32_t>(x)) << 20 ^
+                                static_cast<uint32_t>(y)) ^ mix(static_cast<uint32_t>(dz) + 0x9E3779B97F4A7C15ull);
+        if (!placed.insert(id).second) return;
+        RoadBox b;
+        b.x0 = static_cast<float>(x) + rd.lo.x;
+        b.y0 = static_cast<float>(y) + rd.lo.y;
+        b.x1 = static_cast<float>(x) + rd.hi.x;
+        b.y1 = static_cast<float>(y) + rd.hi.y;
+        b.kind = mix(static_cast<uint64_t>(routine) << 16 ^ static_cast<uint64_t>(elevation & 0xFF) ^ 0x5EED000000ull) | 1;
+        b.road = road;
+        if (b.x1 > b.x0 && b.y1 > b.y0) road_boxes.push_back(b);
+    };
+    for (int gx = 0; gx < world.cells_x(); ++gx) {
+        for (int gy = 0; gy < world.cells_y(); ++gy) {
+            const Cell& c = world.cell(gx, gy);
+            for (const Entry& e : types[c.type].list1) add(e.routine, gx * kCellSize + e.dx, gy * kCellSize + e.dy, e.dz, c.elevation);
+        }
+    }
+    if (state.course >= 1 && state.course <= 4) {
+        for (const Piece& pc : courses[static_cast<size_t>(state.course)].pieces) {
+            const int gx = std::clamp(pc.x / kCellSize, 0, world.cells_x() - 1), gy = std::clamp(pc.y / kCellSize, 0, world.cells_y() - 1);
+            const int elevation = world.cell(gx, gy).elevation;
+            add(pc.routine, pc.x, pc.y, pc.z - elevation * kElevationStep, elevation);
+        }
+    }
+    // By cell (CSR).
+    const size_t cells = static_cast<size_t>(world.cells_x()) * static_cast<size_t>(world.cells_y());
+    road_start.assign(cells + 1, 0);
+    const auto cover = [&](const RoadBox& b, auto&& f) {
+        const int x0 = std::max(0, static_cast<int>(std::floor(b.x0 / kCellSize)));
+        const int x1 = std::min(world.cells_x() - 1, static_cast<int>(std::ceil(b.x1 / kCellSize)) - 1);
+        const int y0 = std::max(0, static_cast<int>(std::floor(b.y0 / kCellSize)));
+        const int y1 = std::min(world.cells_y() - 1, static_cast<int>(std::ceil(b.y1 / kCellSize)) - 1);
+        for (int gx = x0; gx <= x1; ++gx) {
+            for (int gy = y0; gy <= y1; ++gy) f(static_cast<size_t>(gx * world.cells_y() + gy));
+        }
+    };
+    for (const RoadBox& b : road_boxes) cover(b, [&](size_t c) { ++road_start[c + 1]; });
+    for (size_t c = 0; c < cells; ++c) road_start[c + 1] += road_start[c];
+    road_index.assign(road_start[cells], 0);
+    std::vector<uint32_t> fill(road_start.begin(), road_start.end() - 1);
+    for (size_t i = 0; i < road_boxes.size(); ++i) cover(road_boxes[i], [&](size_t c) { road_index[fill[c]++] = static_cast<uint32_t>(i); });
+}
+
+// Which cells of an entity's pattern keep a copy. Its way, relative to its cell: for a traffic entity whose
+// route is a loop (its cell moves, BE86 / D150, get back to where they started), the roads of every cell of
+// the loop; else its position, its target and its next target; for a pedestrian its square (0x11A a side,
+// either way round, BB72). Of all the cells of its pattern (its class in
+// every big tile with its list), those where most of the way is on road (pavement for a pedestrian) are the
+// cells it was made for; the copies are where the road along the way is the commonest of theirs (the roads
+// under the way, in order; with a tie, each of the commonest).
+const SceneBuilder::Impl::ReplicaChoice& SceneBuilder::Impl::choose_replicas(uint16_t e, bool traffic, uint16_t ec,
+                                                                              uint16_t list, const uint16_t* lists, int tiles,
+                                                                              int cols) {
+    samples.clear();
+    const int32_t x = traffic ? (ram.d16(static_cast<uint16_t>(e + 2)) & 0x7FF) : ram.s16(static_cast<uint16_t>(e + 2));
+    const int32_t y = traffic ? (ram.d16(static_cast<uint16_t>(e + 4)) & 0x7FF) : ram.s16(static_cast<uint16_t>(e + 4));
+    uint64_t state_hash = (static_cast<uint64_t>(ec & 0x33) << 16 ^ list ^ static_cast<uint64_t>(roads_course) << 24 ^
+                           (traffic ? 0 : 1ull << 30)) * 0x9E3779B97F4A7C15ull;
+    for (int t = 0; t < tiles; ++t) state_hash ^= lists[t] == list ? 1ull << (32 + t) : 0;
+    bool positional = true;  // the decision depends on where in its cell it is
+    if (traffic) {
+        const uint16_t path = ram.d16(static_cast<uint16_t>(e + 0x1A));
+        const int32_t tx = ram.s16(path), ty = ram.s16(static_cast<uint16_t>(path + 2));
+        const int32_t nx = ram.s16(static_cast<uint16_t>(path + 8)), ny = ram.s16(static_cast<uint16_t>(path + 10));
+        // The route's moves from where it is in it, once round (if they get back to where they started).
+        const uint16_t from = ram.d16(static_cast<uint16_t>(e + 0x18));
+        std::array<std::array<int, 2>, 16> moves{};
+        int count = 0, sum_x = 0, sum_y = 0;
+        for (uint16_t route = from; count < 16; ++count) {
+            if (ram.d16(route) == 0xFFFF) route = ram.d16(static_cast<uint16_t>(route + 2));
+            if (count > 0 && route == from) break;
+            moves[static_cast<size_t>(count)] = {ram.s16(route) / kCellSize, ram.s16(static_cast<uint16_t>(route + 2)) / kCellSize};
+            sum_x += moves[static_cast<size_t>(count)][0];
+            sum_y += moves[static_cast<size_t>(count)][1];
+            route = static_cast<uint16_t>(route + 4);
+        }
+        // A loop: its cells, relative to the entity's. The moves start from its cell or from its next target's
+        // (by where it is in its turn): the one whose loop passes through both.
+        const int next_cx = nx >= 0 ? nx / kCellSize : -1 - (-nx - 1) / kCellSize;
+        const int next_cy = ny >= 0 ? ny / kCellSize : -1 - (-ny - 1) / kCellSize;
+        std::array<std::array<int, 2>, 16> cells{};
+        bool loop = false;
+        if (count < 16 && sum_x == 0 && sum_y == 0) {
+            for (const auto& anchor : {std::array<int, 2>{0, 0}, std::array<int, 2>{next_cx, next_cy}}) {
+                bool own = false, next = false;
+                int at_x = anchor[0], at_y = anchor[1];
+                for (int k = 0; k < count; ++k) {
+                    cells[static_cast<size_t>(k)] = {at_x, at_y};
+                    own |= at_x == 0 && at_y == 0;
+                    next |= at_x == next_cx && at_y == next_cy;
+                    at_x += moves[static_cast<size_t>(k)][0];
+                    at_y += moves[static_cast<size_t>(k)][1];
+                }
+                if (own && next) {
+                    loop = true;
+                    break;
+                }
+            }
+        }
+        if (loop) {
+            // The roads of the loop's cells: along both edges of each (x 1792..2048, y 0..256: notes 04 section 7),
+            // at the middle of each direction's lanes, every 256 units. The same wherever on the loop it is.
+            positional = false;
+            for (int k = 0; k < count; ++k) {
+                const int32_t ox = cells[static_cast<size_t>(k)][0] * kCellSize, oy = cells[static_cast<size_t>(k)][1] * kCellSize;
+                state_hash = (state_hash ^ static_cast<uint64_t>(static_cast<uint32_t>(ox) ^ static_cast<uint32_t>(oy) * 31u)) * 0x100000001B3ull;
+                for (int32_t lane : {64, 192}) {
+                    for (int32_t a = 128; a < kCellSize; a += 256) {
+                        samples.push_back({ox + a, oy + lane});
+                        samples.push_back({ox + kCellSize - 256 + lane, oy + a});
+                    }
+                }
+            }
+        } else {
+            // Else (the bridges' routes, straight on): from where it is past its next target.
+            const auto step_to = [&](int32_t ax, int32_t ay, int32_t bx, int32_t by) {
+                const int32_t dx = bx - ax, dy = by - ay;
+                const int n = std::max(1, static_cast<int>(std::max(std::abs(dx), std::abs(dy)) / 128));  // a point every 128 units
+                for (int k = 1; k <= n; ++k) samples.push_back({ax + dx * k / n, ay + dy * k / n});
+            };
+            samples.push_back({x, y});
+            step_to(x, y, tx, ty);
+            step_to(tx, ty, nx, ny);
+            state_hash ^= (static_cast<uint64_t>(static_cast<uint16_t>(nx)) << 16 ^ static_cast<uint16_t>(ny)) * 0xC2B2AE3D27D4EB4Full;
+        }
+    } else {
+        constexpr int32_t kSide = 0x11A;
+        for (int i = -2; i <= 2; ++i) {
+            for (int j = -2; j <= 2; ++j) samples.push_back({x + i * kSide / 2, y + j * kSide / 2});
+        }
+    }
+    // The decision stands while its way is the same (and, unless that is a loop, while it stays in the same
+    // square of 256 units).
+    if (positional) {
+        state_hash ^= (static_cast<uint64_t>(static_cast<uint32_t>(x >> 8)) << 8 ^ static_cast<uint32_t>(y >> 8)) * 0xD6E8FEB86659FD93ull;
+    }
+    if (replica_choices.size() > 4096) replica_choices.clear();
+    ReplicaChoice& choice = replica_choices[e];
+    if (choice.state == state_hash) return choice;
+    choice.state = state_hash;
+    choice.keep.fill(0);
+    // Each cell of the pattern: what lies under the way, and how much of it is road.
+    pattern.clear();
+    int best = 1;
+    for (int t = 0; t < tiles; ++t) {
+        if (lists[t] != list) continue;
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                const int gx = (t / cols) * 16 + (ec >> 4 & 3) + 4 * i, gy = (t % cols) * 16 + (ec & 3) + 4 * j;
+                const int32_t cx0 = gx * kCellSize, cy0 = gy * kCellSize;
+                PatternCell pc;
+                pc.tile = t;
+                pc.bit = i * 4 + j;
+                for (const auto& q : samples) {
+                    const uint64_t k = road_at(cx0 + q[0], cy0 + q[1], traffic);
+                    pc.signature = (pc.signature ^ k) * 0x100000001B3ull + 0x9E3779B97F4A7C15ull;
+                    pc.score += k != 0 ? 1 : 0;
+                }
+                best = std::max(best, pc.score);
+                pattern.push_back(pc);
+            }
+        }
+    }
+    // The commonest roads of those with the most road (every one as common; no copy where none of the way is
+    // on road).
+    std::sort(pattern.begin(), pattern.end(), [](const PatternCell& a, const PatternCell& b) {
+        return a.score != b.score ? a.score > b.score : a.signature < b.signature;
+    });
+    size_t end = 0, most = 0;
+    while (end < pattern.size() && pattern[end].score == best) ++end;
+    for (size_t k = 0; k < end;) {
+        size_t n = k;
+        while (n < end && pattern[n].signature == pattern[k].signature) ++n;
+        most = std::max(most, n - k);
+        k = n;
+    }
+    for (size_t k = 0; k < end;) {
+        size_t n = k;
+        while (n < end && pattern[n].signature == pattern[k].signature) ++n;
+        if (n - k == most) {
+            for (size_t m = k; m < n; ++m) {
+                auto& keep = choice.keep[static_cast<size_t>(pattern[m].tile)];
+                keep = static_cast<uint16_t>(keep | 1u << pattern[m].bit);
+            }
+        }
+        k = n;
+    }
+    return choice;
 }
 
 // Runs each vehicle's own draw routine on the scratch copy (its model, angles and height over the

@@ -89,7 +89,7 @@ code is the DOS 1.1 build's (the bytes below) and removes everything if not.
 | `3009:0ED9` | `E8 EC 0F` | speed before the drivetrain (kept in the air) |
 | `3009:0EDC` | `E8 59 08` | in the air: speed restored, step = speed / frame rate (no traction) |
 | `4160:037F` | `83 3E 4B 2C 00` | **replaced**: the drift model (RETF emulated) |
-| `3009:17AD` | `8B 16 61 32` | the step's sideways rounding carried over (player only: `[2C51]` = 0) |
+| `3009:17AD` | `8B 16 61 32` | the step's sideways rounding carried over; Lane Centering's glide (player only: `[2C51]` = 0) |
 | `3009:1858` | `EB 2D` | the vertical motion: z and pitch after the original set them from the ground |
 
 Improved Driving uses all of them; Lane Centering alone uses 01A5, 17AD and 1858 (the last only for
@@ -133,11 +133,20 @@ At 1858 the original has just set z `2D39` and pitch `2D3D` from the ground. The
 velocity:
 
 - **On the ground** z and pitch are the ground's, and `vz` = the ground's rate of climb.
-- **Take-off** when `speed ≥ jump_min_speed` (450, 84 mph) and the ground falls away faster than the
-  car: `vz − ground_vz > lift_off` (25 units/s, the suspension). The car leaves with `vz − lift_off`.
+- **Take-off** when `speed ≥ jump_min_speed` (267, 50 mph; 450 until the user asked for jumps from 50 mph)
+  and the ground has fallen more than a unit (kHeightStep) below the path the car would fly on: on the
+  ground the layer carries that path from the last frame the ground kept up with the car (its climb, over
+  0.1 s, less `lift_off`, now 0; 25 at first), under gravity. Heights are whole units, so the climb
+  measured frame to frame wobbles by a unit a frame (30 units/s at 30 fps); the first rule, `vz −
+  ground_vz > lift_off`, took that wobble on a steep ramp for the ground falling away (one-frame hops),
+  and a single frame of a wrong ground height (the original placing the car at a ramp's foot) launched
+  the car thousands of units up. A change of height in one frame beyond a slope's (`kJoltSlope` of the
+  distance moved plus `kJoltSlack`) now sets the car on the ground as the original does, and in flight
+  such a frame isn't taken for a landing. Measured over the Great Highway ramp (10 fps): no jump at
+  49 mph, 6 in and 0.25 s at 57 mph, 9 in at 59, 18 in and 0.5 s at 80, 9.5 ft and 1.5 s at 151. The car leaves with `vz − lift_off`.
   A 7° ramp climbs at 0.12·speed, so its top would launch from 203; the minimum speed keeps ordinary
   crests at ordinary speeds on the ground.
-- **In the air**: `vz −= gravity·dt` (128.7 units/s², 9.81 m/s²), `z += vz·dt`; the nose eases
+- **In the air**: `vz −= gravity·dt` (115 units/s², about 0.9 g for a little more hang time; 128.7 = 9.81 m/s² at first), `z += vz·dt`; the nose eases
   toward the flight path `atan(vz/speed)` at `air_pitch_rate` (20°/s, within ±`air_pitch_max` 12°);
   the cockpit view (`2C79`, only in the car) tilts by the nose's change since take-off (at most
   `air_view_max` 10°); the wheel doesn't turn the car, the travel direction stays the take-off's, the
@@ -150,7 +159,8 @@ velocity:
   over 600 units (the game placed the car), the car is back on the ground.
 
 The hill on the Great Highway northbound: cell (22,2) ramps from 0 to 224 over x 45056–46900, then
-cell (23,2) onwards is flat at 224. At full speed (810, 152 mph; 9–10 frames a second):
+cell (23,2) onwards is flat at 224. At full speed (810, 152 mph; 9–10 frames a second), with the first tuning
+(gravity 128.7, lift_off 25):
 
 | t (s) | x | z | ground | vz | pitch | |
 |---|---|---|---|---|---|---|
@@ -188,32 +198,47 @@ intersection 7238, sloped and diagonal strips (76F8 135°, 76E9 45°, 7734/7716 
 (signed distance along the car's right). Both within 40..100 of each other: the midpoint; else the one
 within 72: half a lane (32) from it. The direction is theirs (averaged).
 
-**The assist** (at 01A5, before the heading update), only while the wheel is at 0, the race is on
-(start light `2AD8` = 5), in the city (`2AD4` = 0), moving forward at `lane_min_speed` (60) or more,
-on the ground and not sliding (|slip| < 2°):
+**The assist** (at 01A5, before the heading update, and 17AD), only while the wheel is at 0 and has
+been for `lane_resume_delay` (0.4 s, so a tap of the keys takes effect first), the race is on (start
+light `2AD8` = 5), in the city (`2AD4` = 0), moving forward at `lane_min_speed` (60) or more, on the
+ground and not sliding (|slip| < 2°). Any steering drops it at once; a lane change past 15° finds no
+lane until the car straightens; on the freeway it is off (the game's own freeway steering is untouched).
+The decisions are `LaneKeeper` (pure, so `driving_lane_keeper_smooth` drives it without the game):
 
-```
-error  = lane direction − heading                       (degrees)
-toward = 0 if |offset| ≤ lane_tolerance (6 units), else clamp(lane_offset_gain · offset, ±lane_max_correction)
-rate   = clamp(lane_heading_gain · (error + toward), ±lane_max_rate)        (degrees per second)
-```
+- **Direction.** The target is the lane's direction rounded to a whole degree, kept while the measured
+  direction stays within 0.75° of it (the roads run at 0, 45, 90, 135° and their opposites, and
+  153.4°: 7716/7734). While the heading differs, it turns 1° toward it, at most once every
+  `1 / lane_align_rate` s (3°/s). It only ever turns toward the target, so it never flips a degree and
+  back.
+- **Centre.** No heading change: the car glides sideways along the lane's right normal at
+  `lane_centre_gain · (offset − slack)` units/s (0.6/s, easing in as it arrives), at most
+  `lane_centre_rate` (10 units/s) and never faster than a path `lane_centre_angle` (2°) off the lane
+  would drift at the current speed, and not within `lane_centre_slack` (2 units) of the centre. The
+  glide's fractions of a unit accumulate per axis and go into the step at 17AD (`DS:3261`/`3263`), whole
+  units at a time, before the original adds it with its own carry, cell update and collisions; the
+  smooth renderer blends the position between game frames, so it reads as a glide, and the scenery far
+  ahead doesn't move. On the 153.4° roads the heading stays at 153 and the glide takes up the 0.43° drift
+  (about 7 units off the centre at speed 400).
 
-`lane_heading_gain` 1/s, `lane_offset_gain` 0.25°/unit, `lane_max_correction` 4°, `lane_max_rate`
-3°/s. The heading is whole degrees: the rate accumulates and turns the car a degree at a time. Any
-steering drops the assist (and its accumulator) at once; a lane change past 15° finds no lane until the
-car straightens. On the freeway it is off (the game's own freeway steering is untouched).
+The first version steered toward the centre (up to 4° off the lane's direction) and lined up with the
+unrounded direction; every centring was a turn out and a turn back in 1° steps (each a 4.5-pixel jump
+of the horizon in the race view), and on the 153.4° roads the heading flipped between 153 and 154 for
+good. User feedback on 0.1.5: "choppy". Measured (Great Highway northbound, hands-off, throttle held,
+placed at 41 s; `lane_stats` harness: per frame from 41 to 60 s):
 
-Measured (Great Highway northbound, placed at y 4320 heading 357 at 41 s, throttle held, no
-steering; `enhanced_lane_centering_real_game`):
-
-| | original | Lane Centering |
+| Start | 0.1.5: heading turns (reversals), time to within 4 units of the centre | now |
 |---|---|---|
-| 12 MHz (10 fps) | creeps left 10 units/s: across the centre line at 48.5 s, two crashes, at the kerb by 54 s | heading 0 by 43.5 s, 6 units off the lane centre |
-| 140 MHz (30 fps) | creeps left 30 units/s: across the centre line at 44 s, off the road at 48.5 s | heading 0 by 43.5 s, 4 units off |
+| 20 units left of centre, heading 0, 10 fps | 6 (1), 4.2 s | **0 turns**, 3.7 s |
+| same, 30 fps | 8 (1), 4.8 s | **0 turns**, 3.8 s |
+| 30 units left, heading 2°, 10 / 30 fps | 6 (1) / 6 (1), 4.6 / 5.5 s | 2 turns (0), 5.2 / 5.4 s |
+| centred, heading 357° | 3 (0) | 3 (0), 0.7–0.8 s |
+| 153.4° road, 15 units off, heading 150 (simulated, 30 s) | 18 (12), still flipping | 3 (0), heading 153 |
 
-Placed 20 units left of centre heading 3: centred within 2 units by 45 s (12 MHz) / 46.5 s (140 MHz).
-Before the sideways rounding fix (section 5) the 30 fps run sat at heading 4° for 10 s without moving
-sideways at all.
+Sideways steps stay at most 1 unit a frame. With the keys tapped (right, then left 1.5 s later, every
+3 s), each tap is unwound a degree every 1/3 s after the 0.4 s pause, as before; those reversals follow
+the taps. Against the original (placed at y 4320 heading 357): the original creeps left (10 units/s at
+10 fps, 30 at 30 fps) across the centre line (48.5 s / 44 s) and off the road; with the assist, heading
+0 within 0.8 s of the placement and 2 units off the centre (`enhanced_lane_centering_real_game`).
 
 ## 7. Untouched when off
 
@@ -235,13 +260,16 @@ cycle counts. `SoundEvents` behaves as before unless `thud_hold` is set (only wi
 - `vette_run --driving improved --driving-log [--tune name=value]... [--poke T:OFF:VAL]`: the car every
   frame (position, height, pitch, facing, travel, slip, speed, wheel, skid; with Improved Driving also
   ground, vz, flight). Lane Centering needs the extracted city, which `vette_run` doesn't link; the
-  enhanced test drives it.
+  enhanced test drives it (and the measurements above came from a scratch harness linking
+  `vette_enhanced`, with the same `Driving`).
 - Tests: `tests/game_driving.cpp`, `tests/enhanced_driving.cpp`.
 
 More drift: lower `drift_onset` (0.75), raise `drift_per_grip` (35) and `drift_max` (25); a quicker
 slide: `drift_build`. Less: the opposite, or `drift_max` 8. Bigger jumps: lower `lift_off` (15) or
-`jump_min_speed`; floatier: lower `gravity`. Less assist: `lane_max_rate` 1.5 (and
-`lane_max_correction` 2); more: `lane_max_rate` 5, `lane_heading_gain` 2.
+`jump_min_speed`; floatier: lower `gravity`. Lane Centering: a gentler or quicker straightening:
+`lane_align_rate` 2 or 4 (degrees a second, in 1° turns); a slower or quicker glide to the centre:
+`lane_centre_rate` 5 or 15 and `lane_centre_gain` 0.3 or 1 (`lane_centre_rate` 0: direction only); it
+waits `lane_resume_delay` after the keys are let go.
 
 ## 9. Open questions
 

@@ -56,6 +56,8 @@ struct Scene {
         int slices = 0;        // freeway road slices drawn (highway mode)
         bool city = false;     // the city was drawn (not a freeway alone)
         int max_layer = 0;     // the highest depth layer used (SceneVertex::depth)
+        int replicas = 0;      // copies of traffic and pedestrians considered (SceneOptions::replicas)
+        int replicas_dropped = 0;  // ... left out: not on the road their moves were made for (SceneOptions::replicas)
         std::array<int, kMaxDepthLayer + 1> layers{};  // primitives per depth layer
     } stats;
 
@@ -67,6 +69,7 @@ struct Scene {
 };
 
 class SceneHook;
+class SceneObserver;
 
 struct SceneOptions {
     // Draw distance: cells around the camera's cell; kMapCells or more draws the whole map.
@@ -94,8 +97,11 @@ struct SceneOptions {
     float min_line_length = 0.5f;
     // Traffic and pedestrians are a pattern that repeats every 4 cells (notes 03, "Traffic"). Off: each
     // entity once, where the original binds it, so a far car jumps when its nearest copy changes, and
-    // pedestrians show only in the original's window. On: every cell of its pattern within the radius,
-    // the window's cells as the original binds them: the whole city populated, nothing popping in.
+    // pedestrians show only in the original's window. On: also every other cell of its pattern within the
+    // radius where the road along the entity's way (a car's loop, a pedestrian's square) is the one its
+    // moves were made for (the commonest of the pattern's cells with the most of the way on road), the
+    // window's cells as the original binds them: the city populated, without cars on the water, off their
+    // road or against their lane. The choice doesn't depend on the camera, so copies don't pop as it moves.
     bool replicas = false;
     // Off: traffic and pedestrians only in the original's window, where the original draws them (they
     // appear as the camera nears). Without a depth buffer, far ones could show through the scenery.
@@ -112,6 +118,8 @@ struct SceneOptions {
     // let `hook` pick each object's variant the way the original's routine does.
     bool original_window = false;
     SceneHook* hook = nullptr;
+    // Validation: told about every copy of traffic and pedestrians considered (SceneObserver).
+    SceneObserver* observer = nullptr;
 
     // The rear-view mirror (draw_mirror_view 3009:0666) instead of the main view, from the same frame:
     // the camera turned round (yaw +180, or +-95 while looking sideways, by DS:2B87), pitch negated,
@@ -136,6 +144,22 @@ public:
     // The variant the original draws (nullptr: nothing), and the yaw, pitch and roll of each of its plain
     // lists, in order (billboards and animations).
     virtual const Variant* choose(const Object& object, std::vector<std::array<int16_t, 3>>& plain_angles) = 0;
+};
+
+// Validation: the traffic and pedestrians the original's window draws, and every copy of them that
+// SceneOptions::replicas considers, kept or left out by the layout rule.
+class SceneObserver {
+public:
+    struct Copy {
+        uint16_t entity = 0;
+        int cell = 0;                  // gx * kMapCells + gy
+        int32_t x = 0, y = 0;          // world position
+        float view_x = 0, view_y = 0, view_z = 0;  // camera space: right, down, ahead (its base)
+        bool kept = false;
+        bool window = false;           // the window's own (always kept)
+    };
+    virtual ~SceneObserver() = default;
+    virtual void copy(const Copy& c) = 0;
 };
 
 // The colour a Colour byte becomes: the default EGA palette, a dithered pair as the average of its two

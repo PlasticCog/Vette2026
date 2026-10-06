@@ -88,16 +88,101 @@ TEST(driving_tuning_names) {
     DrivingTuning t;
     CHECK(vette::game::set_tuning(t, "drift_max", 25));
     CHECK_EQ(static_cast<int>(t.drift_max), 25);
-    CHECK(vette::game::set_tuning(t, "lane_max_rate", 1.5f));
-    CHECK(near(t.lane_max_rate, 1.5));
+    CHECK(vette::game::set_tuning(t, "lane_align_rate", 1.5f));
+    CHECK(near(t.lane_align_rate, 1.5));
     for (const char* name : {"drift_onset", "drift_per_grip", "drift_build", "drift_relax", "drift_sound",
                              "drift_scrub", "gravity", "lift_off", "jump_min_speed", "hard_landing",
-                             "air_pitch_rate", "air_pitch_max", "air_view_max", "lane_heading_gain",
-                             "lane_offset_gain", "lane_max_correction", "lane_tolerance", "lane_max_angle",
-                             "lane_min_speed"}) {
+                             "air_pitch_rate", "air_pitch_max", "air_view_max", "lane_resume_delay",
+                             "lane_centre_gain", "lane_centre_rate", "lane_centre_angle", "lane_centre_slack",
+                             "lane_max_angle", "lane_min_speed"}) {
         CHECK(vette::game::set_tuning(t, name, 1));
     }
     CHECK(!vette::game::set_tuning(t, "grip", 1));
+}
+
+namespace {
+
+// A car driven hands-off by the LaneKeeper alone along a straight marked road: the whole-degree
+// heading it sets, and a sideways glide; it moves exactly where it points. Returns the heading turns
+// and how many of them reversed the one before; `offset_at_end`: the lane centre's offset then.
+struct KeeperRun {
+    int turns = 0, reversals = 0, final_heading = 0;
+    double offset_at_end = 0, max_glide = 0;
+    double centred_at = -1;  // seconds: from here on within the slack (+1) of the centre
+};
+KeeperRun keeper_drive(double road_deg, double start_side, int start_heading, double seconds) {
+    const double r = road_deg * 3.14159265358979323846 / 180;
+    const double ux = std::cos(r), uy = std::sin(r), nx = -uy, ny = ux;  // along, right
+    // Markings 64 apart across the road (dashes 128 long, 128 gaps; a solid centre line), from
+    // (20000, 20000) along the road.
+    std::vector<LaneLine> lines;
+    for (const double side : {-64.0, 0.0, 64.0}) {
+        for (double t = 0; t < 30000; t += 256) {
+            const double len = side == 0 ? 256 : 128;
+            lines.push_back({static_cast<int32_t>(std::lround(20000 + ux * t + nx * side)),
+                             static_cast<int32_t>(std::lround(20000 + uy * t + ny * side)),
+                             static_cast<int32_t>(std::lround(20000 + ux * (t + len) + nx * side)),
+                             static_cast<int32_t>(std::lround(20000 + uy * (t + len) + ny * side))});
+        }
+    }
+    const LaneMap road(std::move(lines));
+    const DrivingTuning tuning;
+    vette::game::LaneKeeper keeper(tuning);
+    // In the lane between the markings at 0 and +64 (centre +32), `start_side` off it.
+    double x = 20000 + ux * 500 + nx * (32 + start_side), y = 20000 + uy * 500 + ny * (32 + start_side);
+    int heading = start_heading, last_turn = 0;
+    const double speed = 400, dt = 1.0 / 15;
+    KeeperRun run;
+    for (int frame = 0; frame < static_cast<int>(seconds / dt); ++frame) {
+        const auto fix = road.find(x, y, heading, tuning.lane_max_angle);
+        const auto step = keeper.update(fix, heading, speed, dt);
+        if (step.turn != 0) {
+            ++run.turns;
+            run.reversals += last_turn != 0 && step.turn != last_turn;
+            last_turn = step.turn;
+            heading = (heading + step.turn + 360) % 360;
+        }
+        const double h = heading * 3.14159265358979323846 / 180;
+        const double dir = fix ? fix->direction * 3.14159265358979323846 / 180 : 0;
+        x += speed * dt * std::cos(h) - step.glide * dt * std::sin(dir);
+        y += speed * dt * std::sin(h) + step.glide * dt * std::cos(dir);
+        run.max_glide = std::max(run.max_glide, std::fabs(step.glide));
+        const double off = fix ? fix->offset : 99;
+        if (std::fabs(off) <= tuning.lane_centre_slack + 1) {
+            if (run.centred_at < 0) run.centred_at = frame * dt;
+        } else {
+            run.centred_at = -1;
+        }
+        run.offset_at_end = off;
+    }
+    run.final_heading = heading;
+    return run;
+}
+
+} // namespace
+
+// Lane Centering's steering: the heading only lines up with the lane, a degree at a time and never
+// back; the centring is a sideways glide. On an axis road, a car parallel to its lane but 20 units off
+// glides over without a single turn; on a diagonal at 153.4 degrees (between whole degrees) the heading
+// settles on 153 without flipping to 154 and back, and the glide takes up the drift.
+TEST(driving_lane_keeper_smooth) {
+    const DrivingTuning tuning;
+    auto run = keeper_drive(0, -20, 0, 10);
+    CHECK_EQ(run.turns, 0);
+    CHECK(run.centred_at >= 0 && run.centred_at < 5);
+    CHECK(run.max_glide <= tuning.lane_centre_rate + 1e-9);
+    run = keeper_drive(0, 20, 356, 10);
+    CHECK_EQ(run.turns, 4);
+    CHECK_EQ(run.reversals, 0);
+    CHECK_EQ(run.final_heading, 0);
+    CHECK(run.centred_at >= 0 && run.centred_at < 6);
+    run = keeper_drive(153.43494882, 15, 150, 30);  // atan2(1, -2): the 7716/7734 strips
+    std::printf("  153.4-degree road: %d turns, %d reversals, heading %d, %.1f units off the centre\n", run.turns,
+                run.reversals, run.final_heading, run.offset_at_end);
+    CHECK_EQ(run.turns, 3);
+    CHECK_EQ(run.reversals, 0);
+    CHECK_EQ(run.final_heading, 153);
+    CHECK(std::fabs(run.offset_at_end) < 8);
 }
 
 namespace {

@@ -778,3 +778,123 @@ TEST(enhanced_scene_depth) {
     const auto sky = depth_range(scene, ega_colour(11));
     CHECK(sky.first == 0 && sky.second == 0);
 }
+
+namespace {
+
+// The copies of traffic and pedestrians SceneOptions::replicas considers, by map cell.
+struct CopyLog : SceneObserver {
+    std::vector<int> kept, dropped, window;
+    void copy(const Copy& c) override { (c.window ? window : c.kept ? kept : dropped).push_back(c.cell); }
+    void clear() { kept.clear(), dropped.clear(), window.clear(); }
+};
+
+} // namespace
+
+TEST(enhanced_scene_replicas_follow_the_roads) {
+    // Big tile (2, 2) is a grid of two-way streets (road along the west and north edge of every cell, as the
+    // traffic AI drives them), but for a park at cell (37, 33) and a different road at (45, 44). A car on a
+    // loop round 2 x 2 cells is copied to every cell of its 4 x 4 pattern whose loop runs on the same roads:
+    // not the one whose loop crosses the park, nor the one whose loop takes the other road.
+    SyntheticWorld sw;
+    const auto quad = [&](uint16_t address, uint8_t colour, int32_t x, int32_t y, int extra_prims) {
+        Routine r;
+        r.address = address;
+        Variant& v = r.variants.emplace_back();
+        Part& p = v.parts.emplace_back();
+        p.source = Part::Source::Packed;
+        p.verts = {{0, 0, 0}, {x, 0, 0}, {x, y, 0}, {0, y, 0}};
+        p.indices = {0, 1, 2, 3, 0, 2};
+        Prim q;
+        q.colour.raw = colour;
+        q.count = 4;
+        p.prims.push_back(q);
+        for (int k = 0; k < extra_prims; ++k) {  // a marking: another road's
+            Prim line;
+            line.kind = Prim::Kind::Line;
+            line.colour.raw = 15;
+            line.first = 4;
+            line.count = 2;
+            p.prims.push_back(line);
+        }
+        v.primitives = static_cast<uint32_t>(p.prims.size());
+        sw.world.routines.push_back(std::move(r));
+    };
+    quad(0x2000, 8, 2048, 256, 0);  // the west edge's road (and the corner)
+    quad(0x2001, 8, 256, 1792, 0);  // the north edge's road
+    quad(0x2002, 8, 256, 1792, 1);  // ... another kind of road there
+    quad(0x2003, 2, 2048, 2048, 0); // a park
+    for (int cx = 32; cx < 48; ++cx) {
+        for (int cy = 32; cy < 48; ++cy) sw.place(cx, cy, 1, {{0x2000, 0, 0, 0}, {0x2001, 1792, 256, 0}}, {});
+    }
+    sw.place(37, 33, 2, {{0x2003, 0, 0, 0}}, {});
+    sw.place(45, 44, 3, {{0x2000, 0, 0, 0}, {0x2002, 1792, 256, 0}}, {});
+    // Its list (big tile 12 only): the player, opponent and chase car slots (a stub), then the car, in cell
+    // (0, 0) of its tile heading north on its cell's north road for the corner of the next cell east.
+    const auto list = uint16_t{0x9100}, stub = uint16_t{0xA100}, car = uint16_t{0xA000}, path = uint16_t{0xA040};
+    const auto route = uint16_t{0xA200}, code = uint16_t{0x7000};
+    sw.ram[(uint32_t{addr::kCodeSeg} << 4) + code] = 0xC3;  // their draw routine: ret
+    for (int slot = 0; slot < 3; ++slot) {
+        sw.w16(static_cast<uint16_t>(list + 4 * slot), stub);
+        sw.w16(static_cast<uint16_t>(list + 4 * slot + 2), 0x00);
+    }
+    sw.w16(static_cast<uint16_t>(list + 12), car);
+    sw.w16(static_cast<uint16_t>(list + 16), 0xFFFF);
+    sw.w16(0xEF5A + 2 * 12, list);
+    sw.w16(stub, code);
+    sw.w16(car, code);
+    sw.w16(car + 0x18, route);
+    sw.w16(car + 0x1A, path);
+    sw.w16(car + 0x1C, 0xFFFF);
+    const int16_t moves[] = {0, 2048, 2048, 0, 0, -2048, -2048, 0};
+    for (int k = 0; k < 8; ++k) sw.w16(static_cast<uint16_t>(route + 2 * k), static_cast<uint16_t>(moves[k]));
+    sw.w16(route + 16, 0xFFFF);
+    sw.w16(route + 18, route);
+    const auto at = [&](uint16_t cell, int16_t x, int16_t y, int16_t tx, int16_t ty, int16_t nx, int16_t ny, int move) {
+        sw.w16(static_cast<uint16_t>(list + 14), cell);
+        sw.w16(car + 2, static_cast<uint16_t>(x));
+        sw.w16(car + 4, static_cast<uint16_t>(y));
+        sw.w16(car + 0x18, static_cast<uint16_t>(route + 4 * move));
+        sw.w16(path, static_cast<uint16_t>(tx));
+        sw.w16(path + 2, static_cast<uint16_t>(ty));
+        sw.w16(path + 8, static_cast<uint16_t>(nx));
+        sw.w16(path + 10, static_cast<uint16_t>(ny));
+    };
+    at(0x00, 1824, 1000, 1824, 2048, 1792, 2080, 0);
+    SceneBuilder builder(sw.world);
+    Scene scene;
+    CopyLog log;
+    SceneOptions o;
+    o.replicas = true;
+    o.observer = &log;
+    builder.build(sw.ram.data(), o, scene);
+    const auto cell = [](int cx, int cy) { return cx * kMapCells + cy; };
+    // The window draws it in its own cell (40, 40); of the other 15 cells of its pattern, 13 keep a copy.
+    CHECK(log.window == std::vector<int>{cell(40, 40)});
+    std::sort(log.dropped.begin(), log.dropped.end());
+    CHECK(log.dropped == (std::vector<int>{cell(36, 32), cell(44, 44)}));
+    CHECK_EQ(log.kept.size(), size_t{13});
+    CHECK_EQ(scene.stats.replicas, 15);
+    CHECK_EQ(scene.stats.replicas_dropped, 2);
+
+    // A cell on along its loop (east, in cell (0, 1), for the corner of the cell north of it): the same
+    // copies, each a cell on.
+    const std::vector<int> before = log.kept;
+    at(0x01, 1900, 100, 1900, 200, 2100, 160, 1);
+    log.clear();
+    builder.build(sw.ram.data(), o, scene);
+    CHECK(log.window == std::vector<int>{cell(40, 41)});
+    std::sort(log.dropped.begin(), log.dropped.end());
+    CHECK(log.dropped == (std::vector<int>{cell(36, 33), cell(44, 45)}));
+    std::vector<int> moved;
+    for (const int c : before) moved.push_back(c + 1);
+    std::sort(moved.begin(), moved.end());
+    std::sort(log.kept.begin(), log.kept.end());
+    CHECK(log.kept == moved);
+
+    // Without replicas: no copies, nothing considered.
+    o.replicas = false;
+    log.clear();
+    builder.build(sw.ram.data(), o, scene);
+    CHECK(log.kept.empty() && log.dropped.empty());
+    CHECK_EQ(scene.stats.replicas, 0);
+}

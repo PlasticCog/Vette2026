@@ -105,7 +105,7 @@ Hills is made for DOS VETTE! 1.1's pictures; with others, the backdrop stays pai
 **Driving.** Two options change how your car drives. They're off by default, and the Classic preset turns
 them off. With **Improved** driving, your car drifts a little through fast corners, its view pointing into
 the turn as it slides wide, and it leaves the ground over the crest of a hill when it's going fast enough
-(from about 84 mph), landing with the Mac version's thud. **Lane centering** gently steers your car toward
+(from about 50 mph), landing with the Mac version's thud. **Lane centering** gently steers your car toward
 its lane's direction and centre, found from the city's lane markings, and lets go as soon as you steer.
 Either one also evens out the original's rounding of sideways movement, which made a car a degree off
 straight creep left but never right; speeds and race times are unchanged. `--driving improved` and

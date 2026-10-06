@@ -1,8 +1,11 @@
 #pragma once
 // The emulated PC that hosts VETTE.EXE: 286-class CPU, EGA, 8259 PIC, 8253 PIT, keyboard
-// controller, PC speaker, game port, and the host BIOS/DOS. Emulated time advances only inside
-// run_for(), in whole CPU cycles, so a run is deterministic for a given input sequence.
+// controller, PC speaker, game port, serial ports (once a two-player link is attached), and the host
+// BIOS/DOS. Emulated time advances only inside run_for(), in whole CPU cycles, so a run is
+// deterministic for a given input sequence (and, with a link, for the same bytes arriving at the same
+// emulated times).
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -19,7 +22,9 @@
 #include "host/memory.h"
 #include "host/pic.h"
 #include "host/pit.h"
+#include "host/serial_link.h"
 #include "host/speaker.h"
+#include "host/uart.h"
 
 namespace vette::host {
 
@@ -60,6 +65,15 @@ public:
     void joystick_axes(float x, float y);  // -1..1
     void joystick_buttons(uint8_t mask) { joy_buttons_ = mask; }
 
+    // The two-player cable (re/notes/12-two-player.md). The first call gives the PC serial ports: COM1
+    // (3F8h, IRQ4) and COM2 (2F8h, IRQ3), listed in the BIOS data area. The link is the cable on the port
+    // the program opened last (wrote DTR on in MCR; COM1 until then); nullptr unplugs it. Bytes are sent
+    // to the link at the end of each run_for(). Never called: no serial ports, exactly as before. The link
+    // must stay valid while attached.
+    void attach_serial(SerialLink* link);
+    bool has_serial() const { return serial_ports_; }
+    const Uart& uart(int com) const { return com_[static_cast<size_t>(com & 1)]; }
+
     // Output.
     void render(Ega::Frame& out) const { ega_.render(out); }
     Bios::Cursor mouse_cursor() const { return bios_.mouse_cursor(); }
@@ -83,6 +97,11 @@ private:
     uint64_t pit_now() const;
     uint64_t cycle_of_pit(uint64_t pit) const;
     void deliver_key();
+    int serial_port(uint16_t port) const;  // 0 = COM1, 1 = COM2, -1 = not a serial port's
+    void service_serial();                  // UARTs advanced to now, their IRQ lines updated
+    void serial_irq(int com);
+    uint64_t serial_next_cycle() const;
+    void serial_bda();
     RealTime wall_clock() const;
     void log_once(const std::string& what);
 
@@ -106,6 +125,14 @@ private:
     uint8_t kbd_data_ = 0;
     bool kbd_full_ = false;
     uint64_t kbd_ready_at_ = 0;  // PIT time the next byte may be delivered
+
+    // Serial ports (attach_serial).
+    bool serial_ports_ = false;
+    std::array<Uart, 2> com_{};
+    std::array<bool, 2> com_irq_{};  // each IRQ line's level as last seen
+    SerialLink* serial_link_ = nullptr;
+    int serial_owner_ = 0;           // the port the link is on
+    uint64_t slice_end_ = 0;         // the cycle the current CPU slice runs to
 
     uint8_t port61_ = 0;
     uint64_t joy_fired_ = 0;

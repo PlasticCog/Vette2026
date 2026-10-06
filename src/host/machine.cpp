@@ -118,6 +118,9 @@ bool Machine::boot(std::string& error) {
     const std::vector<uint8_t> exe((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
     bios_.install();
+    if (serial_ports_) {
+        serial_bda();
+    }
     if (!dos_.load_exe(cpu_, exe, kLoadSegment, "C:\\VETTE.EXE", error)) {
         return false;
     }
@@ -144,7 +147,7 @@ uint64_t Machine::next_event_cycle() const {
     if (!kbd_full_ && !kbd_queue_.empty()) {
         next = std::min(next, cycle_of_pit(kbd_ready_at_));
     }
-    return next;
+    return std::min(next, serial_next_cycle());
 }
 
 uint64_t Machine::cycle_at_ns(uint64_t ns) const {
@@ -173,17 +176,96 @@ void Machine::run_for(uint64_t ns) {
             next_irq0_ = pit_.next_irq0_after(now);
         }
         deliver_key();
+        service_serial();
 
         uint64_t slice_end = std::min(target_cycles_, cycle_of_pit(next_irq0_));
         if (!kbd_full_ && !kbd_queue_.empty()) {
             slice_end = std::min(slice_end, cycle_of_pit(kbd_ready_at_));
         }
+        slice_end = std::min(slice_end, serial_next_cycle());
         const uint64_t at = cpu_.total_cycles();
         slice_end = std::max(slice_end, at + 1);
+        slice_end_ = slice_end;
         cpu_.run(static_cast<int64_t>(slice_end - at));
     }
     const uint64_t now = pit_now();
     speaker_.render(now, config_.audio_rate, audio_);
+    if (serial_ports_) {
+        service_serial();
+        for (Uart& u : com_) {
+            u.flush();
+        }
+    }
+}
+
+// --- Serial ports ----------------------------------------------------------------------------------
+
+namespace {
+constexpr uint16_t kComBase[2] = {0x3F8, 0x2F8};
+constexpr int kComIrq[2] = {4, 3};
+} // namespace
+
+void Machine::attach_serial(SerialLink* link) {
+    if (!serial_ports_) {
+        serial_ports_ = true;
+        serial_bda();
+    }
+    serial_link_ = link;
+    for (size_t i = 0; i < com_.size(); ++i) {
+        com_[i].set_link(static_cast<int>(i) == serial_owner_ ? link : nullptr);
+    }
+}
+
+void Machine::serial_bda() {
+    mem_.write16(0x400, kComBase[0]);
+    mem_.write16(0x402, kComBase[1]);
+    const uint16_t equipment = mem_.read16(0x410);
+    mem_.write16(0x410, static_cast<uint16_t>((equipment & ~0x0E00) | (2 << 9)));  // two serial ports
+}
+
+int Machine::serial_port(uint16_t port) const {
+    if (!serial_ports_) {
+        return -1;
+    }
+    for (int i = 0; i < 2; ++i) {
+        if ((port & 0xFFF8) == kComBase[i]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void Machine::serial_irq(int com) {
+    const auto i = static_cast<size_t>(com);
+    const bool line = com_[i].interrupt();
+    if (line && !com_irq_[i]) {
+        pic_.raise(kComIrq[i]);  // the 8259 sees the rising edge
+    } else if (!line && com_irq_[i]) {
+        pic_.lower(kComIrq[i]);  // gone before it was acknowledged: no interrupt
+    }
+    com_irq_[i] = line;
+}
+
+void Machine::service_serial() {
+    if (!serial_ports_) {
+        return;
+    }
+    const uint64_t ns = emulated_ns();
+    for (int i = 0; i < 2; ++i) {
+        com_[static_cast<size_t>(i)].advance(ns);
+        serial_irq(i);
+    }
+}
+
+uint64_t Machine::serial_next_cycle() const {
+    if (!serial_ports_) {
+        return kNever;
+    }
+    uint64_t next = kNever;
+    for (const Uart& u : com_) {
+        next = std::min(next, cycle_at_ns(u.next_event_ns()));
+    }
+    return next;
 }
 
 void Machine::take_audio(std::vector<int16_t>& out) {
@@ -247,8 +329,16 @@ uint8_t Machine::in8(uint16_t port) {
         return v;
     }
     default:
+        if (const int com = serial_port(port); com >= 0) {
+            const uint8_t v = com_[static_cast<size_t>(com)].read(port & 7, emulated_ns());
+            serial_irq(com);
+            if (serial_next_cycle() < slice_end_) {
+                cpu_.request_stop();  // e.g. RBR read: the next byte is due within this slice
+            }
+            return v;
+        }
         if ((port & 0xFFF8) == 0x3F8 || (port & 0xFFF8) == 0x2F8) {
-            return 0xFF;  // no UART yet (two-player link)
+            return 0xFF;  // no serial ports (no two-player link attached)
         }
         log_once("unhandled port read " + std::to_string(port));
         return 0xFF;
@@ -295,6 +385,19 @@ void Machine::out8(uint16_t port, uint8_t value) {
         joy_fired_ = pit_now();
         break;
     default:
+        if (const int com = serial_port(port); com >= 0) {
+            const auto i = static_cast<size_t>(com);
+            com_[i].write(port & 7, value, emulated_ns());
+            if ((port & 7) == Uart::kMcr && (value & 1) && com != serial_owner_) {
+                serial_owner_ = com;  // the program opened this port: the cable is on it
+                attach_serial(serial_link_);
+            }
+            serial_irq(com);
+            if (serial_next_cycle() < slice_end_) {
+                cpu_.request_stop();  // e.g. a byte for THR: it's on the line within this slice
+            }
+            break;
+        }
         if ((port & 0xFFF8) == 0x3F8 || (port & 0xFFF8) == 0x2F8) {
             break;
         }

@@ -277,7 +277,7 @@ addr,name,kind,comment
 3009:C0B8,heading_quadrant,func,AX deg -> 0 (315..45) 1 (45..135) 2 (135..225) 3 (225..315).
 3009:D150,ai_path_plan,func,Lane/turn planner: from target SI and raw waypoint DI builds next target at BX (8-direction switch via DS:FA4B).
 3009:D8B7,opponent_throttle,func,"1P opponent: brake if heading change ahead, speed>140 and dist [2B64] < 2.5*(speed-140); else full throttle."
-3009:11FF,opponent_finished,func,Sets DS:FA45=FF and stores the finish time in cs:C9D4..C9D7.
+3009:11FF,opponent_finished,func,"Sets DS:FA45=FF and stores the finish time in cs:C9D4..C9D7 (two players: this game's clock when the other's finish packet arrived, from 028B)."
 3009:775E,highway_frame,func,"Highway mode (DS:2AD4!=0): build 32 road slices, advance/place 11 highway cars, spawn, exit countdown."
 3009:7743,highway_exit,func,"DS:2AD4=0, 8411/8412=0, 2ABF=FF: back to city mode."
 3009:7F09,highway_draw_cars,func,Draws the active highway cars (render only).
@@ -303,8 +303,8 @@ addr,name,kind,comment
 4160:0939,auto_shift,func,"Automatic gearbox (+1B): down below spd_tbl[gear-1] w/o throttle, up above spd_tbl[gear] w/ throttle; sets +1C."
 4160:09E5,player_wreck_check,func,Damage 2C5D/2C4F >= 0x20/0x40 and stopped -> wrecked (2C6A); returns AL=FF 10 s later.
 4160:0C00,opponent_finish_estimate,func,Same big tile: ticks = race_ticks + (dist/[2F29])*291/frame_rate.
-422F:0176,serial_recv_packet,func,Returns newest received packet (checksum verified) at DS=2F98:SI; ZF=1 if none.
-422F:01C8,serial_send_packet,func,Sends packet at 2F98:015B (first word = length) with checksum.
+422F:0176,serial_recv_packet,func,"Takes the received packet (the first completed since the last call; checksum verified): DS:SI = 2F98:0057, ZF=1 if none. Returns with DS=2F98."
+422F:01C8,serial_send_packet,func,"Sends the packet at 2F98:015B (first word = length) as IDN+checksum+packet; replaces a packet still waiting to go."
 124A:2D35,player_car,data,"0x32-byte vehicle struct (x,y,z,heading,pitch,roll,?,speed,gear,maxgear,throttle,brake,accel_tbl,gear_spd_tbl,cell_ptr,auto,shift,?,target,step,bt_x,bt_y,cell_x,cell_y,rev_acc,rpm,rem,?). Entity header word at 2D33."
 124A:2D43,player_speed,data,w; units/s (world units). HUD ~ speed*3/16 (likely mph).
 124A:2D45,player_gear,data,w; 0 neutral .. max_gear; max_gear+1 = reverse.
@@ -511,3 +511,49 @@ addr,name,kind,comment
 124A:2D3B,player_heading,data,"w; facing, degrees 0..359 (0 north, 90 east); += steer every frame at 01A5-01C3 while moving."
 124A:2D3D,player_pitch,data,"w; 0 or +-7 on ramps (vehicle_set_pitch); not shown in the cockpit view (cam_pitch is 2BEB's)."
 124A:2BEB,view_pitch,data,"w; camera pitch offset: 0 in the car, -17 helicopter view, -8/-17 bridge decks (3009:1954); copied to cam_pitch at 01E0."
+# --- Two-player game over the serial link (re/notes/12-two-player.md) ---
+422F:0000,serial_open,func,"Opens the COM port from 2F98:0028/002A: saves and programs the UART (DLAB divisor, 8N1, MCR 0Fh, IER 3), dials or answers a modem, points INT 0Bh and 0Ch at serial_isr, unmasks all IRQs."
+422F:00E1,serial_close,func,"Modem: +++, ATH0, ATZ0. Masks IRQ3/4 (out 21h,18h), restores the UART (one register off: the saved LCR goes to base+2, MCR&FE to LCR) and the vectors."
+422F:0248,serial_isr,func,"INT 0Bh and 0Ch (IRQ3, IRQ4): serial_isr_service, then non-specific EOI."
+422F:025F,serial_isr_service,func,"Loops on IIR until none: receive (IDN sync, packet into 2F98:000C, published in 000A only if empty) or transmit the next byte."
+422F:032C,modem_dial,func,"ATZ0, ATE0V0Q0, then ATS0=1 (answer) or ATDT/ATDP+number or the special dial string; reads the numeric result (no timeout)."
+422F:03B8,serial_write_polled,func,CX bytes from DS:SI to THR polling LSR THRE.
+422F:03CD,modem_read_result,func,"Reads CR-terminated numeric result codes polling LSR (no timeout); CX=1 if CONNECT (1, 10 or 5)."
+422F:0407,wait_bios_ticks,func,Waits CX changes of the BIOS tick count 0040:006C.
+422F:0424,link_handshake,func,"Direct connection: two 3-byte packets, wait for one, two more, then 4-byte random-number packets until they differ: AX=FFFF if ours is greater (-> cs:1, the second start position). No timeout."
+422F:0482,serial_send_status4,func,"Status packet (len 8, status AL: 1 paused, 2 wrecked) four times, 4 BIOS ticks apart (blocks ~0.9 s)."
+2F98:0008,com_base,data,w; the UART's base port (from 0040:0000/0002).
+2F98:000A,rx_packet_ready,data,w; received packet waiting for the game (0: none; a newer one is dropped while set).
+2F98:000C,rx_buffer,data,w; buffer being received into (025B / 035F).
+2F98:000E,tx_waiting,data,w; packet waiting to be sent.
+2F98:0010,tx_current,data,w; packet being sent (0: transmitter idle).
+2F98:0012,rx_index,data,w; bytes of the packet received so far.
+2F98:0028,link_flags,data,"w; bit 0 COM2, 1 modem, 2 answer, 3 special dial string, 4 pulse (from 0ACB:772A)."
+2F98:002A,link_baud,data,"w; 0..6 = 1200..57600 baud (divisors 2F98:066B)."
+2F98:0056,rx_packet,data,"checksum + packet as taken by serial_recv_packet (the packet at 0057)."
+2F98:0157,tx_frame,data,"'IDN', checksum, then the packet to send at 015B."
+2F98:066B,baud_divisors,data,"7 b; 60h 30h 18h 0Ch 6 3 2."
+2F98:0672,modem_strings,data,"ATZ0, ATE0V0Q0, ATDT, ATA, ATS0=1, +++, ATH0, then unused status texts."
+3009:0001,two_player_slot,data,"cs: b; FF: this game takes the second start position (race_setup_cars 2040 swaps the two cars' start x,y,z)."
+3009:0002,two_players,data,cs: b; FF while two players are on.
+124A:0000,opp_status_shown,data,b; the other player's status last shown (draw_opponent_status).
+124A:0001,opp_status_frames,data,b; frames that message has been shown (up to 33).
+124A:0002,link_status,data,"b; this player's status sent in every city packet: 0 racing, 4 finished."
+124A:0003,opp_status,data,"b; the other player's last status: 1 paused, 2 wrecked, 3 not ready (31 frames without a packet, 0278), 4 finished, FF on a freeway."
+124A:0017,follow_opponent,data,"b; never set (cleared at 20F5): player_step would copy the remote car over the player's and it wouldn't be drawn."
+124A:3144,opponent_model,data,"w; the opponent's model (DS:2D29[opponent]): two players: how the other player's car is drawn."
+3009:ED35,menu_quit_to_dos,func,cs:4 = FF.
+3009:ED3C,menu_quit_to_garage,func,cs:3 = FF.
+3009:ED43,menu_hang_up,func,"Hang up line: serial_close, cs:2 = 0."
+3009:ED5C,comm_setup_screen,func,"The two-player setup screen (Connection, Port, Baud rate, Mode, Procedure, Dial, Line type, Phone, Save options, DONE?), from/to config.bin."
+3009:F03C,comm_setup_done,func,"DONE? Yes: settings to 2F98:0028.., cs:1 = Answer, serial_open, link_handshake (direct), cs:2 = FF."
+3009:F0BD,comm_setup_cancel,func,"DONE? Cancel: serial_close, cs:2 = 0."
+3009:F0F5,comm_phone_entry,func,The 40-character phone number / dial string field.
+3009:DE49,draw_opponent_status,func,"OPPONENT PAUSED / WRECKED / NOT READY / FINISHED (0ACB:6071[DS:3]) in the dash message area."
+3009:DEB4,level_select,func,The TRAINEE / ROOKIE / PRO plates (key loop DF3B; DS:FC4F).
+3009:E074,opponent_select,func,The four opponents (key loop E2A0; DS:A = choice).
+3009:FBCC,course_select,func,"The course map (key loop FC09; Esc: options_menu); returns BX = course 1-4."
+0ACB:772A,comm_flags,data,w; the setup screen's choices (link_flags' layout).
+0ACB:772C,comm_baud,data,w; 0..6.
+0ACB:7709,comm_row,data,w; the setup screen's row * 2.
+0ACB:770B,comm_items,data,"10 w; each row's item offset (4 = the first item); config.bin's first 20 bytes."

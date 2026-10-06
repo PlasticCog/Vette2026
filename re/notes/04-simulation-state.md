@@ -147,7 +147,7 @@ the x path at 1BC9 uses AX).
 
 | Function | Called | What it does | Frame-rate use |
 |---|---|---|---|
-| **3009:0EAA** | 020A always | player step (section 3); if DS:17≠0 copies 2F09→2D35 instead | via 4160 (A, B) |
+| **3009:0EAA** | 020A always | player step (section 3); if DS:17≠0 copies 2F09→2D35 instead (DS:17 is never set, notes 12) | via 4160 (A, B) |
 | **3009:12D2** | 0248 | police chase (section 6) | 1389: `police.step = entity.speed / fr` (B, once at spawn) |
 | **3009:0EF5** | 0267 | opponent car: 1P computer driver or 2P remote car (section 5) | 0FC0–1009 (B, C) |
 | **4021:0ED1** | 03AF when DS:2AD4 ∉ {0,FF} | enter highway mode: player at (0x40A0,0x4000,z 7) heading 90, highway id DS:8156, road state reset, DS:2AD4=FF, exit delay `[8412]=max(fr−3,1)` | 0F63 (D) |
@@ -165,7 +165,8 @@ the x path at 1BC9 uses AX).
 Skipped if the opponent finished (DS:FA45=FF) or the start countdown is running (DS:2AD8<5). Always sets
 gear ≥1, brake 0, throttle 1 (0F1D–0F2C), DS:2B70 = `bt_x*5 + bt_y` (hard-coded 5 columns, **confirmed** 0F0C).
 
-**2-player (cs:2≠0)** — `422F:0176` returns the newest packet (checksummed; DS=2F98).
+**2-player (cs:2≠0)** — `422F:0176` returns the received packet (checksummed; DS=2F98): the first one completed
+since the last call, later ones being dropped meanwhile (notes 12 §4).
 Packet = `{w len, w status (lo = sender's DS:2, hi = 0 city / FF highway), payload}`.
 - City payload (len 0x32): the first 0x2E bytes of the sender's 2D35 struct → copied over 2F09; DS:842B=0,
   DS:2B01=0 (frames since packet); DS:2B62 = previous, DS:2B60 = new remote heading. Sent each frame by 022D.

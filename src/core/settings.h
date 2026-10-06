@@ -55,6 +55,9 @@ struct Settings {
     Graphics graphics = Graphics::Dos;
     bool show_launcher = true;
     std::string game_folder;  // UTF-8; empty: look for Game/ next to the program
+    // Online races (ui/online.h): the relay server (wss://...), and the course the player hosts.
+    std::string online_server;
+    int online_course = 1;  // 1-3, or 4: the three in a row
 
     // Classic is VETTE! exactly as shipped in 1989 (its own frames, a 12 MHz PC/AT, the manual
     // question); Enhanced switches every improvement on. Presets set only the options that change

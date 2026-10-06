@@ -108,6 +108,8 @@ std::string Settings::serialize() const {
     out << kGraphics.key << " = " << kGraphics.names[static_cast<size_t>(graphics)] << "\n";
     out << "launcher = " << kOnOff[show_launcher] << "\n";
     out << "game_folder = " << game_folder << "\n";
+    out << "online_server = " << online_server << "\n";
+    out << "online_course = " << online_course << "\n";
     return out.str();
 }
 
@@ -152,6 +154,10 @@ Settings Settings::parse(const std::string& text) {
         read_bool("launcher", kOnOff, key, value, s.show_launcher);
         if (key == "game_folder")
             s.game_folder = std::string(value);  // everything after the first '=', trimmed
+        if (key == "online_server")
+            s.online_server = std::string(value);
+        if (key == "online_course" && value.size() == 1 && value[0] >= '1' && value[0] <= '4')
+            s.online_course = value[0] - '0';
     }
     return s;
 }

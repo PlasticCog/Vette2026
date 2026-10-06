@@ -30,7 +30,7 @@ build.bat            # Debug  -> build\windows-msvc\Debug\vette2026.exe
 build.bat release    # Release
 ```
 
-**Linux** (needs the X11/Wayland development packages for SDL):
+**Linux** (needs the X11/Wayland development packages for SDL, and `libssl-dev` for online play):
 ```
 cmake --preset linux
 cmake --build --preset linux-release
@@ -111,6 +111,17 @@ Either one also evens out the original's rounding of sideways movement, which ma
 straight creep left but never right; speeds and race times are unchanged. `--driving improved` and
 `--lane-centering on` turn them on for one run.
 
+**Online races.** Two players can race each other over the internet, in the original's two-player
+mode. In the launch menu, choose **Online race**: one player hosts and gets a code like **VETTE-4KQ7**,
+and their friend chooses **Join a race** and types it in. Both games then go straight into the race, on
+the host's course and with the host's Driving setting (Lane centering stays each player's own); jumps
+show on both screens. Both players need the same version of VETTE! 2026 and their own copy of DOS VETTE!
+1.1. The two games meet through a small relay server (`server/`, a Cloudflare Worker: see
+[server/README.md](server/README.md)), whose address goes in Online race > Server. As in the original,
+each game runs its own race: the traffic differs between the two screens, and when both cars cross the
+line within a moment of each other, both players may see themselves win. `--online-host`,
+`--online-join CODE` and `--online-server URL` do the same from the command line.
+
 **Sound effects and music.** The original only had the PC speaker. VETTE! 2026 can instead play its
 sounds on an emulated **AdLib** card (the Enhanced preset; DOS VETTE! never supported one), or use the
 **Macintosh** version's digitized sounds. The **music** can be the original's tunes, or the **PC-98**
@@ -189,6 +200,18 @@ Add `--verify all` to check every native port against the original during the ru
 Scan codes are set 1 in hex. Emulator addresses are image-relative + `1000h` on the segment, the
 same as Ghidra (`224A:2CD3` is `frame_rate`).
 
+**Two players without a network.** The original's two-player race (a serial cable between two PCs,
+[re/notes/12-two-player.md](re/notes/12-two-player.md)) runs on an emulated UART. `vette_link` runs two
+games side by side on an in-memory cable, takes both through the original's menus into the race, and
+plays scripted keys on each (times after the race start; `a:` and `b:` pick the side); `--delay`/`--jitter`
+add network-like latency, `--log-frames` prints the packets, `--log-cars` both cars. Two windows on one PC:
+`vette2026 --link-listen 5000` and `vette2026 --link-connect 127.0.0.1:5000` (development only; the
+listening side picks the course with `--link-course`, `--link-delay`/`--link-jitter` add latency).
+
+```
+vette_link --game Game --seconds 20 --key a:7:02 --hold a:7.2:20:48 --shot 15 --delay 50 --jitter 100 --summary
+```
+
 **World extraction.** `vette_world` extracts the 3D city from the running original (the whole 80x80-cell
 map, every object with all its levels of detail, and the car and building models) for the Enhanced
 renderer's extended draw distance. To check the result, it redraws the original's view from the extracted
@@ -204,7 +227,8 @@ stay local (`re/ghidra/`, `re/out/`). Findings are written up in [`re/notes/`](r
 | Path | Contents |
 |---|---|
 | `Game/` | Where players put their original game files (not tracked) |
-| `src/` | `host/` (the emulator that runs the original), `game/` (native ports, smooth renderer), `platform/` (SDL3 window, sound, input), `ui/` (launch menu, program icon), `core/` (game files, settings), `enhanced/` (world extraction for the Enhanced renderer), `tools/` (`vette_run`, `vette_fuzz`, `vette_world`, `vette_icon`) |
+| `src/` | `host/` (the emulator that runs the original), `game/` (native ports, smooth renderer), `platform/` (SDL3 window, sound, input), `ui/` (launch menu, program icon), `core/` (game files, settings), `enhanced/` (world extraction for the Enhanced renderer), `net/` (online play: rooms on the relay server, the serial link over a WebSocket), `tools/` (`vette_run`, `vette_link`, `vette_fuzz`, `vette_world`, `vette_icon`, `vette_netcheck`) |
+| `server/` | The relay server for online two-player races (a Cloudflare Worker); how to deploy it is in [server/README.md](server/README.md) |
 | `docs/` | Plan, porting guide |
 | `re/` | Symbol map, notes, Ghidra scripts and RE tools |
 | `tools/reverse_engineering/` | Earlier asset/resource extraction scripts (reference, unverified) |

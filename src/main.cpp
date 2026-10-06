@@ -12,10 +12,13 @@
 #include "game/driving.h"
 #include "game/options.h"
 #include "game/smooth.h"
+#include "game/two_player.h"
 #include "game/x86.h"
 #include "graphics/art_files.h"
 #include "graphics/substitution.h"
+#include "host/loopback_link.h"
 #include "host/machine.h"
+#include "host/tcp_link.h"
 #include "platform/audio.h"
 #include "platform/framebuffer.h"
 #include "platform/gamepad.h"
@@ -30,6 +33,10 @@
 #include "sound/sfx_backend.h"
 #include "sound/sfx_bank.h"
 #include "ui/launcher.h"
+#include "ui/online.h"
+#ifdef VETTE_ONLINE
+#include "net/room_link.h"
+#endif
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>  // UTF-8 argv on Windows
@@ -111,6 +118,18 @@ constexpr const char* kUsage =
     "  --quit-after T       close at second T\n"
     "  --wav <file>         record the sound to a WAV file (16-bit mono)\n"
     "  --mute               make the sound (for --wav) but don't play it\n"
+    "Two players over TCP, for development (the original's own two-player race; see\n"
+    "re/notes/12-two-player.md):\n"
+    "  --online-host        host an online race without the menu: the room's code is logged, and the race\n"
+    "                       starts when the friend joins (the course and server from the settings)\n"
+    "  --online-join CODE   join the friend's online race without the menu\n"
+    "  --online-server URL  the relay server for this run (wss://...)\n"
+    "  --link-listen PORT   be the host: wait for the other game on PORT\n"
+    "  --link-connect HOST:PORT  be the guest: connect to the host\n"
+    "                       Both games are taken through the original's menus into the race.\n"
+    "  --link-course N      the host's course, 1-4 (default 1; the guest takes the host's)\n"
+    "  --link-delay MS, --link-jitter MS   delay what arrives by MS plus a random 0..jitter, in order\n"
+    "  --link-manual        don't drive the menus: Esc > Communications > Two players yourself\n"
     "\n"
     "F11 or Alt+Enter toggles fullscreen. Every other key, Esc included, goes to the game.\n"
     "A gamepad connected at launch becomes the PC's analog joystick. DOS games look for one only\n"
@@ -168,6 +187,16 @@ struct Options {
     std::optional<std::string> wav;           // UTF-8 path
     bool mute = false;  // sorted by time
     bool help = false;
+    // An online race without the menu (--online-*).
+    std::optional<std::string> online_server;
+    bool online_host = false;
+    std::optional<std::string> online_join;  // the code
+    // The development link (--link-*).
+    std::optional<std::uint16_t> link_listen;
+    std::optional<std::string> link_connect;  // host:port
+    int link_course = 1;
+    double link_delay_ms = 0, link_jitter_ms = 0;
+    bool link_manual = false;
 
     void apply_to(Settings& s) const {
         if (frame_rate)
@@ -213,6 +242,22 @@ std::optional<Options> parse_args(int argc, char** argv) {
             opts.joystick = arg == "--joystick";
         } else if (arg == "--manual-check") {
             opts.manual_check = true;
+        } else if (arg == "--online-server" && has_value) {
+            opts.online_server = argv[++i];
+        } else if (arg == "--online-host") {
+            opts.online_host = true;
+        } else if (arg == "--online-join" && has_value) {
+            opts.online_join = argv[++i];
+        } else if (arg == "--link-listen" && has_value) {
+            opts.link_listen = static_cast<std::uint16_t>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (arg == "--link-connect" && has_value && std::string_view(argv[i + 1]).find(':') != std::string_view::npos) {
+            opts.link_connect = argv[++i];
+        } else if (arg == "--link-course" && has_value && std::atoi(argv[i + 1]) >= 1 && std::atoi(argv[i + 1]) <= 4) {
+            opts.link_course = std::atoi(argv[++i]);
+        } else if ((arg == "--link-delay" || arg == "--link-jitter") && has_value) {
+            (arg == "--link-delay" ? opts.link_delay_ms : opts.link_jitter_ms) = std::max(0.0, std::atof(argv[++i]));
+        } else if (arg == "--link-manual") {
+            opts.link_manual = true;
         } else if ((arg == "--shot" || arg == "--quit-after") && has_value) {
             const auto ns = static_cast<std::uint64_t>(std::atof(argv[++i]) * static_cast<double>(kNsPerSecond));
             if (arg == "--shot")
@@ -335,7 +380,10 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--wav" || arg == "--effects" || arg == "--music" ||
                                      arg == "--graphics" || arg == "--scaling" ||
                                      arg == "--resolution" || arg == "--skyline" ||
-                                     arg == "--depth-buffer" || arg == "--driving" || arg == "--lane-centering";
+                                     arg == "--depth-buffer" || arg == "--driving" || arg == "--lane-centering" ||
+                                     arg == "--link-listen" || arg == "--link-connect" || arg == "--link-course" ||
+                                     arg == "--link-delay" || arg == "--link-jitter" || arg == "--online-server" ||
+                                     arg == "--online-join";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
                          argv[i], kUsage);
             return std::nullopt;
@@ -681,13 +729,193 @@ std::unique_ptr<sound::SfxBackend> pc98_music(const GameVersions& versions, host
     return std::make_unique<sound::Pc98Backend>(machine, std::move(fm));
 }
 
+// A two-player link, polled between emulation slices: the development link or an online race.
+struct TwoPlayerLink {
+    virtual ~TwoPlayerLink() = default;
+    virtual void update(host::Machine& machine, DrivingAids* driving) = 0;
+};
+
+// --- Development two-player link (--link-listen / --link-connect) ----------------------------------------
+// Two vette2026 processes race the original's two-player game over TCP, without the relay server
+// (host/tcp_link.h). The listening side is the host: its course and driving physics go to the guest
+// first, then both games are taken through the original's menus into the race (game/two_player.h).
+struct DevLink final : TwoPlayerLink {
+    std::unique_ptr<host::TcpLink> tcp;
+    std::unique_ptr<host::DelayedLink> delayed;  // --link-delay / --link-jitter
+    std::unique_ptr<game::LinkPacer> pacer;
+    std::unique_ptr<game::TwoPlayerStart> start;
+    bool host = false;
+    bool manual = false;
+    bool lane_centering = false;  // the guest's own
+    game::TwoPlayerSetup setup;
+    bool connected = false;
+    bool got_setup = false;
+    int jumps = 0;                 // logged so far: this car's jumps,
+    bool remote_airborne = false;  // and whether the other car was last seen in the air
+
+    // Between emulation slices: the setup from the host, the menus, the connection's state.
+    void update(host::Machine& machine, DrivingAids* driving) override {
+        tcp->poll();
+        if (tcp->connected() != connected) {
+            connected = tcp->connected();
+            SDL_Log("Two players: %s", connected ? "the other game is connected" : tcp->closed_reason().c_str());
+        }
+        if (!host && !got_setup && tcp->hello()) {
+            got_setup = true;
+            const auto received = game::TwoPlayerSetup::decode(*tcp->hello());
+            if (!received) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Two players: the host sent '%s', not a setup this version knows",
+                            tcp->hello()->c_str());
+            } else {
+                setup = *received;
+                SDL_Log("Two players: the host's setup: course %d, %s driving", setup.course,
+                        setup.improved_driving ? "improved" : "original");
+                if (driving)  // both games drive with the host's physics
+                    driving->driving.set_options(game::Driving::Options{setup.improved_driving, lane_centering});
+                if (!manual)
+                    begin(machine);
+            }
+        }
+        if (start) {
+            const auto before = start->phase();
+            start->poll();
+            if (start->phase() != before && start->failed())
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "%s", start->error().c_str());
+        }
+        // Jumps, this car's and the other's as shown here (Improved Driving).
+        if (driving && driving->driving.options().improved) {
+            const double t = static_cast<double>(machine.emulated_ns()) / 1e9;
+            const auto& tm = driving->driving.telemetry();
+            if (tm.jumps != jumps) {
+                jumps = tm.jumps;
+                SDL_Log("Two players: %.2fs this car leaves the ground (speed %d)", t, tm.speed);
+            }
+            const auto& remote = driving->driving.remote();
+            if (remote.airborne != remote_airborne) {
+                remote_airborne = remote.airborne;
+                SDL_Log("Two players: %.2fs the other car is %s (z %.0f, ground %.0f)", t,
+                        remote.airborne ? "in the air" : "back on the ground", remote.z, remote.ground);
+            }
+        }
+    }
+
+    void begin(host::Machine& machine) {
+        start = std::make_unique<game::TwoPlayerStart>(
+            machine, host ? game::TwoPlayerStart::Role::Host : game::TwoPlayerStart::Role::Guest, setup,
+            game::TwoPlayerStart::Own{});
+        start->on_log = [](const std::string& line) { SDL_Log("Two players: %s", line.c_str()); };
+    }
+};
+
+// Sets up the development link from the command line (nullptr without --link-*).
+std::unique_ptr<DevLink> make_dev_link(const Options& opts, const Settings& settings, host::Machine& machine) {
+    if (!opts.link_listen && !opts.link_connect)
+        return nullptr;
+    auto link = std::make_unique<DevLink>();
+    std::string error;
+    link->host = opts.link_listen.has_value();
+    link->manual = opts.link_manual;
+    link->lane_centering = settings.lane_centering;
+    if (link->host) {
+        link->setup.course = opts.link_course;
+        link->setup.improved_driving = settings.improved_driving;
+        link->tcp = host::TcpLink::listen(*opts.link_listen, error);
+        if (link->tcp) {
+            link->tcp->set_hello(link->setup.encode());
+            SDL_Log("Two players: waiting for the other game on port %u (%s)", *opts.link_listen,
+                    link->setup.encode().c_str());
+        }
+    } else {
+        const std::string& v = *opts.link_connect;
+        const std::size_t colon = v.rfind(':');
+        link->tcp = host::TcpLink::connect(v.substr(0, colon),
+                                           static_cast<std::uint16_t>(std::strtoul(v.c_str() + colon + 1, nullptr, 10)), error);
+        if (link->tcp)
+            SDL_Log("Two players: connecting to %s", v.c_str());
+    }
+    if (!link->tcp)
+        throw std::runtime_error("Two players: " + error);
+    host::SerialLink* cable = link->tcp.get();
+    if (opts.link_delay_ms > 0 || opts.link_jitter_ms > 0) {
+        host::DelayedLink::Options lag;
+        lag.delay_ns = static_cast<std::uint64_t>(opts.link_delay_ms * 1e6);
+        lag.jitter_ns = static_cast<std::uint64_t>(opts.link_jitter_ms * 1e6);
+        lag.seed = link->host ? 1 : 2;
+        link->delayed = std::make_unique<host::DelayedLink>(*link->tcp, [] { return SDL_GetTicksNS(); }, lag);
+        cable = link->delayed.get();
+        SDL_Log("Two players: arrivals delayed by %.0f ms + up to %.0f ms", opts.link_delay_ms, opts.link_jitter_ms);
+    }
+    link->pacer = std::make_unique<game::LinkPacer>(machine, *cable);
+    machine.attach_serial(link->pacer.get());
+    if (link->host && !link->manual)
+        link->begin(machine);
+    return link;
+}
+
+// --- Online two-player race (ui/online.h) ----------------------------------------------------------------
+// Both players are in a room on the relay server (net/room_link.h), which is the serial cable between the
+// two games; both are taken through the original's menus into the race, with the host's course and
+// driving physics. The window's title shows the room's state.
+struct OnlineRace final : TwoPlayerLink {
+    ui::OnlineSession session;
+    std::unique_ptr<game::LinkPacer> pacer;
+    std::unique_ptr<game::TwoPlayerStart> start;
+    SDL_Window* window = nullptr;
+    std::uint64_t next_title_ns = 0;
+
+    void update(host::Machine&, DrivingAids*) override {
+        const auto before = start->phase();
+        start->poll();
+        if (start->phase() != before && start->failed())
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Online race: %s", start->error().c_str());
+#ifdef VETTE_ONLINE
+        const std::uint64_t now = SDL_GetTicksNS();
+        if (window && session.room && now >= next_title_ns) {
+            next_title_ns = now + 1'000'000'000;
+            const net::LinkStatus st = session.room->status();
+            std::string title = std::string(kAppName) + " - online race " + st.code + ": ";
+            switch (st.state) {
+            case net::LinkState::Connected:
+                title += "racing your friend";
+                if (st.rtt_ms >= 0)
+                    title += " (" + std::to_string(static_cast<int>(st.rtt_ms + 0.5)) + " ms)";
+                break;
+            case net::LinkState::Reconnecting: title += "reconnecting..."; break;
+            case net::LinkState::PeerAway: title += "your friend's connection dropped"; break;
+            default: title += "your friend has gone"; break;
+            }
+            SDL_SetWindowTitle(window, title.c_str());
+        }
+#endif
+    }
+};
+
+std::unique_ptr<OnlineRace> make_online_race(ui::OnlineSession session, const Settings& settings, host::Machine& machine,
+                                             DrivingAids* driving, SDL_Window* window) {
+    auto race = std::make_unique<OnlineRace>();
+    race->session = std::move(session);
+    race->window = window;
+    race->pacer = std::make_unique<game::LinkPacer>(machine, *race->session.link);
+    machine.attach_serial(race->pacer.get());
+    const game::TwoPlayerSetup& setup = race->session.setup;
+    if (driving)  // both games drive with the host's physics; lane centering is each player's own
+        driving->driving.set_options(game::Driving::Options{setup.improved_driving, settings.lane_centering});
+    race->start = std::make_unique<game::TwoPlayerStart>(
+        machine, race->session.host ? game::TwoPlayerStart::Role::Host : game::TwoPlayerStart::Role::Guest, setup,
+        game::TwoPlayerStart::Own{});
+    race->start->on_log = [](const std::string& line) { SDL_Log("Online race: %s", line.c_str()); };
+    SDL_Log("Online race: %s, course %d, %s driving", race->session.host ? "hosting" : "joined", setup.course,
+            setup.improved_driving ? "improved" : "original");
+    return race;
+}
+
 // Runs the hosted game until the window closes or VETTE.EXE exits.
 // `smooth` (optional) draws the race view at the display's refresh rate (game/smooth.h), and `view`
 // (optional, with `smooth` in world-layers mode) draws its world with the Enhanced renderer. `script`:
 // the testing options (keys, screenshots, quit time).
 void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Gamepad& gamepad,
                game::SmoothRenderer* smooth, EnhancedView* view, GameSound* game_sound, Artwork* art,
-               DrivingAids* driving, const Options& script) {
+               DrivingAids* driving, const Options& script, TwoPlayerLink* link) {
     std::size_t next_key = 0;
     std::size_t next_poke = 0;
     std::size_t next_shot = 0;
@@ -808,6 +1036,8 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
             view->prepare(machine);
         if (driving)
             driving->prepare(machine, view);
+        if (link)
+            link->update(machine, driving);
         const bool layered = view && smooth && view->render(machine, *smooth, presenter);
         if (!layered) {
             if (!smooth || !smooth->render(machine.emulated_ns(), frame))
@@ -891,11 +1121,21 @@ int run(int argc, char** argv) {
         Gamepad gamepad;
 
         // The launch menu: when it's switched on, or to let the player find the game files.
+        ui::OnlineSession online;  // set when the player chose an online race
         if (opts->launcher.value_or(settings.show_launcher) || !game) {
-            if (ui::run_launcher(presenter, gamepad, settings, game, search) == ui::LaunchChoice::Quit)
+            if (ui::run_launcher(presenter, gamepad, settings, game, search, &online) == ui::LaunchChoice::Quit)
                 return 0;
             if (!save_settings(settings_file, settings))
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't save %s", path_to_utf8(settings_file).c_str());
+        }
+        // An online race from the command line (testing): the room first, then the game.
+        if (!online.link && (opts->online_host || opts->online_join)) {
+            Settings run = settings;
+            if (opts->online_server)
+                run.online_server = *opts->online_server;
+            std::string error;
+            if (!ui::connect_online(run, *game, opts->online_host, opts->online_join.value_or(""), online, error))
+                throw std::runtime_error("Online race: " + error);
         }
         SDL_Log("Game folder: %s", path_to_utf8(search.versions.root).c_str());
         SDL_Log("  DOS: %s", path_to_utf8(game->root()).c_str());
@@ -935,7 +1175,7 @@ int run(int argc, char** argv) {
         if (!machine.boot(error))
             throw std::runtime_error("Couldn't start VETTE.EXE: " + error);
         SDL_Log("Saves: %s", path_to_utf8(config.save_dir).c_str());
-        if (!settings.manual_check)
+        if (!settings.manual_check || online.link)  // (an online race's menus are driven: no question then)
             game::install_skip_manual_check(machine.cpu());
         game::install_idle_skip(machine);  // the fast PC spends most cycles waiting for retrace
         const bool smooth_fps = settings.frame_rate == Settings::FrameRate::Smooth;
@@ -1006,7 +1246,9 @@ int run(int argc, char** argv) {
 
         // Driving: the original's physics, or Improved Driving and Lane Centering layered on them.
         std::unique_ptr<DrivingAids> driving;
-        if (settings.improved_driving || settings.lane_centering) {
+        // (With a two-player link, the guest may take the host's physics.)
+        const bool two_player = opts->link_listen || opts->link_connect || online.link;
+        if (settings.improved_driving || settings.lane_centering || two_player) {
             driving = std::make_unique<DrivingAids>(machine, game::Driving::Options{settings.improved_driving,
                                                                                     settings.lane_centering});
             if (game_sound) {
@@ -1017,8 +1259,13 @@ int run(int argc, char** argv) {
         }
         SDL_Log("Driving: %s physics; lane centering %s", settings.improved_driving ? "improved" : "original",
                 settings.lane_centering ? "on" : "off");
+        std::unique_ptr<TwoPlayerLink> link;
+        if (online.link)
+            link = make_online_race(std::move(online), settings, machine, driving.get(), presenter.window());
+        else
+            link = make_dev_link(*opts, settings, machine);
         main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad, smooth ? &*smooth : nullptr, view.get(),
-                  game_sound.get(), art.get(), driving.get(), *opts);
+                  game_sound.get(), art.get(), driving.get(), *opts, link.get());
         if (art && art->frames)
             SDL_Log("Graphics: %.2f ms per frame to compose", art->compose_ms / static_cast<double>(art->frames));
         if (smooth && smooth->stats().replays)

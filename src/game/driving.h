@@ -25,6 +25,15 @@
 // axis creeps sideways one way and not at all the other. The sideways part of what the rounding loses
 // is carried over instead, so the car goes where it points (the speed along the road is unchanged).
 //
+// Two-player races (re/notes/12-two-player.md): the player's car is driven by the same code as in a
+// race against the computer, so all of the above applies to it, and the packet each frame carries its
+// struct as the layers left it (height and pitch in the air included). Improved Driving adds two words
+// the original never reads, in the struct's +0Ch and +1Eh (sent with the rest): the vertical speed
+// while in the air, and the ground's height under the car. The other game shows the remote car's
+// height and pitch from its packets, as the original does; on a frame without a packet, while the last
+// one said the car was in the air, it continues the flight under gravity (the original would hold the
+// height) until it reaches that ground.
+//
 // Per-second quantities are scaled by the game's own frame rate (DS:2CD3), so the feel doesn't change
 // with the emulated PC's speed. The tuning constants are DrivingTuning's members.
 
@@ -146,6 +155,9 @@ public:
     Driving(const Driving&) = delete;
     Driving& operator=(const Driving&) = delete;
 
+    // Switches the options, installing or removing hooks (e.g. a two-player guest taking the host's
+    // physics). Takes effect from the next race frame; call it before the race to have it all along.
+    void set_options(Options options);
     const Options& options() const { return options_; }
     const DrivingTuning& tuning() const { return tuning_; }
     void set_tuning(const DrivingTuning& t) { tuning_ = t; }
@@ -183,9 +195,29 @@ public:
     // Called after each race frame's player step with the telemetry (optional).
     std::function<void(const Telemetry&)> on_frame;
 
+    // Two-player: the other player's car as this game shows it (Improved Driving only).
+    struct Remote {
+        bool airborne = false;    // its last packet said so (and it hasn't come down since)
+        double z = 0, vz = 0, ground = 0;
+        int extrapolated = 0;     // frames continued under gravity since the last packet
+        int extrapolated_total = 0;
+        int packets_airborne = 0;  // packets that said it was in the air
+    };
+    const Remote& remote() const { return remote_; }
+
+    // The struct words two-player packets carry the flight in (unused by the original).
+    static constexpr uint16_t kFlightWord = 0x0C;  // 0 on the ground; in the air: vz * 2 (units/s) << 1 | 1
+    static constexpr uint16_t kGroundWord = 0x1E;  // the ground's height under the car
+    static uint16_t encode_flight(double vz);
+    static std::optional<double> decode_flight(uint16_t word);
+
 private:
+    void install();
     bool ready();                   // the code is the expected build's (checked once)
     void remove();
+    bool two_player() const;        // two players on (cs:2)
+    void remote_packet();           // opponent_step, a city packet copied over the remote car (3009:0F84)
+    void remote_frame();            // opponent_step, the remote car's frame done (3009:1054)
     void heading_update(host::Cpu& c);  // frame loop, before the heading update (3009:01A5)
     void view_pitch();              // frame loop, after the camera is placed (3009:0248)
     void before_drivetrain();       // player_step, before player_drivetrain (3009:0ED9)
@@ -237,6 +269,8 @@ private:
     double shift_x_ = 0, shift_y_ = 0;  // ... and its fractions of a unit carried over
 
     Telemetry tm_;
+    Remote remote_;
+    double remote_pitch_ = 0;
 };
 
 } // namespace vette::game

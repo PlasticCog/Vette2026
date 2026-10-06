@@ -47,8 +47,9 @@ step `2D55 = (speed − 2·wheel_slip 2C4D) / frame_rate`), then `call 1738` at 
 3. `1805` cell update, collision boxes (181E), car contact (1835).
 4. `1838`: on the freeway (`2AD4` ≠ 0) z = 0. In the city **184B–1855**: z `2D39` = cell elevation·224
    + `ground_shape_height` (4160:0515), pitch `2D3D` = 0 or ±7 (`vehicle_set_pitch` 4160:0004);
-   **1858** `jmp 1887`. (Only the player takes this path; with `DS:17` ≠ 0, the modem game, the
-   player's height is set at 1876–1884 instead.)
+   **1858** `jmp 1887`. (Only the player takes this path. Other vehicles get theirs at 1876–1884: the
+   computer opponent; the police chase car and a two-player race's remote car don't (notes 12). `DS:17` ≠ 0
+   would make the player skip it too, but `DS:17` is never set.)
 
 `skid_grip` (`DS:2BF1`, words, `[model·9 + lock]`, lock 0..8) and `skid_grip_bonus` (`4160:0373`,
 bytes `[model + 4·level]`), read from the running game:
@@ -273,8 +274,9 @@ waits `lane_resume_delay` after the keys are let go.
 
 ## 9. Open questions
 
-- The modem game (`DS:17` ≠ 0) sets the player's height at 1876–1884: no jumps there (the layer just
-  doesn't see a ground frame); the drift and rounding layers would still apply.
+- ~~The modem game (`DS:17` ≠ 0)~~: `DS:17` is never set. In a two-player race the player's car takes the
+  same path as against the computer, so all the layers apply; the flight goes to the other game in the
+  packets (notes 12, section 7).
 - Whether `player_steer_skid` runs in freeway mode (4021) was not checked; the drift layer applies
   wherever it is called.
 - Lane markings on the compound structures (Golden Gate, Bay Bridge decks) are not collected (they are

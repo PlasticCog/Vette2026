@@ -26,6 +26,8 @@ constexpr uint16_t kBeforeMove = 0x0EDC;        // player_step: `call 1738` (veh
 constexpr uint16_t kAfterStep = 0x17AD;         // vehicle_move: `mov dx,[3261]`, the step's dx/dy (3CE7) to add
 constexpr uint16_t kGroundSet = 0x1858;         // vehicle_move: `jmp 1887` after the player's z and pitch
 constexpr uint16_t kSteerSkid = 0x037F;         // player_steer_skid (4160), far
+constexpr uint16_t kRemotePacket = 0x0F84;      // opponent_step (2P): `mov ax,[2B60]`, a city packet copied
+constexpr uint16_t kRemoteDone = 0x1054;        // opponent_step (2P): `mov ax,[2F2F]`, packet or dead reckoning done
 
 // The DOS 1.1 build's code at those points.
 struct Signature {
@@ -42,6 +44,8 @@ constexpr Signature kSignatures[] = {
     {kCode, kAfterStep, {0x8B, 0x16, 0x61, 0x32}, 4},
     {kCode, kGroundSet, {0xEB, 0x2D}, 2},
     {kSkidSeg, kSteerSkid, {0x83, 0x3E, 0x4B, 0x2C, 0x00}, 5},
+    {kCode, kRemotePacket, {0xA1, 0x60, 0x2B}, 3},
+    {kCode, kRemoteDone, {0xA1, 0x2F, 0x2F}, 3},
 };
 
 // The player's car (DS:2D35, notes 04 section 2) and the state around it.
@@ -63,6 +67,10 @@ constexpr uint16_t kStartLight = 0x2AD8;      // b: 5 once the race is on
 constexpr uint16_t kCamPitch = 0x2C79;        // w: the view's pitch, degrees (from 2BEB)
 constexpr uint16_t kChaseDistance = 0x2C7D;   // w: 0 in the car
 constexpr uint16_t kHelicopter = 0x2ACF;      // b: FFh in the helicopter view
+// Two players (re/notes/12-two-player.md).
+constexpr uint16_t kTwoPlayers = 0x0002;      // cs: b, two players on
+constexpr uint16_t kPlayer = 0x2D35, kRemote = 0x2F09;  // the player's car; the other player's
+constexpr uint16_t kNoPacket = 0x2B00;        // b: FFh on a frame the remote car was dead-reckoned
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr uint64_t kGapNs = 400'000'000;      // no player frame for this long: start the state afresh
@@ -217,6 +225,12 @@ std::optional<LaneMap::Fix> LaneMap::find(double x, double y, double heading_deg
 
 Driving::Driving(host::Machine& machine, Options options, DrivingTuning tuning)
     : machine_(machine), options_(options), tuning_(tuning) {
+    install();
+}
+
+Driving::~Driving() { remove(); }
+
+void Driving::install() {
     if (!options_.improved && !options_.lane_centering) {
         return;  // the game untouched
     }
@@ -231,11 +245,78 @@ Driving::Driving(host::Machine& machine, Options options, DrivingTuning tuning)
         watch(kAfterCamera, [this](Cpu&) { view_pitch(); });
         watch(kBeforeDrivetrain, [this](Cpu&) { before_drivetrain(); });
         watch(kBeforeMove, [this](Cpu&) { before_move(); });
+        watch(kRemotePacket, [this](Cpu&) { remote_packet(); });
+        watch(kRemoteDone, [this](Cpu&) { remote_frame(); });
         // The steer/skid replacement goes in once ready() has seen the expected code.
     }
 }
 
-Driving::~Driving() { remove(); }
+void Driving::set_options(Options options) {
+    remove();
+    options_ = options;
+    check_ = Check::Pending;
+    valid_ = airborne_ = landed_ = free_path_ = false;
+    slip_ = lateral_ = 0;
+    remote_ = {};
+    install();
+}
+
+bool Driving::two_player() const { return rd8(machine_.memory(), kCode, kTwoPlayers) != 0; }
+
+uint16_t Driving::encode_flight(double vz) {
+    const long v = std::clamp(std::lround(vz * 2), -16000L, 16000L);
+    return static_cast<uint16_t>(static_cast<uint16_t>(v) << 1 | 1);
+}
+
+std::optional<double> Driving::decode_flight(uint16_t word) {
+    if ((word & 1) == 0) {
+        return std::nullopt;
+    }
+    return static_cast<double>(static_cast<int16_t>(word) >> 1) / 2;
+}
+
+void Driving::remote_packet() {
+    if (!ready()) {
+        return;
+    }
+    // The packet's struct is now the remote car's: its height and pitch as the other game had them, and
+    // (from a game with Improved Driving) its flight.
+    Memory& m = machine_.memory();
+    const std::optional<double> vz = decode_flight(rd16(m, kData, u16(kRemote + kFlightWord)));
+    remote_.airborne = vz.has_value();
+    remote_.z = s16(rd16(m, kData, u16(kRemote + 4)));
+    remote_.vz = vz.value_or(0);
+    remote_.ground = s16(rd16(m, kData, u16(kRemote + kGroundWord)));
+    remote_.extrapolated = 0;
+    remote_.packets_airborne += remote_.airborne ? 1 : 0;
+    remote_pitch_ = s16(rd16(m, kData, u16(kRemote + 8)));
+}
+
+void Driving::remote_frame() {
+    Memory& m = machine_.memory();
+    if (!ready() || !remote_.airborne || rd8(m, kData, kNoPacket) != 0xFF) {
+        return;  // a packet came this frame (or the car is on the ground): as the original shows it
+    }
+    // No packet: the original moved the car on along its heading at its speed (0FC0-1051) but holds its
+    // height. In the air it falls instead, its nose following the path, down to the ground under it.
+    const double dt = frame_dt();
+    remote_.vz -= tuning_.gravity * dt;
+    remote_.z += remote_.vz * dt;
+    const int speed = std::max<int>(1, s16(rd16(m, kData, u16(kRemote + 0x0E))));
+    const double path = std::atan2(remote_.vz, speed) * 180 / kPi;
+    const double target = std::clamp<double>(path, -tuning_.air_pitch_max, tuning_.air_pitch_max);
+    const double rate = tuning_.air_pitch_rate * dt;
+    remote_pitch_ += std::clamp(target - remote_pitch_, -rate, rate);
+    if (remote_.z <= remote_.ground) {
+        remote_.z = remote_.ground;
+        remote_.airborne = false;
+        remote_pitch_ = 0;  // (the next packet has the ground's)
+    }
+    ++remote_.extrapolated;
+    ++remote_.extrapolated_total;
+    wr16(m, kData, u16(kRemote + 4), u16(static_cast<int>(std::lround(remote_.z))));
+    wr16(m, kData, u16(kRemote + 8), u16(static_cast<int>(std::lround(remote_pitch_))));
+}
 
 void Driving::remove() {
     Cpu& cpu = machine_.cpu();
@@ -344,6 +425,9 @@ void Driving::heading_update(Cpu& c) {
         // On the freeway (the game sets its own heights there) or after a pause: back on the ground.
         airborne_ = false;
         valid_ = false;
+    }
+    if (options_.improved && rd8(machine_.memory(), kData, kHighway) && two_player()) {
+        wr16(machine_.memory(), kData, u16(kPlayer + kFlightWord), 0);  // (freeway packets don't carry it)
     }
     if (airborne_) {
         // No grip in the air: the wheel doesn't turn the car. Skip `heading += wheel` (01A8-01C2).
@@ -551,6 +635,11 @@ void Driving::after_ground() {
         --ground_history_n_;
     }
     ground_history_[ground_history_n_++] = {now, ground};
+    if (options_.improved && two_player()) {
+        // Sent with the struct at 3009:023F, after this player step (see the header).
+        wr16(m, kData, u16(kPlayer + kFlightWord), airborne_ ? encode_flight(vz_) : 0);
+        wr16(m, kData, u16(kPlayer + kGroundWord), u16(ground));
+    }
     ground_prev_ = ground;
     x_prev_ = x;
     y_prev_ = y;

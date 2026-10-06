@@ -50,6 +50,8 @@ TEST(settings_round_trip) {
     s.graphics = Settings::Graphics::Pc98;
     s.show_launcher = false;
     s.game_folder = "C:\\Old Games\\VETTE = 1989 #1";  // spaces, '=' and '#' survive
+    s.online_server = "wss://vette2026-relay.example.workers.dev";
+    s.online_course = 3;
     CHECK(Settings::parse(s.serialize()) == s);
 }
 

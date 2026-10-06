@@ -16,6 +16,8 @@
 #include "platform/gamepad.h"
 #include "platform/presenter.h"
 #include "ui/canvas.h"
+#include "ui/online.h"
+#include "ui/text.h"
 #include "ui/theme.h"
 
 #ifndef VETTE_VERSION
@@ -27,7 +29,7 @@ namespace {
 
 enum Row {
     kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kDriving, kLaneCentering, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
-    kPlay, kQuit, kRows
+    kPlay, kOnline, kQuit, kRows
 };
 
 using namespace theme;
@@ -56,6 +58,7 @@ const char* label(int row) {
     case kMusic: return "Music";
     case kLauncher: return "This screen";
     case kPlay: return "Play";
+    case kOnline: return "Online race";
     default: return "Quit";
     }
 }
@@ -226,34 +229,11 @@ std::string_view help(int row, const Settings& s) {
         return "Skip: the game starts straight away next time. Run vette2026 --launcher to see this screen "
                "again.";
     case kPlay: return "Start VETTE! with these settings. They are saved for next time.";
+    case kOnline:
+        return "Race a friend over the internet: host a race and tell them its code, or join theirs with the "
+               "code they give you.";
     default: return "Leave without starting.";
     }
-}
-
-// Splits text into lines of at most `width` characters at spaces.
-std::vector<std::string> wrap(std::string_view text, size_t width) {
-    std::vector<std::string> lines;
-    std::string line;
-    while (!text.empty()) {
-        const size_t end = text.find(' ');
-        const std::string_view word = text.substr(0, end);
-        if (!line.empty() && line.size() + 1 + word.size() > width) {
-            lines.push_back(line);
-            line.clear();
-        }
-        line += line.empty() ? std::string(word) : " " + std::string(word);
-        text = end == std::string_view::npos ? std::string_view{} : text.substr(end + 1);
-    }
-    if (!line.empty())
-        lines.push_back(line);
-    return lines;
-}
-
-// Fits text into `chars` characters by dropping the start (paths keep their informative end).
-std::string fit_left(std::string s, size_t chars) {
-    if (s.size() <= chars || chars < 4)
-        return s;
-    return "..." + s.substr(s.size() - (chars - 3));
 }
 
 // Where everything goes on a canvas of the given size.
@@ -266,9 +246,9 @@ struct Layout {
         // Rows as far apart as the height allows (9 to 14 pixels), with room below them for the
         // versions found, the help (3 lines) and the key hints.
         const int below = 3 * kStatusPitch + 2 + 8 + 3 * 12 + 20;
-        pitch = std::clamp((height - list_y - below) / (kPlay + 3), 9, 14);
+        pitch = std::clamp((height - list_y - below) / (kRows + 1), 9, 14);
         actions_y = list_y + kPlay * pitch + pitch / 2;
-        status_y = actions_y + 2 * pitch + pitch / 2;
+        status_y = actions_y + (kRows - kPlay) * pitch + pitch / 2;
         rule_y = status_y + 3 * kStatusPitch + 2;  // a line per version
         help_y = rule_y + 8;
         hints_y = height - 14;
@@ -308,7 +288,7 @@ std::string describe_problem(const GameDirSearch& search) {
 }  // namespace
 
 LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, std::optional<GameDir>& game,
-                          GameDirSearch& search) {
+                          GameDirSearch& search, OnlineSession* online) {
     static FolderPick pick;  // static: a dialog left open must not outlive what its callback writes to
     int selected = game ? kPlay : kFolder;
     std::string status = game ? "" : describe_problem(search);
@@ -390,6 +370,16 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             }
             status = "Choose the game folder first.";
             selected = kFolder;
+        } else if (row == kOnline) {
+            if (!game) {
+                status = "Choose the game folder first.";
+                selected = kFolder;
+            } else if (!online || !online_available()) {
+                status = "This copy of VETTE! 2026 was built without online play.";
+            } else if (run_online(presenter, gamepad, s, *game, *online)) {
+                choice = LaunchChoice::Online;
+                return true;
+            }
         } else if (row == kQuit) {
             choice = LaunchChoice::Quit;
             return true;

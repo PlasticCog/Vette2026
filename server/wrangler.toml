@@ -1,0 +1,25 @@
+# VETTE! 2026 relay server (Cloudflare Workers, free plan). See README.md.
+name = "vette2026-relay"
+main = "src/index.js"
+# 2026-04-07 or later: the runtime answers WebSocket close frames itself. The newest date the pinned
+# wrangler's local runtime knows is 2026-04-26.
+compatibility_date = "2026-04-20"
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[durable_objects.bindings]]
+name = "LIMITER"
+class_name = "Limiter"
+
+# SQLite-backed Durable Objects: the only kind the free plan has.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room", "Limiter"]
+
+[vars]
+# Per client address, within 10 minutes: rooms created, and attempts to join a room.
+CREATES_PER_10_MIN = "10"
+JOINS_PER_10_MIN = "30"

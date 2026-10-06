@@ -37,14 +37,15 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="${GITHUB_SHA::7}"; fi
           echo "PACKAGE=vette2026-${version}-${{ matrix.name }}" >> "$GITHUB_ENV"
 
-      - name: Linux build dependencies (SDL3)
+      - name: Linux build dependencies (SDL3, and OpenSSL for online play)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build libasound2-dev libpulse-dev libpipewire-0.3-dev \
             libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev \
             libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libdrm-dev \
-            libgbm-dev libegl1-mesa-dev libgl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev
+            libgbm-dev libegl1-mesa-dev libgl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev \
+            libssl-dev
 
       - name: macOS build dependencies
         if: runner.os == 'macOS'
@@ -61,11 +62,14 @@ jobs:
         run: |
           extra=()
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            extra+=("-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc")
+            # OpenSSL (online play's TLS) is linked in, so the program doesn't depend on the system's
+            # libssl version; the trusted certificates are found at run time.
+            extra+=("-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc" "-DOPENSSL_USE_STATIC_LIBS=ON")
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
             extra+=("-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0")
           fi
-          # SDL3 is always built from source and linked statically: the packages need nothing installed.
+          # SDL3 and libcurl are always built from source and linked statically: the packages need
+          # nothing installed.
           cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_DISABLE_FIND_PACKAGE_SDL3=ON "${extra[@]}"
 
       - name: Build
@@ -76,6 +80,22 @@ jobs:
         run: |
           # Tests that need the original game files skip themselves; none are in the repository.
           "$BUILD/vette_tests"
+
+      - name: Online play TLS check
+        shell: bash
+        run: |
+          # A wss:// connection to a public HTTPS site with the system's trusted certificates: the TLS
+          # handshake and the certificate check must pass, which an HTTP status in the reply proves (the
+          # site then refuses the WebSocket: it isn't a relay server). Several sites, since a site's bot
+          # protection may drop a CI machine's connection before replying.
+          netcheck="$BUILD/vette_netcheck"
+          [[ -f "$netcheck" || -f "$netcheck.exe" ]] || { echo "::error::built without online play"; exit 1; }
+          for site in www.cloudflare.com www.google.com github.com; do
+            out=$("$netcheck" --server "wss://$site" --wait 4 create || true)
+            echo "$out"
+            grep -q "(HTTP [0-9]" <<<"$out" && exit 0
+          done
+          exit 1
 
       - name: Package
         shell: bash
@@ -91,6 +111,12 @@ jobs:
           done
           cp "$BUILD/_deps/ymfm-src/LICENSE" "$dist/licenses/ymfm.txt"
           cp "$BUILD/_deps/sdl3-src/LICENSE.txt" "$dist/licenses/SDL3.txt"
+          cp "$BUILD/_deps/curl-src/COPYING" "$dist/licenses/curl.txt"
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            # OpenSSL is linked in on Linux: its copyright notice and the Apache License 2.0 text.
+            { cat /usr/share/doc/libssl3/copyright 2>/dev/null || cat /usr/share/doc/libssl-dev/copyright
+              cat /usr/share/common-licenses/Apache-2.0; } > "$dist/licenses/OpenSSL.txt"
+          fi
           cp THIRD_PARTY_NOTICES.md "$dist/licenses/"
           case "$RUNNER_OS" in
             Windows) cp "$BUILD/vette2026.exe" "$dist/" ;;
@@ -120,6 +146,26 @@ jobs:
             dist/*.zip
             dist/*.tar.gz
           if-no-files-found: error
+
+  # The relay server (server/): its end-to-end tests against a local `wrangler dev` (no Cloudflare
+  # account needed).
+  relay:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Test against wrangler dev
+        run: |
+          npx wrangler dev --port 8787 --ip 127.0.0.1 --show-interactive-dev-session=false \
+            --var CREATES_PER_10_MIN:1000 --var JOINS_PER_10_MIN:1000 > wrangler.log 2>&1 &
+          for i in $(seq 60); do grep -q "Ready on" wrangler.log && break; sleep 1; done
+          npm test || { cat wrangler.log; exit 1; }
 
   release:
     needs: build

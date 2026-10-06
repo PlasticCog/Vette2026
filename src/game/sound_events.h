@@ -56,6 +56,7 @@ enum class Sfx : uint8_t {
     IntroCableCar,  // title: the cable car rolls in
     IntroCar,       // title: the Corvette comes at you
     IntroLogo,      // title: the VETTE! logo drops in
+    ServiceStation, // drove onto a service station's driveway (where stopping repairs the car)
     Count
 };
 
@@ -177,6 +178,8 @@ private:
     bool held_[2] = {};                // Horn, Helicopter on
     int countdown_ = 0;                // the start light last reported
     bool intro_bell_ = false;          // this title's cable car reported
+    bool station_in_ = false;          // the player is on a service station's driveway (reported)
+    bool station_hit_ = false;         // ... and was on it in the frame since the last race frame
 };
 
 // --- Decoding and models of the original's driver (also used by tests) ------------------------------

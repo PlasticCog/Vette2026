@@ -296,6 +296,9 @@ SfxBank SfxBank::defaults() {
     bell.patch.feedback = 2;
     bell.patch.modulator = {.sustained = false, .multiple = 7, .level = 18, .attack = 15, .decay = 3, .sustain = 8, .release = 3};
     bell.patch.carrier = {.sustained = false, .multiple = 2, .level = 0, .attack = 15, .decay = 2, .sustain = 10, .release = 3};
+    // The service station's driveway bell (the Mac uses its cable car bell here): brighter, shorter.
+    SfxVoice& station = fixed("service_station", 520, 1100, 75);
+    station.patch = bell.patch;
     SfxVoice& zoom = sweep("intro_car", 240, 70, 900, 85);
     zoom.patch = e;
     SfxVoice& chime = fixed("intro_logo", 262, 1300, 75);

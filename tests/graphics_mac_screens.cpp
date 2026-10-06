@@ -244,3 +244,60 @@ TEST(graphics_mac_dash_and_map_from_state) {
         CHECK_EQ(c.layers[2].image->width, 193);  // its box (no font in this memory: without text)
     }
 }
+
+TEST(graphics_mac_police_stop) {
+    ArtFiles files = ArtFiles::from_game_dir(repo_root() / "Game");
+    const fs::path extracted = repo_root() / "Vette_Mac_EN" / "extracted" / "VETTE! Folder" / "(Folder) Color VETTE!" /
+                               "Color VETTE!.rsrc";
+    std::error_code ec;
+    if (files.mac_pict(145).empty() && fs::exists(extracted, ec))
+        files.mac_pict = ArtFiles::from_folders({}, {}, extracted).mac_pict;
+    const auto ticket_bin = files.dos_file ? files.dos_file("TICKET.BIN") : std::vector<std::uint8_t>{};
+    if (files.mac_pict(145).empty() || ticket_bin.empty()) {
+        std::printf("  (skipped: no Mac Color VETTE! or DOS files)\n");
+        return;
+    }
+    Substitution sub(Art::Mac, files);
+    for (const auto& w : sub.warnings()) std::printf("  %s\n", w.c_str());
+    Composite c;
+
+    // The excuse list (no picture: the game's two boxes), the third excuse highlighted: the Mac
+    // dialog over the Mac dashboard, its third line framed; nothing of the DOS box stays.
+    std::vector<std::uint8_t> frame(320 * 200, 3);
+    for (int y = 100; y < 200; ++y)
+        for (int x = 0; x < 320; ++x) {
+            const bool inner = x >= 8 && x < 312 && y >= 103 && y < 197;
+            frame[static_cast<std::size_t>(y) * 320 + x] = inner ? 1 : 9;
+        }
+    for (int y = 135; y < 142; ++y)
+        for (int x = 8; x < 312; ++x) frame[static_cast<std::size_t>(y) * 320 + x] = 15;
+    CHECK(sub.compose({frame.data(), 320, 200, &kEga}, c));
+    CHECK(sub.found().size() == 1 && sub.found()[0].screen == Screen::Excuses);
+    CHECK_EQ(c.layers.size(), std::size_t{2});  // the dialog and dashboard, one frame
+    if (c.layers.size() == 2) {
+        CHECK_EQ(c.layers[0].image->width, 512);
+        // The frame on the third line: dialog line 3 (rows 55-63 of 139, at 83,15), in frame pixels.
+        const FRect f = c.layers[1].dst;
+        CHECK(f.y > 100 + (15 + 31 + 22) * 100.0f / 192 - 1 && f.y < 100 + (15 + 31 + 22) * 100.0f / 192 + 1);
+    }
+    for (int y = 100; y < 200; ++y)
+        for (int x = 0; x < 320; ++x) CHECK(c.over[static_cast<std::size_t>(y) * 320 + x] == kTransparent);
+
+    // The ticket with speeding and vehicular manslaughter checked: the Mac notice, two check marks.
+    DosPicture ticket;
+    CHECK(decode_dos_picture(ticket_bin, 0x1C, 96, 121, ticket));
+    std::fill(frame.begin(), frame.end(), std::uint8_t{3});
+    for (int y = 0; y < 121; ++y)
+        for (int x = 0; x < 96; ++x) frame[static_cast<std::size_t>(y) * 320 + 40 + x] = ticket.pixels[static_cast<std::size_t>(y) * 96 + x];
+    for (const int row : {35, 59})
+        for (int k = 1; k < 6; ++k) {
+            frame[static_cast<std::size_t>(row + k) * 320 + 41 + k] = 1;
+            frame[static_cast<std::size_t>(row + k) * 320 + 47 - k] = 1;
+        }
+    CHECK(sub.compose({frame.data(), 320, 200, &kEga}, c));
+    CHECK(!sub.found().empty() && sub.found().back().screen == Screen::Ticket);
+    CHECK_EQ(c.layers.size(), std::size_t{3});
+    if (c.layers.size() == 3) CHECK_EQ(c.layers[1].image->width, 12);  // PICT 146
+    for (int y = 0; y < 121; ++y)
+        for (int x = 40; x < 136; ++x) CHECK(c.over[static_cast<std::size_t>(y) * 320 + x] == kTransparent);
+}

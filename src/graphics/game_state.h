@@ -15,6 +15,9 @@ namespace vette::graphics {
 // Linear addresses in the emulator of the game's data and code segments.
 constexpr std::uint32_t kGameDs = (0x124Au + 0x1000u) * 16;
 constexpr std::uint32_t kGameCs = (0x3009u + 0x1000u) * 16;
+// The second data segment (image 0ACBh, 1ACBh at run time): file names, the excuse list, the
+// penalty texts.
+constexpr std::uint32_t kGameDs2 = (0x0ACBu + 0x1000u) * 16;
 constexpr std::uint32_t kProgramImage = 0x1000u * 16;  // the unpacked VETTE.EXE image
 
 struct DashState {

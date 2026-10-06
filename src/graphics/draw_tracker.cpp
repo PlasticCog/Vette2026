@@ -31,6 +31,9 @@ constexpr std::uint16_t kTextF3E1 = 0xF3E1;   // 8x10 text (menus): count-prefix
 constexpr std::uint16_t kText5D55 = 0x5D55;   // 8x7 text, 320 mode: DX page, DI, AH colour
 constexpr std::uint16_t kSprite858F = 0x858F; // masked sprite row writer (mask pass from 3009:854C)
 constexpr std::uint16_t kUnpack8666 = 0x8666; // RLE picture into a page: AX seg, DI, BH bytes, BP rows
+// The same in 320 mode (rows 28h apart), in segment 4160h (5160h at run time), through 3009:065A:
+// the race's pictures (crash, lost race, the police stop's ticket and officer).
+constexpr std::uint32_t kUnpack320 = (0x4160u + 0x1000u) * 16 + 0x0896;
 constexpr std::uint16_t kCopy8820 = 0x8820;   // page copy (latches): AX:SI -> DX:DI, BH x BP
 constexpr std::uint16_t kFill88AF = 0x88AF;   // solid rectangle: AX:DI, BH x BP, BL colour (set/reset)
 constexpr std::uint16_t kXor886E = 0x886E;    // XOR rectangle (highlight bars): AX:DI, BH x BP, BL
@@ -70,6 +73,10 @@ DrawTracker::DrawTracker(host::Machine& machine)
     watches_.push_back(cpu.add_watch(at(kUnpack8666), [this](Cpu& c) {
         const auto& r = c.regs;
         clear({vram(r.r[AX], r.r[DI]), r.hi(BX), r.r[BP], 0x50}, "unpack");
+    }));
+    watches_.push_back(cpu.add_watch(kUnpack320, [this](Cpu& c) {
+        const auto& r = c.regs;
+        clear({vram(r.r[AX], r.r[DI]), r.hi(BX), r.r[BP], 0x28}, "unpack320");
     }));
     watches_.push_back(cpu.add_watch(at(kCopy8820), [this, stride_b](Cpu& c) {
         const auto& r = c.regs;

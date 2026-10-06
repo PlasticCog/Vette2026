@@ -37,6 +37,9 @@ constexpr uint16_t kTitleReveal = 0xC55D;    // title_screen: the picture dissol
 constexpr uint16_t kTitleCableCar = 0xC5A6;  // title_screen: one step of the cable car rolling in
 constexpr uint16_t kTitleCar = 0xC612;       // title_screen: the Corvette coming at you (title_car_approach)
 constexpr uint16_t kTitleLogo = 0xC615;      // title_screen: the logo drops in (title_logo_drop)
+// collision_box_event, the service station's driveway box (C358h; the player only): stopping there
+// repairs the car. Called every frame the car is in the box.
+constexpr uint16_t kServiceStation = 0x1B74;
 // The keyboard handler in segment 3FFC, past updating its key bitmap (game keyboard mode only).
 constexpr uint16_t kKeyboard = emu_seg(0x3FFC);
 constexpr uint16_t kKeyUpdated = 0x0219;
@@ -108,7 +111,7 @@ constexpr std::array<const char*, static_cast<size_t>(Sfx::Count)> kNames{
     "engine", "garage_rev", "skid", "siren", "title_tune", "win_tune",
     "crash", "crash_car", "crash_rail", "hit_pedestrian", "gear_grind",
     "horn", "helicopter", "countdown_beep", "countdown_go", "splash", "thud", "pulled_over",
-    "intro_cable_car", "intro_car", "intro_logo",
+    "intro_cable_car", "intro_car", "intro_logo", "service_station",
 };
 constexpr Sfx kHeld[] = {Sfx::Horn, Sfx::Helicopter};
 
@@ -150,6 +153,7 @@ SfxKind sfx_kind(Sfx s) {
     case Sfx::IntroCableCar:
     case Sfx::IntroCar:
     case Sfx::IntroLogo:
+    case Sfx::ServiceStation:
         return SfxKind::Cue;
     default:
         return SfxKind::Tone;
@@ -267,6 +271,14 @@ SoundEvents::SoundEvents(host::Machine& machine) : machine_(machine) {
     });
     watch(kTitleCar, [this](Cpu&) { cue(Sfx::IntroCar); });
     watch(kTitleLogo, [this](Cpu&) { cue(Sfx::IntroLogo); });
+    watch(kServiceStation, [this](Cpu&) {
+        // On each drive onto the driveway, as the Mac rings it: again only after a frame off it.
+        station_hit_ = true;
+        if (!station_in_) {
+            station_in_ = true;
+            cue(Sfx::ServiceStation);
+        }
+    });
     watches_.push_back(cpu.add_watch(Cpu::linear(kKeyboard, kKeyUpdated), [this](Cpu&) { update_held(); }));
 }
 
@@ -429,6 +441,10 @@ void SoundEvents::on_frame() {
         cue(Sfx::Thud);
     }
     motion_ = now;
+    if (!station_hit_) {
+        station_in_ = false;  // the last frame's box tests didn't find the car on the driveway
+    }
+    station_hit_ = false;
     update_held();
 }
 

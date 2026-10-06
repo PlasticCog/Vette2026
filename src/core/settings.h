@@ -32,6 +32,15 @@ struct Settings {
     // neighbour); Smooth softens the edges between them.
     enum class Scaling { Sharp, Smooth };
     Scaling scaling = Scaling::Sharp;
+    // The painted backdrop behind the Enhanced 3D view (Extended and Maximum draw distance): Hills keeps
+    // only the landscape, as the real city stands in front of it; Painted is the original's, with its
+    // painted skyline and bridges.
+    enum class Skyline { Hills, Painted };
+    Skyline skyline = Skyline::Hills;
+    // The resolution the Enhanced 3D view (Extended and Maximum draw distance) is drawn at: the
+    // display's, or the original's 320x200, then enlarged like the rest of the picture.
+    enum class ViewResolution { Display, Original };
+    ViewResolution view_resolution = ViewResolution::Display;
     Effects effects = Effects::AdLib;
     Music music = Music::Original;
     Graphics graphics = Graphics::Dos;

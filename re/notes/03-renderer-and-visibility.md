@@ -14,7 +14,7 @@ Addresses are image-relative `SEG:OFF`; data is in `DS=124A` unless marked `cs:`
 | 5 | **Traffic is a 4×4-cell repeating pattern bound to the view** | 3009:32F8/33C6/34D6 | a vehicle is drawn in whichever window cell matches `(cell & 0x33)`; the draw writes that cell back into the vehicle list | Visual only: draw the periodic replicas from a pure draw pass. The cell write-back stays in the original-window pass (row 6). See "Traffic" below |
 | 6 | **Rendering writes simulation state** | 3009:33C6–34C8, 351C–3585 | collision candidates DS:2B7A/2B7C, vehicle cell binding, DS:312E | Keep an original-window "visibility pass" for these writes |
 | 7 | 16-bit camera-relative coordinates | 3009:3917, 3D8C, 31EE | positions are words in the camera big tile's frame (big tile = 0x8000) | Use 32-bit/float math for far cells |
-| 8 | Horizon backdrop at a fixed distance | `horizon_line` 3009:59B3 | ground point 25000 units ahead; panorama 8 px/degree | Re-think: far geometry will overlap the painted skyline |
+| 8 | Horizon backdrop at a fixed distance | `horizon_line` 3009:59B3 | ground point 25000 units ahead; panorama 8 px/degree | Done (Enhanced): the Hills skyline, the panoramas without their painted city |
 | 9 | Highway mode road ring | `highway_frame` 3009:775E | 32 road slices ahead, 11 cars | Separate renderer (see "Highway mode") |
 
 There is **no far clip plane** in the projection. Only the near plane (z ≥ 1) is clipped. Distance is limited
@@ -267,6 +267,43 @@ frame recomputes them. **confirmed**
   scrolls about 1.8× faster than the geometry. **confirmed**
 - HORIZON0/1/2.BIN = 4 planes × 24 rows × 400 bytes (38400 bytes). They are loaded at FE8F–FEC1 and copied plane by plane to A400:0000,
   2580h, 4B00h by `load_horizon_planes` 6793. The map is 5×5 big tiles, and DS:3C8E picks the panorama per big tile. **confirmed**
+- The copy itself is `vram_copy_rows` 6773 (its only caller is 676F): AX = cs:0013 (A400), SI = the panorama's base +
+  heading byte DS:2C77 + skipped rows·400, DX = cs:0011 (the back buffer), DI = the top row's offset (table 497F),
+  BP = rows. It is a do-while: BP ≤ 0 still copies one row (the helicopter view, pitch −17, where the horizon is
+  above the viewport). **confirmed** (watch in the replay)
+- One byte per degree: screen column x shows panorama column 8·heading + x, so panorama column c faces
+  (c − 160)/8 degrees (yaw 0 = +x = north, 90 = +y = east). Columns 2880–3199 repeat 0–319. **confirmed**
+- DS:3C8E = 4,2,2,0,0, 4,2,2,0,0, 2,2,2,2,0, 0,0,2,2,0, 0,0,0,0,0 (word index into DS:3CA7, big tile =
+  x_tile·5 + y_tile): **HORIZON2** from the west edge (big tiles 0, 5: the Great Highway), **HORIZON1** from the city
+  and the water next to it (1, 2, 6, 7, 10–13, 17, 18), **HORIZON0** from the rest of the bay. **confirmed**
+- What they show (columns; DOS v1.1, FNV-1a of the 24×3200 pixels in brackets):
+  - HORIZON0 [DDD8C848C468F2CD], the bay: hills and water all round; the city as a far skyline 1548–2418 (Sutro
+    Tower 2040, the Transamerica Pyramid 2270, hills peeking over it 1640–1880), piers 1455–1518 and 2416–2480,
+    Alcatraz 2660–2730.
+  - HORIZON1 [61658111DE986D61], the city: downtown 2866–872 (wrapping) in front of the bay and the brown East Bay
+    hills, the Bay Bridge's towers and deck on Yerba Buena Island 873–1000, SoMa and its freeways 1040–1690, Twin
+    Peaks with Sutro Tower 1690–1900, the Sunset and Richmond 1900–2575, the Golden Gate Bridge on the Marin hills
+    2589–2672, the northern waterfront's towers and piers 2672–2866.
+  - HORIZON2 [59407C9AF545B84A], the ocean side: the Marin headlands 0–290 and 2830–2879, the Presidio's trees with
+    the Golden Gate Bridge above them and houses below 290–1000, the Sunset's houses under Twin Peaks and Mount Sutro
+    (Sutro Tower 1170) 1000–1600, Ocean Beach 1600–1670, the ocean (two ships, Seal Rocks 2720–2800).
+
+## Enhanced: the Hills skyline (`src/enhanced/backdrop.h`)
+At the Extended and Maximum draw distances the real city reaches the horizon, and the painted one doubled it (at a
+different scroll rate: 8 px/degree against ≈4.5). With Settings::Skyline::Hills (the default; `--skyline`), the
+Enhanced view's background shows landscape-only versions of the three panoramas instead:
+- They are made at run time from the player's pictures, read from the off-screen video memory, for the three
+  pictures above (recognised by their hash; any other picture is left as it is). A table of hand-found column
+  ranges and rectangles says what is built; those parts are painted over with what lies behind them: hills
+  (a skyline drawn through hand-placed points, keeping the original's own skyline where it shows between the
+  buildings, with roughness and textures taken from the panorama's natural parts), water, trees, sky. Hills,
+  mountains, trees, islands, rocks, beaches and the water stay as painted. About 1 ms per panorama.
+- Where: SmoothRenderer's replay watches 6773 and reports the copy (Layers::horizon); EnhancedView redraws those
+  rows of `under` before the scene goes over it, whenever the city is drawn (not on a freeway alone: there the
+  painted skyline is the only city). The real machine, Classic and the game's own frames are untouched; the mirror
+  has no panorama (5A2E).
+- `vette_world --horizon-dump` writes the panoramas and their Hills versions; `--sky-views` / `--sky-sweep` /
+  `--sky-view` draw the Enhanced view from places around the map with both skylines.
 
 ## Traffic and the render pass's side effects (important for Classic 1:1)
 - Vehicle lists per big tile: {w entity ptr, w cell index (x·16+y)}. Entity +0 = draw routine, +2/+4/+6 = x/y/z. **confirmed**
@@ -362,6 +399,7 @@ against the original's frames shows 0.002 % of the view's pixels structurally di
    must not write the list cells.
 6. Horizon: draw it first as now. With far geometry the painted skyline (bridges, downtown) will double up. Options:
    re-project the panorama at the true angular scale, or treat it as a sky/hill backdrop behind a draw distance of ~25000.
+   Done as the latter: the Hills skyline (above). The backdrop still scrolls at its own 8 px/degree.
 7. Mirror in Enhanced: draw it with the full window. The side effects still come from the original reduced
    (DS:18) pass in step 1.
 

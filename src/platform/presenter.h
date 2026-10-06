@@ -52,6 +52,10 @@ public:
     // Smooth: the 2D pictures' pixel edges softened ("sharp bilinear"); otherwise every pixel is a
     // solid block (nearest neighbour), as the original's graphics simply enlarged.
     void set_smooth_scaling(bool smooth) { smooth_ = smooth; }
+    // On: the Enhanced 3D view (and its mirror) is drawn at the frame's own resolution (the original's
+    // 320x200), then enlarged like the frame; frame_scale() is then 1.
+    void set_original_resolution(bool on) { original_resolution_ = on; }
+    bool original_resolution() const { return original_resolution_; }
     void toggle_fullscreen();
     void set_fullscreen(bool on);
     bool fullscreen() const;
@@ -78,8 +82,11 @@ private:
     SDL_Texture* upload(Layer& layer, const Framebuffer& fb, bool transparency, const SDL_FRect& dst);
     SDL_Texture* upload(Layer& layer, const std::uint8_t* pixels, int w, int h,
                         const std::array<std::uint32_t, 16>& argb, bool transparency, const SDL_FRect& dst);
+    SDL_Texture* enlarge(Layer& layer, bool transparency, const SDL_FRect& dst);
     void draw_scene(const Framebuffer& under, const enhanced::Scene& scene, const enhanced::Scene* inset,
                     const SDL_FRect& dst);
+    void draw_scene_layers(SDL_Texture* under, int frame_w, int frame_h, const enhanced::Scene& scene,
+                           const enhanced::Scene* inset, const SDL_FRect& dst);
     void draw_triangles(const enhanced::Scene& scene, int frame_w, int frame_h, const SDL_FRect& dst);
     void draw_composite(const graphics::Composite& c, const SDL_FRect& dst);
     SDL_Texture* art_texture(const graphics::Image& image);
@@ -92,6 +99,7 @@ private:
     Layer base_;  // present()'s frame, and the layered view's `under`
     Layer over_;  // the layered view's `over`
     Layer art_base_, art_over_, art_moved_;  // a Composite's DOS pixels
+    Layer low_under_, low_scene_;  // set_original_resolution(): `under`, and the view drawn at the frame's size
     std::unordered_map<const graphics::Image*, SdlPtr<SDL_Texture>> art_;  // its art, by image
     SdlPtr<SDL_Texture> canvas_;   // the last Canvas, at its own size
     std::vector<float> scene_xy_;  // the scene's vertices in render output pixels
@@ -103,6 +111,7 @@ private:
     int picture_h_ = 0;
     bool system_cursor_shown_ = true;
     bool smooth_ = false;
+    bool original_resolution_ = false;
 };
 
 }  // namespace vette

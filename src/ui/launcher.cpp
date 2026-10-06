@@ -26,7 +26,7 @@ namespace vette::ui {
 namespace {
 
 enum Row {
-    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kGraphics, kEffects, kMusic, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
+    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kSkyline, kGraphics, kEffects, kMusic, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
     kPlay, kQuit, kRows
 };
 
@@ -46,6 +46,8 @@ const char* label(int row) {
     case kJoystick: return "Joystick";
     case kDisplay: return "Display";
     case kScaling: return "Scaling";
+    case kSkyline: return "Skyline";
+    case kViewResolution: return "Resolution";
     case kGraphics: return "Graphics";
     case kEffects: return "Sound effects";
     case kMusic: return "Music";
@@ -95,6 +97,9 @@ std::string value(int row, const Settings& s, const GameDirSearch& search, const
         return s.joystick == Settings::Joystick::Auto ? "Auto" : s.joystick == Settings::Joystick::On ? "On" : "Off";
     case kDisplay: return s.fullscreen ? "Full screen" : "Window";
     case kScaling: return s.scaling == Settings::Scaling::Sharp ? "Sharp pixels" : "Smooth";
+    case kSkyline: return s.skyline == Settings::Skyline::Hills ? "Hills only" : "Painted (original)";
+    case kViewResolution:
+        return s.view_resolution == Settings::ViewResolution::Display ? "Display" : "Original 320x200";
     case kGraphics: {
         const std::string v = s.graphics == Settings::Graphics::Dos    ? "DOS (original)"
                               : s.graphics == Settings::Graphics::Pc98 ? "PC-98"
@@ -140,8 +145,9 @@ std::string_view help(int row, const Settings& s) {
         return s.draw_distance == Settings::DrawDistance::Original
                    ? "The game's own 3D view: about two blocks ahead, at 320x200."
                : s.draw_distance == Settings::DrawDistance::Extended
-                   ? "The 3D view at your display's resolution, eight blocks around you."
-                   : "The 3D view at your display's resolution, with the whole city in view to the horizon.";
+                   ? "The long-distance 3D view, eight blocks around you."
+                   : "The whole city at once, to the horizon, with all its traffic and pedestrians: nothing "
+                     "pops in.";
     case kManualCheck:
         return "Copy protection: the original asks a question from the manual before the first race. This "
                "version of the game accepts any answer.";
@@ -149,6 +155,17 @@ std::string_view help(int row, const Settings& s) {
         return "Auto: a gamepad connected at startup becomes the PC's joystick. On: always there. Off: none "
                "(the pad still works in menus).";
     case kDisplay: return "F11 or Alt+Enter switches at any time.";
+    case kViewResolution:
+        return s.view_resolution == Settings::ViewResolution::Display
+                   ? "The long-distance 3D view is drawn at your display's full resolution: smooth edges and "
+                     "fine lines."
+                   : "The long-distance 3D view is drawn at the original's 320x200 and enlarged like the rest "
+                     "of the game, with every enhancement kept.";
+    case kSkyline:
+        return s.skyline == Settings::Skyline::Hills
+                   ? "The backdrop behind the long-distance 3D view keeps only the hills: the real city stands in "
+                     "front of it, so its painted buildings and bridges are left out."
+                   : "The original painted backdrop, skyline and bridges included, behind the 3D view.";
     case kScaling:
         return s.scaling == Settings::Scaling::Sharp
                    ? "The original's pictures simply enlarged: every pixel a solid block."
@@ -222,8 +239,11 @@ struct Layout {
 
     explicit Layout(int height) {
         margin = 16;
-        pitch = height >= 360 ? 14 : 12;
         list_y = 56;
+        // Rows as far apart as the height allows (10 to 14 pixels), with room below them for the
+        // versions found, the help (3 lines) and the key hints.
+        const int below = 3 * kStatusPitch + 2 + 8 + 3 * 12 + 20;
+        pitch = std::clamp((height - list_y - below) / (kPlay + 3), 10, 14);
         actions_y = list_y + kPlay * pitch + pitch / 2;
         status_y = actions_y + 2 * pitch + pitch / 2;
         rule_y = status_y + 3 * kStatusPitch + 2;  // a line per version
@@ -308,6 +328,14 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             break;
         case kManualCheck: s.manual_check = !s.manual_check; break;
         case kJoystick: s.joystick = static_cast<Settings::Joystick>((static_cast<int>(s.joystick) + dir + 3) % 3); break;
+        case kViewResolution:
+            s.view_resolution = s.view_resolution == Settings::ViewResolution::Display
+                                    ? Settings::ViewResolution::Original
+                                    : Settings::ViewResolution::Display;
+            break;
+        case kSkyline:
+            s.skyline = s.skyline == Settings::Skyline::Hills ? Settings::Skyline::Painted : Settings::Skyline::Hills;
+            break;
         case kScaling:
             s.scaling = s.scaling == Settings::Scaling::Sharp ? Settings::Scaling::Smooth : Settings::Scaling::Sharp;
             presenter.set_smooth_scaling(s.scaling == Settings::Scaling::Smooth);
@@ -368,10 +396,10 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             }
         }
 
-        // Canvas: the largest integer scale that keeps at least ~500x300 logical pixels.
+        // Canvas: the largest integer scale that keeps at least ~500x340 logical pixels.
         int out_w = 0, out_h = 0;
         presenter.output_size(out_w, out_h);
-        const int scale = std::max(1, std::min(out_w / 500, out_h / 300));
+        const int scale = std::max(1, std::min(out_w / 500, out_h / 340));
         canvas.reset(std::max(out_w / scale, 1), std::max(out_h / scale, 1), scale, kBackground);
         const Layout lay(canvas.height);
 

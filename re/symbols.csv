@@ -493,3 +493,8 @@ addr,name,kind,comment
 3FFC:0145,kbd_game_mode_on,func,Zeroes kbd_state and sets kbd_game_mode.
 3009:0CA2,key_map_toggle,func,"H: toggles DS:2ADD (the map display, likely), clears the D display."
 3009:0C7C,key_damage_toggle,func,"D: toggles DS:2AC9 (the damage indicator, likely), message timer DS:3DEE."
+# --- Sound: the service station (re/notes/07-sound.md section 9.3) -------------------------------
+3009:1B74,box_service_station,label,"collision_box_event, box C358h (a service station's driveway; player only): stopped there on ROOKIE/PRO -> repair_car, damage display 2 s."
+124A:C358,box_driveway,data,"4 w; the service station driveway box {x 400, y 1536, x 504, y 1791}, third box of collision class 1Ah (cell type 14)."
+3009:2454,repair_car,func,"Clears the damage (DS:3DC0-3DC7, 2C4F, 2C5B, 2C5D) and resets the steering limits (2AEA/2AEB); service stations and race setup."
+124A:3DC0,damage_parts,data,8 b; damage per part (shown by the damage display); cleared by repair_car.

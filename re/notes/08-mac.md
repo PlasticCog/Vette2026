@@ -206,16 +206,36 @@ The Mac's other sounds play at moments DOS passes in silence. The DOS observer r
 | `intro_cable_car` | `cable car bell` (the intro's use: channel 1, 2 s) | title: the cable car rolls in |
 | `intro_car` | `mic` | title: the Corvette comes at the viewer |
 | `intro_logo` | `Signature` | title: the VETTE! logo drops in |
+| `service_station` | `cable car bell` (the race's use) | onto a service station's driveway, where stopping repairs the car |
 
-Still without a DOS moment: the race's `cable car bell` (DOS has no cable car in the race, and no box where
-the Mac's is), the landing `thud` (DOS cars never leave the ground), the wreck `crash`, and the intro's
-`Engine`.
+Still without a DOS moment: the landing `thud` (DOS cars never leave the ground), the wreck `crash`, and the
+intro's `Engine`.
 
-**The cable car bell** (6:5688) is a box handler: the Mac's box-type table (CODE 10, longs 0006xxxx from
-offset 4777) sends three box types to jump table entry A5+6D2. Each frame `1:2746` clears a "in the box" flag
-(A5−$33E8); the handler sets it and rings the bell when it wasn't already ringing for this box (A5−$33EA),
-which is cleared again once a frame passes outside the box (1:295C). So it rings on each entry, not once
-per race. Which cells carry those boxes is still open.
+**The cable car bell in races rings at service stations** (**confirmed**). Its handler, 6:5688, is one of
+the Mac's box handlers:
+
+- **Dispatch** (6:3FEE): the box test (6:4064) finds the car's cell in the map (A5−$250C, 52 cells a row;
+  the car's +$6E and +$72 >> 11 are the column and row), its type's QUAD record (A5−$4DDA) and the record's
+  collision class, whose box list (A5−$424E[class]) holds `{w row-axis min, w column-axis min, w max, w max}`
+  boxes, FFFF-terminated. A box that holds the car is looked up in a 44-entry pointer table at A5−$30C0;
+  its index picks the handler from A5−$300C.
+- **Bell box**: box 3, the third box of class 26. Boxes 28 and 29 (classes 89 and 90) share the handler but
+  are on no cell of the main map.
+- **Each entry**: each frame 1:2746 clears an "in the box" flag (A5−$33E8). The handler sets it and rings
+  the bell unless it already rang for this visit (A5−$33EA), which 1:295C clears once a frame passes outside.
+- **The repair**: then, if the car has stopped, the handler repairs it, like DOS's box C358h (notes 07
+  section 9.3).
+- **Where**: class 26 belongs to Mac cell type 3, the service station (the same cell objects as types 151 and
+  139). It is on 13 Main_Map cells, (column, row) (49, 5), (43, 6), (17, 7), (13, 12), (16, 15), (6, 17),
+  (40, 20), (28, 26), (44, 26), (34, 28), (36, 33), (28, 35) and (34, 37), and type 235 at (50, 14).
+  DOS has 12 (cell type 14).
+
+**The A5 globals** these tables live in are built at launch by CODE 10's initializer (10:0004-0118). It
+reads a block header `{l size, l base (0: below A5), w records, w unused}` at 10:011A, zero-fills, then
+replays 2228 records: a flag byte (low nibble plus bit 4/bit 11 extension bytes give a byte count; bit 7
+adds an unused repeat count), a 15- or 23-bit offset, then the bytes to copy (bit 5 clear) or a value of
+that many bytes to add (bit 5 set). Bit 6 adds A5 to the long at the offset. The table at A5−$30C0 is then
+44 pointers to boxes and −1; at A5−$300C, 44 jump table addresses.
 
 The countdown answers a question in notes 07. DOS 1.1 has two unused beeps: `snd_beep_lo` (659.6 Hz) and
 `snd_beep_hi` (880.6 Hz), and its countdown is silent. The Mac plays beep1, beep1, beep2, which is the
@@ -230,9 +250,9 @@ on 2. A new sound on a busy channel replaces the one there (horn and siren share
 
 - The content of `mic` and `Signature` has not been identified by listening (see the table).
 - `joel`'s words. Its loop end (29693, 2.67 s in) lies past the game's 2.5 s limit, so it never loops.
-- The exact cell types that trigger `thud` (the list at A5−$3116) and `splash`, and the cells with the cable
-  car's box (box types 3, 28 and 29 of the CODE 10 table, if it is indexed from 0). These are needed only to
+- The exact cell types that trigger `thud` (the list at A5−$3116) and `splash`. These are needed only to
   mirror the Mac's events in places where DOS has none.
+- Which map the Mac's service station cell types 151 and 139 (bell boxes 28 and 29) are used on.
 - The horn key: the handler at 1:30C0 tests a GetKeys bit (released at 1:2E0C, byte 0 bit 6 of the KeyMap
   copy at A5−$39B6); which key that is depends on the KeyMap's bit order, not settled.
 - Whether the B&W application uses other durations anywhere. Its call sites match in number and

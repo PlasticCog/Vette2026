@@ -28,6 +28,8 @@ constexpr Choice<Settings::Graphics, 3> kGraphics{"graphics", {"dos", "pc98", "m
 constexpr std::array<std::string_view, 2> kManualCheck{"skip", "show"};
 constexpr std::array<std::string_view, 2> kDisplay{"window", "fullscreen"};
 constexpr Choice<Settings::Scaling, 2> kScaling{"scaling", {"sharp", "smooth"}};
+constexpr Choice<Settings::Skyline, 2> kSkyline{"skyline", {"hills", "painted"}};
+constexpr Choice<Settings::ViewResolution, 2> kViewResolution{"view_resolution", {"display", "original"}};
 constexpr std::array<std::string_view, 2> kOnOff{"off", "on"};
 
 std::string_view trim(std::string_view s) {
@@ -94,6 +96,8 @@ std::string Settings::serialize() const {
     out << kJoystick.key << " = " << kJoystick.names[static_cast<size_t>(joystick)] << "\n";
     out << "display = " << kDisplay[fullscreen] << "\n";
     out << kScaling.key << " = " << kScaling.names[static_cast<size_t>(scaling)] << "\n";
+    out << kSkyline.key << " = " << kSkyline.names[static_cast<size_t>(skyline)] << "\n";
+    out << kViewResolution.key << " = " << kViewResolution.names[static_cast<size_t>(view_resolution)] << "\n";
     out << kEffects.key << " = " << kEffects.names[static_cast<size_t>(effects)] << "\n";
     out << kMusic.key << " = " << kMusic.names[static_cast<size_t>(music)] << "\n";
     out << kGraphics.key << " = " << kGraphics.names[static_cast<size_t>(graphics)] << "\n";
@@ -120,6 +124,8 @@ Settings Settings::parse(const std::string& text) {
         read_bool("manual_check", kManualCheck, key, value, s.manual_check);
         read_bool("display", kDisplay, key, value, s.fullscreen);
         read(kScaling, key, value, s.scaling);
+        read(kSkyline, key, value, s.skyline);
+        read(kViewResolution, key, value, s.view_resolution);
         read(kEffects, key, value, s.effects);
         read(kMusic, key, value, s.music);
         read(kGraphics, key, value, s.graphics);

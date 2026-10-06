@@ -53,6 +53,10 @@ enum class Screen {
     TitleLogo,      // the title's sprites: BIGVET.BIN (the VETTE! logo), SPETRUM.BIN ("presents"),
     TitlePresents,  // VX.BIN (the car coming up the road, five frames)
     TitleCar,
+    Ticket,   // the police stop (TICKET.BIN): the ticket with the offences checked,
+    Officer,  // the officer letting you off ("OK, just don't let it happen again"),
+    Excuses,  // the excuse list the game draws over the dashboard (no picture: two boxes),
+    Penalty,  // PENALTY.BIN: the tickets' penalty time, over the high scores
     Count
 };
 const char* screen_name(Screen screen);

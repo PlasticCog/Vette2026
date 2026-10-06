@@ -230,7 +230,7 @@ TEST(game_sound_kinds) {
     }
     CHECK(sfx_kind(Sfx::Horn) == SfxKind::Held && sfx_kind(Sfx::Helicopter) == SfxKind::Held);
     for (const Sfx s : {Sfx::CountdownBeep, Sfx::CountdownGo, Sfx::Splash, Sfx::Thud, Sfx::PulledOver,
-                        Sfx::IntroCableCar, Sfx::IntroCar, Sfx::IntroLogo}) {
+                        Sfx::IntroCableCar, Sfx::IntroCar, Sfx::IntroLogo, Sfx::ServiceStation}) {
         CHECK(sfx_kind(s) == SfxKind::Cue);
     }
     // The ids stay where they were (sound banks and settings name them).
@@ -238,6 +238,8 @@ TEST(game_sound_kinds) {
     static_assert(vette::game::kHornScancode == 0x2D);  // X
     CHECK_EQ(std::string(sfx_name(Sfx::Helicopter)), std::string("helicopter"));
     CHECK_EQ(std::string(sfx_name(Sfx::IntroLogo)), std::string("intro_logo"));
+    CHECK_EQ(std::string(sfx_name(Sfx::ServiceStation)), std::string("service_station"));
+    static_assert(static_cast<int>(Sfx::ServiceStation) == 21);
 }
 
 TEST(game_sound_thud) {

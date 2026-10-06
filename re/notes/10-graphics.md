@@ -31,9 +31,9 @@ time) by `3009:CBDA/CBF0`; full-screen pictures go to the off-screen page A800h 
 | Race dashboard | **no file**: RLE inside VETTE.EXE at program-image offset 100h (100h–1D07h) | 320×80 | 0Dh | rows 120–199 of both pages, from the off-screen copy cs:0023 (`3009:5F00`) | hands, gauge bars, speed/RPM digits, cruise/auto lights, steering arrows, shift arrow, clock and message display, sign panel (speed limit, turn icons), the right hand on the shifter |
 | Dashboard looking left (F1) / right (F3) | **no file**: RLE in VETTE.EXE at 0A226h / 08C95h (unpacked at race start into cs:001F / cs:001D, `3009:5C64` / `5C29`) | 320×80 | 0Dh | rows 120–199 when DS:2B87 = −85 / +85 (`3009:71A8`) | the side mirror above it |
 | Crash | `CRASH0.BIN`, `CRASH1.BIN`, RLE | 176×128 | 0Dh | over the 3D view, e.g. (72,30), dissolved in | — (0 = into a truck, 1 = into the water) |
-| Lost the race | `LOSER0-3.BIN`, RLE | 176×128 | 0Dh | as the crash pictures (**TBD** position) | — (0 Porsche, 1 Lamborghini, 2 Testarossa, 3 F40; speech bubble in the picture) |
-| Notice to appear | `PENALTY.BIN`, RLE | 208×121 | ? | **TBD** | ticket text **TBD** |
-| Ticket | `TICKET.BIN`, RLE | ? (11596 bytes unpacked) | ? | **TBD**: layout not decoded | |
+| Lost the race | `LOSER0-3.BIN`, RLE | 176×128 | 0Dh | (72,36), like the crash pictures (`DDED` → `065A`) | — (0 Porsche, 1 Lamborghini, 2 Testarossa, 3 F40; speech bubble in the picture) |
+| Penalty | `PENALTY.BIN`, RLE | 208×121 | 0Eh | (360,20) over the high scores (`D007`) | each offence's ticket count, the penalty time (see the police stop below) |
+| Police stop | `TICKET.BIN`: one RLE stream of three pictures: an 8×7 check mark (packed 0–1Bh), the ticket 96×121 (from 1Ch), the officer 96×120 (from EB7h); 11596 bytes unpacked | | 0Dh | ticket (40,0) (`DC6F`), officer (0,1) (`DD1A`) | check marks (`DC9D`) |
 | Horizons | `HORIZON0-2.BIN`, **raw** (not RLE) | 3200×24 each | 0Dh | off-screen in A400h (`load_horizon_planes` 3009:6793), latch-copied per frame by `blit_horizon` | — |
 | Approaching car | `VX.BIN`, RLE | 5 frames: 128×16, 144×26, 176×38, 208×54, 224×51 (at packed offsets 0, 333h, 8C8h, 12F8h, 22E9h) | 0Eh | title, x = 320 → 344, y 137 → 97, each unpacked to both pages | — |
 | Logo, garage car, "presents" | `BIGVET.BIN`, `REDVETTE.BIN`, `SPETRUM.BIN`: **masked sprites**, raw: word width/8, word height, then mask + 4 planes | 496×78, 368×45, 392×12 | 0Eh | masked blits `3009:8534`/`858F` | — |
@@ -142,6 +142,32 @@ tachometer 12609 at (272,75), CRUISE 4343 at (184,70), AUTO 13406 at (232,70), s
 at (192,91) and 12092 at (232,91)); the hands sit at (0,36), and the shifter, its gate and the
 digits where the Mac's layout has room (see `mac_dash.cpp`).
 
+**The police stop** (ROOKIE and PRO; DS:FC4F is the skill, 0–2). An offence sets a bit of cs:DADD
+and the police alert DS:2C57: speeding (1, `speeding_check` 21A2), hitting a car at speed 140 or more
+(2, "moving violation", `player_contact_response` 1664), hitting a wall or object (4, "reckless
+driving", `collision_box_event` 1BB2), a pedestrian (8, "vehicular manslaughter", 16C3), not stopping
+within 10 s of the siren (10h, "evading arrest", `police_step` 143D). `police_step` sends a patrol car
+after the player (DS:F7C2); within 100 units it pulls the player over (DS:2C59, speed and gear zeroed),
+loads TICKET.BIN (`DD00`) and the race loop shows, until the player drives off, first the excuse list
+(`DADE`: boxes `88AF`, text `DBD0`, the chosen line XOR-highlighted `DCDC`; Enter picks one and
+`DC51` decides at random against a table at DS:5B1B whether the officer accepts it: cs:DADC = 0) and
+then the officer (`DD1A`, DADC = 0) or the ticket with its check marks (`DC6F`, DADC = 1; a pedestrian
+skips the excuses). Driving off counts the ticket: cs:C9D8 + 2i (offence i) goes up by one; at the end
+of the race `CEC8` turns the counts and the seconds per ticket (cs:C9D9 + 2i) into text at DS:5A82 +
+4i and the penalty time at DS:5A96, adds it to the player's time and `D007` shows PENALTY.BIN.
+The Mac's notice to appear (145) lists other offences: speeding → 106 speeding, moving violation →
+173 hit and run, reckless driving → 123 reckless driving, vehicular manslaughter → 180, evading arrest
+→ by "failure to respond" (no Mac line). In `vette_gfx` the stop is reached with
+`--poke 40:40.2:224A:2C57:1` (alert) and `--poke 40:40.2:4009:DADD:<bits>` on a PRO race standing at
+the start (the patrol car comes at about 49 s), a loss with `--poke 40:40.3:224A:FA45:FF --poke
+40.2:40.3:4009:0003:FF` (DS:000A picks the opponent's picture), the penalty with counts poked into
+cs:C9D8 + 2i before the race ends. The game's own `--poke` writes the data segment only: a loss there
+is DS:FA45 = FF before driving into the bay and DS:2C69 = 0 poked every 20 ms through the splash (the
+crash picture would win otherwise).
+
+**High scores** on the Mac: each top-ten time is moved onto its own Mac rank number (the Mac's list
+is spaced 17.9 rows apart against the DOS 11 × 1.545), not as one block.
+
 ## 4. Mapping and status
 
 | DOS | PC-98 | Mac | Recognised by | Status |
@@ -155,8 +181,12 @@ digits where the Mac's layout has room (see `mac_dash.cpp`).
 | dashboard (VETTE.EXE) | DASH.PIC (2× width) | 24055 stretched over rows 120–199; arcs, digits, lights, hands, shifter and gate drawn from the game's state (`mac_dash.cpp`); clock/messages (colour 2) and road signs moved onto the Mac displays | rows 120–199, ≥ 60% | **done** (live) |
 | side dashboards (VETTE.EXE) | — (DOS pixels, PC-98 colours) | 1091 (F1, look left) / 28120 (F3, look right), full width standing on the bottom (91 / 82 rows) | rows 120–199, ≥ 60% | **done** (live) |
 | CRASH0/1.BIN | CRASH0/1.PIC | 147 / 140, scaled to cover the DOS rectangle | searched anywhere (byte-aligned), ≥ 60% | **done** |
-| LOSER0-3.BIN | LOSER0-3.PIC + English bubbles | 135–138 | searched | done (stills; a live loss needs a full race) |
-| PENALTY, TICKET, EGASKILL, garage car, horizons | identical / TBD | 145, 144, 17619, 24443 + 21053, strips 500–535 | — | later |
+| LOSER0-3.BIN | LOSER0-3.PIC, the English bubbles painted into the art | 135–138 (by car) | searched | **done** (live, with `--poke`) |
+| TICKET.BIN: ticket | TICKET.PIC (2× width) | 145, the DOS offences checked with 146 on their nearest Mac lines | (40,0), ≥ 60% | **done** (live) |
+| TICKET.BIN: officer | TICKET.PIC, the English words painted in | 144 with his words 142 beside him | (0,1), ≥ 60% | **done** (live) |
+| excuse list (no picture) | — | "List of Excuses" 139 and "What's your excuse?" 143 over the dashboard 24055, the chosen line framed | two boxes at (0,100), ≥ 60% | **done** (live) |
+| PENALTY.BIN | PENALTY.PIC (identical) | 145 with the counts in the offences' boxes and the DOS penalty time on a strip under it, below the Mac's "TOP TEN DRIVERS" | (360,20), ≥ 60% | **done** (`--poke`) |
+| EGASKILL, garage car, horizons | identical | 17619, 24443 + 21053, strips 500–535 | — | later |
 
 ## 5. The substitution layer (`src/graphics/substitution.h`)
 
@@ -210,6 +240,7 @@ erasure the tracker doesn't see), and only on the page on display (`Ega::display
 | `858F` from `854C` | masked sprite, mask pass (return address 854Fh; colour passes ignored) | page cs:8DAB, dest cs:7FB7 (+skip 7FB3), source DS:SI+cs:7FB5 (+skip 7FB1), rows 7FBB, bytes 7FB9; first mask FFh >> (7FA1 & 7), last FFh if 7FA5−7FAB ≥ 8 else FFh << ((7FA5 & 7) ^ 7); written = mask & ~source |
 | `88AF` | solid rectangle (course map text panels) | AX:DI, BH bytes × BP rows, BL colour (set/reset), stride 28h + cs:926B |
 | `8666` | picture unpack: clears | AX:DI, BH × BP, stride 50h |
+| `4160:0896` (via `065A`) | picture unpack in 320 mode: clears (crash, lost race, ticket, officer, check marks) | AX:DI, BH × BP, stride 28h |
 | `8820` | page copy (latches): copies | AX:SI → DX:DI, BH × BP, stride 28h + cs:926B |
 | `886E` | XOR rectangle (highlight bars): XORs the colours | AX:DI, BH × BP, BL, stride 50h >> cs:926A |
 | `CD22`, `C9A5`, `884B` | byte runs: A800:SI → draw page:DI (the title restoring its credits area each frame), draw page → display page, A800 → draw page:1F40 | CX bytes (884B: 1F40h) |
@@ -308,7 +339,5 @@ the tests); it could serve as a fallback (one texture upload per frame).
   the System file, not the game).
 - **PC-98 gauges** (SPEED/TACHS/...): decode their layouts from `0000:53FB` and the gauge drawing code;
   PC-98 side views (LEFTWHEE.PIC is 640×76, maybe the left view).
-- **Penalty/ticket** screens and a lost race in live runs (a ticket and a loss need driving scripts;
-  `vette_gfx --poke` reaches the win and high-score path); TICKET.BIN's layout.
 - Horizons and the 3D view in the PC-98 set are DOS pixels with the PC-98 palette; the PC-98 draws its
   race at 640 wide, which the Enhanced renderer already exceeds.

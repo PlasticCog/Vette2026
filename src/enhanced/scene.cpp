@@ -491,7 +491,7 @@ struct SceneBuilder::Impl {
     // A line's half width in output pixels at depth z (SceneOptions::line_world_width).
     float line_half_width(float z) const {
         const float race_px = std::max(opt->pixel_w, opt->pixel_h);
-        const float lo = std::max(opt->line_width, 0.25f * race_px), hi = std::max(lo, race_px);
+        const float lo = std::max(opt->line_width, 0.25f * race_px), hi = std::max(lo, opt->line_max * race_px);
         if (thin_line) return 0.5f * opt->line_width;  // a marking's far part: no thicker than its stripe
         return 0.5f * std::clamp(opt->line_world_width * kFocal / std::max(z, kNear) * race_px, lo, hi);
     }
@@ -1150,14 +1150,22 @@ int SceneBuilder::Impl::emit_ribbon(V3 a, V3 b, const SceneColour& c) {
     if (sl < 1e-6f) return 0;
     const float k = 0.5f * opt->marking_width / sl;
     side = {side.x * k, side.y * k, side.z * k};
-    // Its width on screen at each end, in output pixels: the projection's derivative across it (near
-    // the camera plane: wide enough).
+    // Its thickness on screen at each end, in output pixels: the projection's derivative across it,
+    // square to the stripe's own direction on screen, since a stripe running into the distance is far
+    // thinner than it is wide (near the camera plane: wide enough).
     const auto width = [&](const V3& p) {
         if (p.z < 2 * kNear) return 1e9f;
         const float iz = kFocal / (p.z * p.z);
-        const float wx = (side.x * p.z - p.x * side.z) * iz * opt->pixel_w;
-        const float wy = (side.y * p.z - p.y * side.z) * iz * opt->pixel_h;
-        return 2 * std::sqrt(wx * wx + wy * wy);
+        const auto screen = [&](const V3& v, float& x, float& y) {
+            x = (v.x * p.z - p.x * v.z) * iz * opt->pixel_w;
+            y = (v.y * p.z - p.y * v.z) * iz * opt->pixel_h;
+        };
+        float wx = 0, wy = 0, dx = 0, dy = 0;
+        screen(side, wx, wy);
+        screen(d, dx, dy);
+        const float dl = std::sqrt(dx * dx + dy * dy);
+        if (dl < 1e-6f) return 2 * std::sqrt(wx * wx + wy * wy);  // seen end on
+        return 2 * std::fabs(wx * dy - wy * dx) / dl;
     };
     const float wa = width(a), wb = width(b);
     if (std::max(wa, wb) < 1.0f) return 2;
@@ -1559,6 +1567,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
         std::copy(std::begin(s), std::end(s), steps);
     }
     nsteps = 6;
+    int window_cells[6] = {-1, -1, -1, -1, -1, -1};  // the map cells the window's steps drew
     for (int si = 0; si < nsteps; ++si) {
         const WinCell& w = steps[si];
         const bool own = si == nsteps - 1;
@@ -1585,6 +1594,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
         const int32_t base_y = static_cast<int32_t>(std::lround(cam_y)) + static_cast<int16_t>(draw16_y - cam16_y);
         const int cell = std::clamp(base_x / kCellSize, 0, kMapCells - 1) * kMapCells +
                          std::clamp(base_y / kCellSize, 0, kMapCells - 1);
+        window_cells[si] = cell;
         // List A (32F8 / 33C6).
         const uint16_t la = ram.d16(static_cast<uint16_t>(kListA + 2 * bt));
         for (int slot = 0; slot < 64; ++slot) {
@@ -1641,10 +1651,16 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
         lists_a[bt] = ram.d16(static_cast<uint16_t>(kListA + 2 * bt));
         lists_b[bt] = ram.d16(static_cast<uint16_t>(kListB + 2 * bt));
     }
-    const auto place = [&](uint16_t e, int row, int col, uint16_t ec, bool cell_relative) {
+    // A replica isn't placed in the window's cells: there, the original's own binding (above) has drawn
+    // the cell's traffic and pedestrians already.
+    std::vector<uint16_t> replicated;
+    const auto place = [&](uint16_t e, int row, int col, uint16_t ec, bool cell_relative, bool replica) {
         if (row < 0 || col < 0 || row >= rows || col >= cols) return;
         const int gx = row * 16 + (ec >> 4 & 15), gy = col * 16 + (ec & 15);
         if (!in_radius(gx, gy)) return;
+        if (replica && std::find(std::begin(window_cells), std::end(window_cells), gx * kMapCells + gy) != std::end(window_cells)) {
+            return;
+        }
         int32_t x, y;
         int16_t z;
         entity_xyz(e, x, y, z);
@@ -1666,29 +1682,33 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
             const uint16_t e = ram.d16(at);
             if (e == 0xFFFF) break;
             const uint16_t ec = ram.d16(static_cast<uint16_t>(at + 2));
-            if (seen(e)) continue;
             if (slot <= 2) {
+                if (seen(e)) continue;
                 seen_entities.push_back(e);
                 if (slot == 0) {
-                    place(e, ram.s16(kPlayerRow), ram.s16(kPlayerCol), ec, false);
+                    place(e, ram.s16(kPlayerRow), ram.s16(kPlayerCol), ec, false, false);
                 } else if (slot == 1 && opponent_ok) {
-                    place(e, opp_tile / 5, opp_tile % 5, ec, false);
+                    place(e, opp_tile / 5, opp_tile % 5, ec, false, false);
                 } else if (slot == 2 && chase) {
-                    place(e, chase_tile / 5, chase_tile % 5, ec, false);
+                    place(e, chase_tile / 5, chase_tile % 5, ec, false, false);
                 }
                 continue;
             }
             if (slot == 3 && chase) continue;
             if (ram.d16(static_cast<uint16_t>(e + 0x1C)) == 0) continue;
-            seen_entities.push_back(e);
             if (opt->replicas) {
+                // Every cell of its pattern (but the window's: place()).
+                if (std::find(replicated.begin(), replicated.end(), e) != replicated.end()) continue;
+                replicated.push_back(e);
                 for (int t = 0; t < rows * cols; ++t) {
                     if (lists_a[t] != la) continue;
                     for (int c = 0; c < 256; ++c) {
-                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), false);
+                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), false, true);
                     }
                 }
             } else {
+                if (seen(e)) continue;
+                seen_entities.push_back(e);
                 // The bound cell, in the big tile with this list nearest the camera.
                 int best = -1;
                 double best_d = 1e30;
@@ -1701,7 +1721,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
                         best = t;
                     }
                 }
-                if (best >= 0) place(e, best / cols, best % cols, ec, false);
+                if (best >= 0) place(e, best / cols, best % cols, ec, false, false);
             }
         }
     }
@@ -1716,12 +1736,12 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
                 const uint16_t e = ram.d16(at);
                 if (e == 0xFFFF) break;
                 const uint16_t ec = ram.d16(static_cast<uint16_t>(at + 2));
-                if (seen(e)) continue;
-                seen_entities.push_back(e);
+                if (std::find(replicated.begin(), replicated.end(), e) != replicated.end()) continue;
+                replicated.push_back(e);
                 for (int t = 0; t < rows * cols; ++t) {
                     if (lists_b[t] != lb) continue;
                     for (int c = 0; c < 256; ++c) {
-                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), true);
+                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), true, true);
                     }
                 }
             }
@@ -2351,6 +2371,7 @@ void SceneBuilder::build(const uint8_t* ram, const SceneOptions& options, Scene&
     // Highway mode: the freeway, and the city only once the end of the road is in sight (0342-034E).
     m.freeway = m.ram.d8(addr::kHighway) == 0xFF;
     const bool city = !m.freeway || m.ram.d8(kEndOfRoad) != 0;
+    out.stats.city = city;
 
     // Vehicles and pedestrians, bound to cells.
     std::fill(m.cell_head.begin(), m.cell_head.end(), -1);

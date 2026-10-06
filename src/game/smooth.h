@@ -58,6 +58,14 @@ public:
         // The rear-view mirror is on this frame: `over` lets the world through inside its viewport too,
         // for the renderer to draw the mirror's view there (from `ram`, the same camera turned round).
         bool mirror = false;
+        // Where the horizon panorama is in `under`: blit_horizon's copy (3009:6773), `rows` rows of 40
+        // bytes from the panorama buffer at A400:`source` (400 bytes a row) to `under`'s byte `dest` (40 a
+        // row). rows = 0: the replay didn't draw it.
+        struct Horizon {
+            int rows = 0;
+            uint16_t source = 0;
+            uint16_t dest = 0;
+        } horizon;
     };
     bool render_layers(uint64_t now_ns, Layers& out);
 
@@ -116,6 +124,8 @@ private:
     };
     std::array<MirrorImage, 2> mirror_;
     bool world_copied_ = false;  // the replay passed draw_world_cells and took the memory there
+    Layers::Horizon horizon_;    // the replay's horizon copy
+    uint16_t horizon_dest_seg_ = 0;
 
     // The scratch machine the replays run on.
     host::Memory scratch_mem_;

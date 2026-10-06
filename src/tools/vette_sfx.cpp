@@ -78,6 +78,7 @@ const char* label(game::Sfx sfx) {
     case game::Sfx::IntroCableCar: return "Title: cable car";
     case game::Sfx::IntroCar: return "Title: the car";
     case game::Sfx::IntroLogo: return "Title: logo";
+    case game::Sfx::ServiceStation: return "Service station bell";
     case game::Sfx::Count: break;
     }
     return "";

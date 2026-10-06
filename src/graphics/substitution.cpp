@@ -49,6 +49,15 @@ struct Indicator {
     int min_pixels;
     IRect art;
     std::uint32_t rgb;
+    int pict;  // nonzero: this Mac picture at art's top left instead of a frame (a check mark)
+};
+
+// One step in building a Mac art picture from several: a PICT drawn at (x, y), or a filled rectangle.
+struct Paint {
+    int pict;
+    int x, y;
+    IRect fill;
+    std::uint32_t argb;
 };
 
 struct ArtSpec {
@@ -66,6 +75,22 @@ struct ArtSpec {
     // Course map: the text panel the game fills in white for course N (DS:FD10), all DOS pixels. The
     // draw tracker sees the fill too; this also holds without it.
     std::vector<std::pair<int, IRect>> course_panels;
+    // A picture inside a PC-98 file (TICKET.PIC holds three): byte offset and size.
+    int pc98_offset = 0, pc98_width = 0, pc98_height = 0;
+    // Mac: the art built on a canvas of this size from several pictures (pict is then unused).
+    int canvas_w = 0, canvas_h = 0;
+    std::vector<Paint> canvas;
+    // The part of the art that is fitted to the DOS picture's rectangle (empty: all of it); the rest
+    // of the art reaches beyond it (a speech bubble beside the officer).
+    IRect fit_part{0, 0, 0, 0};
+    // The indicators mark one choice out of several (a list's highlighted line): when a frame shows
+    // none, the last one stays.
+    bool one_choice = false;
+    // ... read from the game's memory when it runs: a word at this linear address, (value - base) /
+    // step being the indicator's index (the highlight bar alone can't be trusted with Smooth on:
+    // its white where the replayed 3D view is white too is the 3D view's).
+    std::uint32_t choice_at = 0;
+    int choice_base = 0, choice_step = 1;
     Handler handler = Handler::None;  // code that adds what depends on the game's state
     int mask_pict = 0;                // Mac sprites: the 1-bit picture of their shape (black = opaque)
     bool bottom = false;              // Fit::Native: align bottom edges
@@ -85,6 +110,9 @@ struct ScreenSpec {
     int xor_match = 0;       // nonzero: a pixel XORed with this also counts as the picture's
     bool sprite = false;     // `file` is a masked sprite (decode_dos_sprite), not an RLE picture
     Screen parent = Screen::None;  // looked for only over this full-screen picture
+    // No picture file: the game draws solid boxes (picture coordinates, colour); the rest of the
+    // rectangle isn't compared.
+    std::vector<std::pair<IRect, std::uint8_t>> boxes;
 };
 
 constexpr std::uint32_t kHighlight = 0xFFFFD020;  // indicator frames: Mac-style yellow
@@ -108,7 +136,7 @@ Remap remap(IRect dos, IRect art, bool opaque, int ignore = -1, std::uint16_t on
 ScreenSpec screen(Screen id, const char* file, int header, IRect pic, int frame_w, int frame_h, float threshold,
                   bool background, ArtSpec pc98, ArtSpec mac) {
     return {id, file, header, pic.w, pic.h, frame_w, frame_h, pic.x, pic.y, threshold, background, std::move(pc98),
-            std::move(mac), {0, 0, 0, 0}, 0, false, Screen::None};
+            std::move(mac), {0, 0, 0, 0}, 0, false, Screen::None, {}};
 }
 
 std::vector<ScreenSpec> make_table() {
@@ -160,7 +188,7 @@ std::vector<ScreenSpec> make_table() {
         // The selected car's menu item gets a red background (4): frame the Mac button.
         const IRect items[4] = {{0, 0, 82, 10}, {88, 0, 78, 10}, {168, 0, 158, 10}, {328, 0, 198, 10}};
         const IRect buttons[4] = {{266, 37, 47, 24}, {266, 64, 47, 24}, {266, 91, 47, 24}, {266, 117, 47, 24}};
-        for (int i = 0; i < 4; ++i) mac.indicators.push_back({items[i], 4, 200, buttons[i], kHighlight});
+        for (int i = 0; i < 4; ++i) mac.indicators.push_back({items[i], 4, 200, buttons[i], kHighlight, 0});
         t.push_back(screen(Screen::Garage, "GARAGE.BIN", 0, {0, 0, 640, 200}, 640, 200, 0.55f, true, pc98, mac));
     }
     // Opponent selection (320x200): the same layout on the Mac; the graph's curves, the statistics
@@ -174,7 +202,7 @@ std::vector<ScreenSpec> make_table() {
         const IRect strips[4] = {{161, 0, 79, 10}, {241, 0, 79, 10}, {161, 50, 79, 10}, {241, 50, 79, 10}};
         const IRect cards[4] = {{252, 7, 126, 61}, {379, 7, 126, 61}, {252, 87, 126, 61}, {379, 87, 126, 61}};
         mac.hide = {{159, 0, 161, 10}, {159, 50, 161, 10}};
-        for (int i = 0; i < 4; ++i) mac.indicators.push_back({strips[i], 14, 200, cards[i], kHighlight});
+        for (int i = 0; i < 4; ++i) mac.indicators.push_back({strips[i], 14, 200, cards[i], kHighlight, 0});
         t.push_back(screen(Screen::Opponents, "EGAPIC.BIN", 2, {0, 0, 320, 200}, 320, 200, 0.5f, true,
                            pc98_art("EGAPIC.PIC"), mac));
     }
@@ -184,8 +212,16 @@ std::vector<ScreenSpec> make_table() {
         ArtSpec mac = mac_art(134, Fit::Contain);
         mac.remaps = {remap({52, 12, 26, 16}, {98, 1, 21, 31}, false),
                       remap({154, 40, 100, 15}, {126, 60, 80, 29}, false),
-                      remap({154, 82, 130, 15}, {113, 136, 104, 29}, false),
-                      remap({300, 26, 340, 112}, {252, 52, 258, 173}, false)};
+                      remap({154, 82, 130, 15}, {113, 136, 104, 29}, false)};
+        // The top ten, one line each (DOS rows 28 + 11k, the digits' middle 4.5 rows into the
+        // 11): each on its Mac rank number, whose middles are these rows of the picture.
+        constexpr float kRanks[10] = {56, 74, 93, 110, 127.5f, 146, 164, 182, 200, 217.5f};
+        constexpr float kScale = 173.0f / 112.0f;  // Mac rows per DOS row, as for the other fields
+        for (int k = 0; k < 10; ++k)
+            mac.remaps.push_back(remap({300, 28 + 11 * k, 340, 11},
+                                       {252, static_cast<int>(kRanks[k] - 4.5f * kScale + 0.5f), 258,
+                                        static_cast<int>(11 * kScale + 0.5f)},
+                                       false));
         t.push_back(screen(Screen::HighScores, "HIGHSC.BIN", 0, {0, 0, 640, 200}, 640, 200, 0.5f, true,
                            pc98_art("HIGHSC.PIC"), mac));
     }
@@ -249,6 +285,91 @@ std::vector<ScreenSpec> make_table() {
         if (in.speech.w > 0) pc98.japanese = {in.speech};
         t.push_back(screen(in.id, in.dos, 0, {-1, 0, 176, 128}, 320, 200, 0.6f, false, pc98, mac_art(in.pict, Fit::Cover)));
     }
+    // The police stop (re/notes/10-graphics.md): the excuse list over the dashboard, then the ticket
+    // or the officer over the 3D view until the player drives off. TICKET.BIN holds an 8x7 check
+    // mark (packed bytes 0-1Bh), the ticket 96x121 (from 1Ch, drawn at (40,0)) and the officer
+    // 96x120 (from EB7h, at (0,1)); TICKET.PIC the same at twice the width, the officer's words in
+    // Japanese. The Mac's notice to appear (145) has other offences; the DOS ones are checked on
+    // their nearest Mac line (re/notes/10-graphics.md).
+    constexpr IRect kMacCheck[5] = {{7, 45, 12, 13},    // speeding: 106 speeding
+                                    {7, 93, 12, 13},    // moving violation (hit a car): 173 hit and run
+                                    {7, 57, 12, 13},    // reckless driving (hit a wall): 123 reckless driving
+                                    {7, 105, 12, 13},   // vehicular manslaughter: 180
+                                    {130, 167, 12, 13}};  // evading arrest: by "failure to respond"
+    {
+        ArtSpec pc98 = pc98_art("TICKET.PIC");
+        pc98.pc98_offset = 56;
+        pc98.pc98_width = 192;
+        pc98.pc98_height = 121;
+        ArtSpec mac = mac_art(145, Fit::Cover);
+        mac.hide = {{40, 0, 96, 121}};
+        // The game's check marks (3009:DC9D, table DS:5B03): blue (1) in the boxes at (41, 35 + 8i).
+        for (int i = 0; i < 5; ++i) mac.indicators.push_back({{41, 35 + 8 * i, 7, 7}, 1, 4, kMacCheck[i], 0, 146});
+        t.push_back(screen(Screen::Ticket, "TICKET.BIN", 0x1C, {40, 0, 96, 121}, 320, 200, 0.6f, false, pc98, mac));
+    }
+    {
+        ArtSpec pc98 = pc98_art("TICKET.PIC");
+        pc98.pc98_offset = 56 + 11616;
+        pc98.pc98_width = 192;
+        pc98.pc98_height = 120;
+        pc98.japanese = {{0, 104, 96, 16}};
+        // The Mac officer (144) with his words (142) beside him, over the 3D view.
+        ArtSpec mac = mac_art(0, Fit::Cover);
+        mac.canvas_w = 204;
+        mac.canvas_h = 198;
+        mac.canvas = {{144, 0, 0, {0, 0, 0, 0}, 0}, {142, 148, 8, {0, 0, 0, 0}, 0}};
+        mac.fit_part = {0, 0, 144, 198};
+        mac.hide = {{0, 1, 96, 120}};
+        t.push_back(screen(Screen::Officer, "TICKET.BIN", 0xEB7, {0, 1, 96, 120}, 320, 200, 0.6f, false, pc98, mac));
+    }
+    {
+        // 3009:DADE: a light blue box (9) with a blue one (1) inside over rows 100-199, the question
+        // and eight excuses (3009:DBD0), the chosen one XOR-highlighted white (3009:DCDC, rows
+        // 115 + 10i). The Mac: its "List of Excuses" dialog (139) and "What's your excuse?" (143) over
+        // its dashboard (24055), at the Mac's own scale (512 pixels across: 320 frame pixels, 100
+        // rows: 192 pixels).
+        ArtSpec mac = mac_art(0, Fit::Stretch);
+        mac.canvas_w = 512;
+        mac.canvas_h = 192;
+        mac.canvas = {{24055, 0, 46, {0, 0, 0, 0}, 0}, {139, 83, 15, {0, 0, 0, 0}, 0}, {143, 19, 15, {0, 0, 0, 0}, 0}};
+        mac.hide = {{0, 100, 320, 100}};
+        mac.one_choice = true;
+        mac.choice_at = kGameDs2 + 0x600A;  // the chosen excuse's entry in the list at DS:5FF8
+        mac.choice_base = 0x5FF8;
+        mac.choice_step = 2;
+        // The dialog's lines: text rows 33 + 11i of 139.
+        for (int i = 0; i < 8; ++i)
+            mac.indicators.push_back({{8, 115 + 10 * i, 8, 7}, 15, 40, {83 + 26, 15 + 31 + 11 * i, 296, 13}, kHighlight, 0});
+        ScreenSpec s = screen(Screen::Excuses, nullptr, 0, {0, 100, 320, 100}, 320, 200, 0.6f, false, ArtSpec{}, mac);
+        s.boxes = {{{0, 0, 320, 100}, 9}, {{8, 3, 304, 94}, 1}};
+        t.push_back(s);
+    }
+    {
+        // On the high scores (3009:D007) when the race brought tickets: PENALTY.BIN at (360,20), the
+        // number of each offence's tickets at (368, 40 + 13i) and the penalty time at (464,127),
+        // colour 12. The Mac: its notice to appear with the counts in the offences' boxes and the
+        // DOS "PENALTY TIME" line (black and red only) on a strip added under it; 18 rows lower than
+        // the DOS picture, so the Mac's "TOP TEN DRIVERS" stays readable above it.
+        ArtSpec mac = mac_art(0, Fit::Contain);
+        mac.canvas_w = 144;
+        mac.canvas_h = 250;
+        constexpr std::uint32_t kYellow = 0xFFFFC200, kBlack = 0xFF000000;
+        constexpr int kTop = 18;
+        mac.canvas = {{145, 0, kTop, {0, 0, 0, 0}, 0},
+                      {0, 0, 0, {0, kTop + 198, 144, 34}, kYellow},
+                      {0, 0, 0, {0, kTop + 198, 1, 34}, kBlack},
+                      {0, 0, 0, {143, kTop + 198, 1, 34}, kBlack},
+                      {0, 0, 0, {0, kTop + 231, 144, 1}, kBlack}};
+        mac.hide = {{360, 20, 208, 121}};
+        for (int i = 0; i < 5; ++i) {
+            const IRect box = kMacCheck[i];
+            mac.remaps.push_back(remap({368, 40 + 13 * i, 16, 10}, {box.x + 1, box.y + kTop + 1, box.w - 2, box.h - 1}, false));
+        }
+        // "PENALTY TIME" and its box (picture rows 101-120; the serial number's box right of it stays).
+        mac.remaps.push_back(remap({360, 121, 184, 20}, {4, kTop + 199, 136, 32}, true, -1, (1u << 0) | (1u << 12)));
+        t.push_back(screen(Screen::Penalty, "PENALTY.BIN", 0, {360, 20, 208, 121}, 640, 200, 0.6f, false,
+                           pc98_art("PENALTY.PIC"), mac));
+    }
     return t;
 }
 
@@ -258,9 +379,16 @@ constexpr std::array<std::uint32_t, 16> kEgaDefault = {
     0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
 };
 
-FRect place(const IRect& target, int img_w, int img_h, Fit fit, int frame_w, int frame_h) {
+FRect place(const IRect& target, int img_w, int img_h, Fit fit, int frame_w, int frame_h, IRect part = {0, 0, 0, 0}) {
     const FRect t{static_cast<float>(target.x), static_cast<float>(target.y), static_cast<float>(target.w),
                   static_cast<float>(target.h)};
+    if (part.w > 0 && part.h > 0 && img_w > 0 && img_h > 0) {
+        // Fit `part` of the art to the target; the rest of the art goes where it falls around it.
+        const FRect p = place(target, part.w, part.h, fit, frame_w, frame_h);
+        const float kx = p.w / static_cast<float>(part.w), ky = p.h / static_cast<float>(part.h);
+        return {p.x - static_cast<float>(part.x) * kx, p.y - static_cast<float>(part.y) * ky,
+                static_cast<float>(img_w) * kx, static_cast<float>(img_h) * ky};
+    }
     if (fit == Fit::Stretch || img_w <= 0 || img_h <= 0) return t;
     // The frame is shown 4:3: a frame pixel is 4/frame_w by 3/frame_h display units; art pixels are square.
     const float ux = 4.0f / static_cast<float>(frame_w), uy = 3.0f / static_cast<float>(frame_h);
@@ -389,7 +517,7 @@ FRect art_to_frame(const FRect& dst, int art_w, int art_h, const IRect& a) {
             static_cast<float>(a.h) * ky};
 }
 
-Image load_mac_picture(const ArtFiles& files, int id, std::vector<std::string>& warnings) {
+Image load_mac_picture(const ArtFiles& files, int id, std::vector<std::string>& warnings, std::uint32_t background) {
     const auto data = files.mac_pict ? files.mac_pict(static_cast<std::int16_t>(id)) : std::vector<std::uint8_t>{};
     assets::Pict pict;
     std::string err;
@@ -401,7 +529,18 @@ Image load_mac_picture(const ArtFiles& files, int id, std::vector<std::string>& 
         warnings.push_back("PICT " + std::to_string(id) + ": " + err);
         return {};
     }
-    return from_pict(pict, 0);
+    return from_pict(pict, background);
+}
+
+// Draws `src` onto `dst` at (x, y), over it where src is opaque (straight alpha, 0 or 255 here).
+void paint(Image& dst, const Image& src, int x, int y) {
+    for (int sy = 0; sy < src.height; ++sy)
+        for (int sx = 0; sx < src.width; ++sx) {
+            const int dx = x + sx, dy = y + sy;
+            const std::uint32_t v = src.at(sx, sy);
+            if (dx < 0 || dy < 0 || dx >= dst.width || dy >= dst.height || (v >> 24) == 0) continue;
+            dst.pixels[static_cast<std::size_t>(dy) * dst.width + dx] = v;
+        }
 }
 
 Image frame_image(int w, int h, std::uint32_t argb, int thickness) {
@@ -444,7 +583,8 @@ const char* screen_name(Screen screen) {
                                              "high scores", "winner",        "dashboard",      "crash 0",
                                              "crash 1",    "loser 0",        "loser 1",        "loser 2",
                                              "loser 3",    "course map",     "dashboard left", "dashboard right",
-                                             "title logo", "title presents", "title car"};
+                                             "title logo", "title presents", "title car",      "ticket",
+                                             "officer",    "excuses",        "penalty"};
     const auto i = static_cast<std::size_t>(screen);
     return i < std::size(kNames) ? kNames[i] : "?";
 }
@@ -458,6 +598,7 @@ struct Substitution::Impl {
         Image image;
         std::vector<Image> indicator_images;
         IRect last{-1, -1, 0, 0};  // where it was last found
+        int choice = -1;           // ArtSpec::one_choice: the indicator shown last
         bool active = false;       // found in the previous frame (lower threshold: hysteresis)
         std::vector<std::uint8_t> packed;  // pictures in VETTE.EXE: the bytes ref was decoded from
         std::vector<std::pair<int, int>> probes;  // sample points for searching
@@ -499,13 +640,36 @@ void Substitution::Impl::load(const ArtFiles& files) {
         if (art == Art::Pc98 && e.art->pc98 && files.pc98_file) {
             assets::Pc98Pic pic;
             const auto data = files.pc98_file(e.art->pc98);
+            const auto offset = static_cast<std::size_t>(e.art->pc98_offset);
+            const bool part = e.art->pc98_width > 0;
             if (data.empty()) {
                 warnings.push_back(std::string(e.art->pc98) + ": not found");
-            } else if (!assets::decode_pc98_pic(e.art->pc98, data, pic, &err)) {
-                warnings.push_back(std::string(e.art->pc98) + ": " + err);
+            } else if (part ? offset > data.size() ||
+                                  !assets::decode_pc98_pic(std::span<const std::uint8_t>(data).subspan(offset),
+                                                           e.art->pc98_width, e.art->pc98_height, pic, &err)
+                            : !assets::decode_pc98_pic(e.art->pc98, data, pic, &err)) {
+                warnings.push_back(std::string(e.art->pc98) + ": " + (err.empty() ? "too short" : err));
             } else {
                 e.image = from_pc98(pic, pc98_palette);
             }
+        } else if (art == Art::Mac && e.art->canvas_w > 0 && files.mac_pict) {
+            Image canvas;
+            canvas.width = e.art->canvas_w;
+            canvas.height = e.art->canvas_h;
+            canvas.pixels.assign(static_cast<std::size_t>(canvas.width) * canvas.height, 0);
+            bool ok = true;
+            for (const Paint& step : e.art->canvas) {
+                if (step.pict) {
+                    const Image pic = load_mac_picture(files, step.pict, warnings, 0xFFFFFFFF);
+                    ok = ok && !pic.empty();
+                    paint(canvas, pic, step.x, step.y);
+                } else {
+                    const IRect c = clip(step.fill, canvas.width, canvas.height);
+                    for (int y = c.y; y < c.y + c.h; ++y)
+                        std::fill_n(canvas.pixels.begin() + static_cast<std::ptrdiff_t>(y) * canvas.width + c.x, c.w, step.argb);
+                }
+            }
+            if (ok) e.image = std::move(canvas);
         } else if (art == Art::Mac && e.art->pict && files.mac_pict) {
             assets::Pict pict;
             const auto data = files.mac_pict(static_cast<std::int16_t>(e.art->pict));
@@ -516,7 +680,7 @@ void Substitution::Impl::load(const ArtFiles& files) {
             } else {
                 e.image = from_pict(pict, e.art->fit == Fit::Native ? 0u : 0xFFFFFFFFu);
                 if (e.art->mask_pict) {
-                    const Image mask = load_mac_picture(files, e.art->mask_pict, warnings);
+                    const Image mask = load_mac_picture(files, e.art->mask_pict, warnings, 0);
                     e.image = mask.empty() ? Image{} : apply_mask(e.image, mask);
                 }
             }
@@ -537,8 +701,39 @@ void Substitution::Impl::load(const ArtFiles& files) {
                 continue;
             }
             e.ref_ok = true;
+        } else if (!spec.boxes.empty()) {
+            e.ref.width = spec.width;
+            e.ref.height = spec.height;
+            e.ref.pixels.assign(static_cast<std::size_t>(spec.width) * spec.height, 0);
+            e.ref.opaque.assign(e.ref.pixels.size(), 0);
+            for (const auto& [box, colour] : spec.boxes) {
+                const IRect c = clip(box, spec.width, spec.height);
+                for (int y = c.y; y < c.y + c.h; ++y)
+                    for (int x = c.x; x < c.x + c.w; ++x) {
+                        const std::size_t i = static_cast<std::size_t>(y) * spec.width + x;
+                        e.ref.pixels[i] = colour;
+                        e.ref.opaque[i] = 1;
+                    }
+            }
+            e.ref_ok = true;
         }
-        for (const auto& ind : e.art->indicators) e.indicator_images.push_back(frame_image(ind.art.w, ind.art.h, ind.rgb));
+        // The PC-98 art's Japanese words become the DOS picture's English ones, in the art itself
+        // (scaled to the art: the race pictures are twice as wide), so they don't depend on the frame
+        // showing the DOS pixels there (the Enhanced view's layer can leave some out).
+        if (art == Art::Pc98 && options.english_text && e.ref_ok && e.ref.width > 0 && e.ref.height > 0)
+            for (const IRect& j : e.art->japanese) {
+                const int sx = e.image.width / e.ref.width, sy = e.image.height / e.ref.height;
+                if (sx < 1 || sy < 1) continue;
+                const IRect c = clip(j, e.ref.width, e.ref.height);
+                for (int y = c.y * sy; y < (c.y + c.h) * sy; ++y)
+                    for (int x = c.x * sx; x < (c.x + c.w) * sx; ++x) {
+                        const std::uint8_t v = e.ref.pixels[static_cast<std::size_t>(y / sy) * e.ref.width + x / sx];
+                        e.image.pixels[static_cast<std::size_t>(y) * e.image.width + x] = 0xFF000000u | pc98_palette[v & 15];
+                    }
+            }
+        for (const auto& ind : e.art->indicators)
+            e.indicator_images.push_back(ind.pict ? load_mac_picture(files, ind.pict, warnings, 0)
+                                                  : frame_image(ind.art.w, ind.art.h, ind.rgb));
         for (int j = 0; j < 8; ++j)
             for (int i = 0; i < 8; ++i) e.probes.push_back({(2 * i + 1) * spec.width / 16, (2 * j + 1) * spec.height / 16});
         entries.push_back(std::move(e));
@@ -687,11 +882,12 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
             e.active = false;
             return;
         }
-        if (!s.file) m.refresh_program_picture(e);
+        if (!s.file && s.boxes.empty()) m.refresh_program_picture(e);
         if (!e.ref_ok) return;
         float ratio = 0;
         if (!m.locate(f, e, ratio)) {
             e.active = false;
+            e.choice = -1;
             return;
         }
         if (s.background) {
@@ -747,7 +943,8 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
             for (int y = r.y; y < r.y + r.h; ++y)
                 std::fill_n(out.base.begin() + static_cast<std::ptrdiff_t>(y) * w + r.x, r.w, kTransparent);
         const IRect src{0, 0, e.image.width, e.image.height};
-        FRect dst = place(match.rect, e.image.width, e.image.height, a.fit == Fit::Native ? Fit::Contain : a.fit, w, h);
+        FRect dst = place(match.rect, e.image.width, e.image.height, a.fit == Fit::Native ? Fit::Contain : a.fit, w, h,
+                          a.fit_part);
         if (a.fit == Fit::Native && &match != &matches.front() && !matches.front().e->image.empty()) {
             // The parent's art scale (frame pixels per art pixel), centred on the DOS sprite.
             const FRect& bg = out.layers.front().dst;
@@ -760,12 +957,16 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
             dst = {cx - dw / 2, y, dw, dh};
         }
         out.layers.push_back({&e.image, src, dst});
-        if (&match != &matches.front()) covers.push_back({out.pieces.size(), dst});
+        // The part of the art fitted to the picture (all of it, or ArtSpec::fit_part: what reaches
+        // beyond it, a speech bubble, is drawn over the frame as it is).
+        const FRect body = a.fit_part.w > 0 ? art_to_frame(dst, src, a.fit_part) : dst;
+        if (&match != &matches.front()) covers.push_back({out.pieces.size(), body});
         // An inset's art can be larger than the DOS picture (Fit::Cover): what the frame showed
         // around the picture mustn't be drawn over it.
         if (&match != &matches.front() || !full) {
-            const IRect under = clip({static_cast<int>(std::floor(dst.x)), static_cast<int>(std::floor(dst.y)),
-                                      static_cast<int>(std::ceil(dst.w)) + 1, static_cast<int>(std::ceil(dst.h)) + 1},
+            const int ux = static_cast<int>(std::floor(body.x)), uy = static_cast<int>(std::floor(body.y));
+            const IRect under = clip({ux, uy, static_cast<int>(std::ceil(body.x + body.w)) - ux,
+                                      static_cast<int>(std::ceil(body.y + body.h)) - uy},
                                      w, h);
             for (int y = under.y; y < under.y + under.h; ++y) {
                 std::fill_n(out.over.begin() + static_cast<std::ptrdiff_t>(y) * w + under.x, under.w, kTransparent);
@@ -881,15 +1082,35 @@ bool Substitution::compose(const FrameView& f, Composite& out) {
             for (int y = c.y; y < c.y + c.h; ++y)
                 std::fill_n(out.over.begin() + static_cast<std::ptrdiff_t>(y) * w + c.x, c.w, kTransparent);
         }
+        int chosen = -1;  // ArtSpec::one_choice: the indicator shown
         for (std::size_t i = 0; i < a.indicators.size(); ++i) {
             const auto& ind = a.indicators[i];
             const IRect c = clip(ind.dos, w, h);
             int count = 0;
             for (int y = c.y; y < c.y + c.h; ++y)
                 for (int x = c.x; x < c.x + c.w; ++x) count += f.pixels[static_cast<std::size_t>(y) * w + x] == ind.color;
-            if (count >= ind.min_pixels) {
-                const Image& img = e.indicator_images[i];
-                out.layers.push_back({&img, {0, 0, img.width, img.height}, art_to_frame(dst, src, ind.art)});
+            const Image& img = e.indicator_images[i];
+            if (count < ind.min_pixels || img.empty()) continue;
+            if (a.one_choice) {
+                if (chosen < 0) chosen = static_cast<int>(i);
+                continue;
+            }
+            const IRect at = ind.pict ? IRect{ind.art.x, ind.art.y, img.width, img.height} : ind.art;
+            out.layers.push_back({&img, {0, 0, img.width, img.height}, art_to_frame(dst, src, at)});
+        }
+        if (a.one_choice) {
+            if (a.choice_at && m.ram && a.choice_step > 0) {
+                const int v = (m.ram[a.choice_at] | m.ram[a.choice_at + 1] << 8) - a.choice_base;
+                if (v >= 0 && v % a.choice_step == 0 && v / a.choice_step < static_cast<int>(a.indicators.size()))
+                    chosen = v / a.choice_step;
+            }
+            // A frame caught while the game redraws its list has no highlight: keep the last one.
+            if (chosen < 0) chosen = e.choice;
+            e.choice = chosen;
+            if (chosen >= 0) {
+                const Image& img = e.indicator_images[static_cast<std::size_t>(chosen)];
+                out.layers.push_back({&img, {0, 0, img.width, img.height},
+                                      art_to_frame(dst, src, a.indicators[static_cast<std::size_t>(chosen)].art)});
             }
         }
         if (e.handler) e.handler->compose({f, m.ram, e.ref, match.rect, dst, e.image.width, e.image.height}, out);

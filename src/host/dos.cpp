@@ -8,6 +8,10 @@
 
 #include "host/hle.h"
 
+#ifdef _WIN32
+#include <share.h>
+#endif
+
 namespace vette::host {
 namespace {
 
@@ -33,11 +37,12 @@ std::string base_name(const std::string& dos_path) {
     return upper(cut == std::string::npos ? dos_path : dos_path.substr(cut + 1));
 }
 
+// Shared, as on other systems: _wfopen_s would open the file exclusively, so a second copy of the game
+// (or any other program reading the file) couldn't open it at the same time.
 std::FILE* open_file(const std::filesystem::path& p, const char* mode) {
 #ifdef _WIN32
-    std::FILE* f = nullptr;
     const std::wstring wmode(mode, mode + std::strlen(mode));
-    return _wfopen_s(&f, p.c_str(), wmode.c_str()) == 0 ? f : nullptr;
+    return _wfsopen(p.c_str(), wmode.c_str(), _SH_DENYNO);
 #else
     return std::fopen(p.c_str(), mode);
 #endif

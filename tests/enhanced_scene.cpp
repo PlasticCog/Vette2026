@@ -653,17 +653,16 @@ TEST(enhanced_scene_compound_painter_order) {
     }
 }
 
-TEST(enhanced_scene_ground_markings_lie_flat) {
-    // A lane line on the road (a ground-layer line), 100 units right of the camera, from 200 to 1500
-    // units ahead: a stripe marking_width wide lying on the road, so it narrows with distance as the
-    // road does (1.25 * 256 / 200 = 1.6 race pixels near, 0.21 far), not a constant-width line.
+// The white vertices of a scene with one lane line on the road (a ground-layer line), `side` units right
+// of the camera (which is 10 units up), from 200 to 1500 units ahead.
+static std::vector<SceneVertex> lane_line_vertices(int16_t side, float pixel) {
     SyntheticWorld sw;
     Routine line;
     line.address = 0x3003;
     Variant& v = line.variants.emplace_back();
     Part& p = v.parts.emplace_back();
     p.source = Part::Source::Packed;
-    p.verts = {{200, 100, 0}, {1500, 100, 0}};
+    p.verts = {{200, side, 0}, {1500, side, 0}};
     p.indices = {0, 1};
     Prim prim;
     prim.kind = Prim::Kind::Line;
@@ -677,17 +676,34 @@ TEST(enhanced_scene_ground_markings_lie_flat) {
     Scene scene;
     SceneOptions o;
     o.ground = false;
-    o.pixel_w = o.pixel_h = 6;
+    o.pixel_w = o.pixel_h = pixel;
     builder.build(sw.ram.data(), o, scene);
     std::vector<SceneVertex> white;
     for (const SceneVertex& sv : scene.vertices) {
         if (close(sv.r, 1) && close(sv.g, 1) && close(sv.b, 1)) white.push_back(sv);
     }
+    return white;
+}
+
+TEST(enhanced_scene_ground_markings_lie_flat) {
+    // A stripe marking_width wide lying on the road, so it narrows with distance as the road does
+    // (1.25 * 256 / 200 = 1.6 race pixels near, 0.21 far), not a constant-width line.
+    std::vector<SceneVertex> white = lane_line_vertices(10, 12);
     CHECK_EQ(white.size(), size_t{4});
     if (white.size() == 4) {
         std::sort(white.begin(), white.end(), [](const SceneVertex& a, const SceneVertex& b) { return a.y < b.y; });
         const float far = std::fabs(white[0].x - white[1].x), near = std::fabs(white[2].x - white[3].x);
         CHECK(close(near, 1.25 * 256 / 200, 0.05));
         CHECK(close(far, 1.25 * 256 / 1500, 0.05));
+    }
+    // 100 units to the side, the camera sees the stripe almost edge on: wide across, but on screen
+    // thinner than an output pixel square to its own direction (at 320x200, a dash would fall between
+    // the pixel rows), so it's a line.
+    white = lane_line_vertices(100, 1);
+    CHECK_EQ(white.size(), size_t{4});
+    if (white.size() == 4) {
+        std::sort(white.begin(), white.end(), [](const SceneVertex& a, const SceneVertex& b) { return a.y < b.y; });
+        const float far = std::fabs(white[0].y - white[1].y), near = std::fabs(white[2].y - white[3].y);
+        CHECK(close(near, far, 0.05));  // a constant width
     }
 }

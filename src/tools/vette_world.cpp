@@ -43,6 +43,17 @@
 //                      route: --poke 39:2AD4:03 --poke 39:8156:0003
 // --shot T             save the displayed frame at second T (<label>_frame_T.png)
 // --watch OFF[*N],...  print these DS words (N words from OFF) with each --shot
+// --sky-views          at the race frame of --teleport-at, the Enhanced view (whole map) from a set of places
+//                      and headings (the Great Highway, the bridges, downtown, Twin Peaks, the helicopter's
+//                      height), each with the painted skyline above the Hills skyline (enhanced/backdrop.h),
+//                      at --scene-scale and at the original's 320x200 enlarged (<label>_sky_NAME.png)
+// --sky-sweep         ... and from three places all the way round (every 40 degrees)
+// --sky-view x,y,z,yaw,pitch,NAME   ... this view instead (repeatable; z above the ground)
+// --replicas           ... with traffic and pedestrians in every cell of their pattern (SceneOptions::replicas,
+//                      as the game's Maximum draw distance draws them)
+// --horizon-dump       write the three panoramas from video memory and their Hills versions
+//                      (<label>_horizon{0,1,2}_{painted,hills}.bin: 24 rows x 3200 EGA colour indices) and
+//                      PNGs of both
 //
 // The README's race script reaches the race at ~37 s and drives north on the Great Highway:
 //   vette_world --map --validate 37:50 --key 13:39 --key 17:1C --key 21:1C --key 25:1C --key 30:1C
@@ -70,6 +81,7 @@
 
 #include "enhanced/scene.h"
 #include "assets/png.h"
+#include "enhanced/backdrop.h"
 #include "enhanced/world.h"
 #include "enhanced/world_probe.h"
 #include "enhanced/world_reference.h"
@@ -489,6 +501,12 @@ public:
             ega_.render_page(back_page(), val_.pre);
             val_.original_calls.clear();
         });
+        // blit_horizon's copy (vram_copy_rows 3009:6773): AX:SI (the panorama buffer) to DX:DI, BP rows.
+        cpu_->add_watch(Cpu::linear(kCode, 0x6773), [this](Cpu& c) {
+            if (c.regs.r[vette::host::AX] != 0xA400) return;
+            const auto bp = static_cast<int16_t>(c.regs.r[vette::host::BP]);
+            horizon_ = {bp > 0 ? bp : 1, c.regs.r[vette::host::SI], c.regs.r[vette::host::DI]};
+        });
         cpu_->add_watch(Cpu::linear(kCode, 0xB765), [this](Cpu& c) {
             if (val_.dump_calls == val_.totals.frames) {
                 std::printf("original model header %04X at %d,%d,%d%c", c.regs.r[vette::host::SI], s16(0xE0C8), s16(0xE0CA),
@@ -531,9 +549,17 @@ public:
         cpu_->regs.s[vette::host::CS] = kCode;
         cpu_->regs.ip = 0x02DA;
         done_ = false;
+        horizon_ = {};
         for (int i = 0; i < 400 && !done_; ++i) cpu_->run(50000);
         return done_;
     }
+
+    // The last view's horizon copy: rows of 40 bytes from A400:source (400 a row) to the page's byte dest.
+    struct Horizon {
+        int rows = 0;
+        uint16_t source = 0, dest = 0;
+    };
+    const Horizon& horizon() const { return horizon_; }
 
 private:
     class EgaIo final : public vette::host::IoBus {
@@ -560,6 +586,7 @@ private:
     std::vector<uint8_t> base_ram_;
     vette::host::Registers base_regs_;
     bool ready_ = false, done_ = false;
+    Horizon horizon_;
 };
 
 // --- Scene validation ----------------------------------------------------------------------------------------
@@ -1269,6 +1296,143 @@ int run_bridge_check(const World& world, Teleporter& teleporter, Validator& tval
     return 0;
 }
 
+// --sky-views: the Enhanced view with the painted and the Hills skyline, from places around the city.
+struct SkyView {
+    int32_t x = 0, y = 0, z = 10;  // z above the ground
+    int yaw = 0, pitch = 0;
+    std::string name;
+};
+std::vector<SkyView> default_sky_views(bool sweep) {
+    // Map coordinates: x north, y east (big tiles of 8000h; the city is in the south-west 3 x 3); yaw 0 north,
+    // 90 east. The places are on the courses' roads.
+    std::vector<SkyView> v = {
+        {16000, 4200, 10, 0, 0, "great_highway_north"},
+        {24448, 4224, 10, 90, 0, "great_highway_east"},
+        {38816, 153000, 10, 270, 0, "bay_bridge_west"},
+        {37000, 120000, 10, 270, 0, "bay_west"},
+        {110000, 4750, 10, 180, 0, "golden_gate_south"},
+        {49024, 76800, 10, 90, 0, "downtown_east"},
+        {42000, 39040, 10, 200, 0, "twin_peaks"},
+        {36736, 45000, 10, 270, 0, "city_west"},
+        {49024, 76800, 146, 270, -17, "helicopter_west"},
+    };
+    if (sweep) {
+        // Every panorama all the way round: from the west side (HORIZON2), the city (HORIZON1), the bay (HORIZON0).
+        const struct {
+            int32_t x, y;
+            const char* name;
+        } places[] = {{16000, 4200, "west"}, {42000, 39040, "city"}, {38816, 147000, "bay"}};
+        for (const auto& p : places) {
+            for (int yaw = 0; yaw < 360; yaw += 40) {
+                char name[48];
+                std::snprintf(name, sizeof name, "sweep_%s_%03d", p.name, yaw);
+                v.push_back({p.x, p.y, 10, yaw, 0, name});
+            }
+        }
+    }
+    return v;
+}
+
+int run_sky_views(const World& world, Machine& machine, Teleporter& teleporter, Validator& tval,
+                  const std::filesystem::path& out_dir, const std::string& label, const std::vector<SkyView>& views,
+                  int scale, bool replicas) {
+    en::SceneBuilder builder(world);
+    en::Scene scene;
+    en::Backdrop backdrop;
+    for (const SkyView& v : views) {
+        const int32_t z = world.ground_z(v.x, v.y) + v.z;
+        if (!teleporter.view(v.x, v.y, z, v.yaw, v.pitch)) {
+            std::printf("sky view %s: the original did not finish\n", v.name.c_str());
+            continue;
+        }
+        const Teleporter::Horizon& hz = teleporter.horizon();
+        Ega::Frame hills = tval.pre;
+        const bool applied = hz.rows > 0 && backdrop.apply(machine.ega(), hz.rows, hz.source, hz.dest, hills.pixels.data(),
+                                                           hills.width, hills.height);
+        // The scene at `scale` (the display's resolution) and at 1 (the original's, enlarged).
+        en::SceneOptions o;
+        o.pixel_w = o.pixel_h = static_cast<float>(scale);
+        o.replicas = replicas;
+        builder.build(tval.ram.data(), o, scene);
+        std::printf("sky view %s: %d vehicles and pedestrians\n", v.name.c_str(), scene.stats.vehicles);
+        en::Scene low;
+        en::SceneOptions o1;
+        o1.line_width = 1;
+        o1.replicas = replicas;
+        builder.build(tval.ram.data(), o1, low);
+        const int vy0 = scene.view_y0, vy1 = scene.view_y1;
+        const int w = 320 * scale, h = (vy1 - vy0) * scale, gap = 6;
+        // Painted | Hills side by side, display resolution above the original's.
+        const int W = 2 * w + gap, H = 2 * h + gap;
+        std::vector<uint32_t> img(static_cast<size_t>(W) * static_cast<size_t>(H), 0x202020);
+        for (int col = 0; col < 2; ++col) {
+            const Ega::Frame& under = col == 0 ? tval.pre : hills;
+            std::vector<uint32_t> hi(static_cast<size_t>(w) * static_cast<size_t>(h));
+            for (int yy = 0; yy < h; ++yy) {
+                for (int xx = 0; xx < w; ++xx) {
+                    hi[static_cast<size_t>(yy * w + xx)] = kEga[under.pixels[static_cast<size_t>((yy / scale + vy0) * 320 + xx / scale)] & 15];
+                }
+            }
+            SceneRaster::draw_rgb(scene, static_cast<float>(scale), w, h, 0, static_cast<float>(vy0), hi);
+            std::vector<uint32_t> lo(static_cast<size_t>(320 * (vy1 - vy0)));
+            for (int yy = 0; yy < vy1 - vy0; ++yy) {
+                for (int xx = 0; xx < 320; ++xx) {
+                    lo[static_cast<size_t>(yy * 320 + xx)] = kEga[under.pixels[static_cast<size_t>((yy + vy0) * 320 + xx)] & 15];
+                }
+            }
+            SceneRaster::draw_rgb(low, 1, 320, vy1 - vy0, 0, static_cast<float>(vy0), lo);
+            const int ox = col * (w + gap);
+            for (int yy = 0; yy < h; ++yy) {
+                for (int xx = 0; xx < w; ++xx) {
+                    img[static_cast<size_t>(yy * W + ox + xx)] = hi[static_cast<size_t>(yy * w + xx)];
+                    img[static_cast<size_t>((yy + h + gap) * W + ox + xx)] = lo[static_cast<size_t>((yy / scale) * 320 + xx / scale)];
+                }
+            }
+        }
+        char name[160];
+        std::snprintf(name, sizeof name, "%s_sky_%s.png", label.c_str(), v.name.c_str());
+        write_png(out_dir / name, W, H, img);
+        int band = 0;
+        for (size_t i = 0; i < hills.pixels.size(); ++i) band += hills.pixels[i] != tval.pre.pixels[i];
+        std::printf("sky view %s: camera %d,%d,%d yaw %d pitch %d, big tile %d, panorama rows %d at %04X, %s (%d pixels "
+                    "changed), %d cells, %d objects, %s\n",
+                    v.name.c_str(), v.x, v.y, z, v.yaw, v.pitch, (v.x >> 15) * 5 + (v.y >> 15), hz.rows, hz.source,
+                    applied ? "hills" : "not applied", band, scene.stats.cells, scene.stats.objects, name);
+    }
+    std::printf("sky views: %d of %d panoramas known to the retouching\n", backdrop.known(), en::kPanoramas);
+    return 0;
+}
+
+// --horizon-dump: the panoramas as the game holds them, and their Hills versions.
+int dump_horizons(Machine& machine, const std::filesystem::path& out_dir, const std::string& label) {
+    std::vector<uint8_t> buffer(static_cast<size_t>(en::kPanoramas * en::kPanoramaRows * en::kPanoramaWidth));
+    Ega::Frame f;
+    const size_t bytes = buffer.size() / 8;
+    for (size_t at = 0; at < bytes; at += 8000) {
+        machine.ega().render_page(static_cast<uint16_t>(0x4000 + at), f);
+        std::memcpy(buffer.data() + at * 8, f.pixels.data(), std::min<size_t>(8000, bytes - at) * 8);
+    }
+    const size_t n = static_cast<size_t>(en::kPanoramaRows * en::kPanoramaWidth);
+    for (int p = 0; p < en::kPanoramas; ++p) {
+        const uint8_t* in = buffer.data() + static_cast<size_t>(p) * n;
+        std::vector<uint8_t> out(n);
+        const bool known = en::landscape_panorama(in, out.data());
+        for (const bool hills : {false, true}) {
+            const uint8_t* px = hills ? out.data() : in;
+            char name[96];
+            std::snprintf(name, sizeof name, "%s_horizon%d_%s", label.c_str(), p, hills ? "hills" : "painted");
+            std::ofstream(out_dir / (std::string(name) + ".bin"), std::ios::binary)
+                .write(reinterpret_cast<const char*>(px), static_cast<std::streamsize>(n));
+            std::vector<uint32_t> img(n);
+            for (size_t i = 0; i < n; ++i) img[i] = kEga[px[i] & 15];
+            write_png(out_dir / (std::string(name) + ".png"), en::kPanoramaWidth, en::kPanoramaRows, img);
+        }
+        std::printf("horizon %d: hash %016llX, %s\n", p, static_cast<unsigned long long>(en::panorama_hash(in)),
+                    known ? "retouched" : "not known (left as it is)");
+    }
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     MachineConfig config;
     config.game_dir = "Game";
@@ -1302,6 +1466,8 @@ int main(int argc, char* argv[]) {
     std::vector<double> frame_shots;
     std::vector<uint16_t> watch_words;
     std::vector<int> bridge_view;  // --bridge-view x,y,z,yaw,pitch: only this view of the sweep
+    bool sky_views = false, sky_sweep = false, horizon_dump = false, replicas = false;
+    std::vector<SkyView> sky_list;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const bool v = i + 1 < argc;
@@ -1317,6 +1483,24 @@ int main(int argc, char* argv[]) {
             freeway_boxes = true;
         } else if (a == "--bridge-check") {
             bridge_check = true;
+        } else if (a == "--sky-views") {
+            sky_views = true;
+        } else if (a == "--sky-sweep") {
+            sky_views = sky_sweep = true;
+        } else if (a == "--horizon-dump") {
+            horizon_dump = true;
+        } else if (a == "--sky-view" && v) {
+            sky_views = true;
+            std::string r = argv[++i];
+            std::vector<std::string> f;
+            for (size_t p0 = 0; p0 <= r.size();) {
+                const size_t p1 = std::min(r.find(',', p0), r.size());
+                f.push_back(r.substr(p0, p1 - p0));
+                p0 = p1 + 1;
+            }
+            if (f.size() != 6) return usage();
+            sky_list.push_back({std::atoi(f[0].c_str()), std::atoi(f[1].c_str()), std::atoi(f[2].c_str()),
+                                std::atoi(f[3].c_str()), std::atoi(f[4].c_str()), f[5]});
         } else if (a == "--bridge-view" && v) {
             bridge_check = true;
             std::string r = argv[++i];
@@ -1376,6 +1560,8 @@ int main(int argc, char* argv[]) {
             scene_scale = std::max(1, std::atoi(argv[++i]));
         } else if (a == "--recheck") {
             recheck = true;
+        } else if (a == "--replicas") {
+            replicas = true;
         } else if (a == "--float") {
             from_world = true;
         } else if (a == "--dump-routine" && v) {
@@ -1585,7 +1771,8 @@ int main(int argc, char* argv[]) {
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
     const bool scene_mode = scene_from >= 0 || bench_from >= 0 || !scene_shots.empty();
-    if (val_from < 0 && teleports == 0 && !scene_mode && frame_shots.empty() && !bridge_check) {
+    const bool at_race_frame = bridge_check || sky_views || horizon_dump;
+    if (val_from < 0 && teleports == 0 && !scene_mode && frame_shots.empty() && !at_race_frame) {
         return 0;
     }
 
@@ -1644,7 +1831,7 @@ int main(int argc, char* argv[]) {
     Validator tval(machine, world);
     setup(tval, label + "_teleport");
     Teleporter teleporter(machine, tval);
-    if (teleports > 0 || bridge_check) {
+    if (teleports > 0 || at_race_frame) {
         machine.cpu().add_watch(Cpu::linear(kCode, 0x02DA), [&](Cpu&) {
             if (!teleporter.ready() && static_cast<double>(machine.emulated_ns()) / 1e9 >= teleport_at &&
                 machine.memory().read8(Cpu::linear(kData, 0x2AD4)) == 0) {
@@ -1653,14 +1840,14 @@ int main(int argc, char* argv[]) {
         });
     }
 
-    double end_s = std::max(val_to, teleports > 0 || bridge_check ? teleport_at : 0.0) + 0.5;
+    double end_s = std::max(val_to, teleports > 0 || at_race_frame ? teleport_at : 0.0) + 0.5;
     end_s = std::max({end_s, scene_to + 0.5, bench_to + 0.5, scene_shots.empty() ? 0.0 : scene_shots.back() + 1.0,
                       frame_shots.empty() ? 0.0 : *std::max_element(frame_shots.begin(), frame_shots.end()) + 0.1});
     const uint64_t end_ms = static_cast<uint64_t>((seconds > 0 ? seconds : end_s) * 1000);
     size_t next = 0, next_poke = 0, next_frame_shot = 0;
     std::sort(pokes.begin(), pokes.end(), [](const Poke& a, const Poke& b) { return a.at_ms < b.at_ms; });
     std::sort(frame_shots.begin(), frame_shots.end());
-    for (; ms < end_ms && !machine.stopped() && !((teleports > 0 || bridge_check) && val_from < 0 && teleporter.ready()); ++ms) {
+    for (; ms < end_ms && !machine.stopped() && !((teleports > 0 || at_race_frame) && val_from < 0 && teleporter.ready()); ++ms) {
         while (next < keys.size() && keys[next].at_ms <= ms) machine.key(keys[next++].scancode);
         while (next_poke < pokes.size() && pokes[next_poke].at_ms <= ms) {
             const Poke& pk = pokes[next_poke];
@@ -1733,6 +1920,21 @@ int main(int argc, char* argv[]) {
         tval.log.close();
         summary(tval, "teleport", "views");
         if (failed) std::printf("  %d views did not finish in the original\n", failed);
+    }
+    if (horizon_dump) {
+        if (!teleporter.ready()) {
+            std::printf("horizon dump: no race frame reached by %.1f s\n", teleport_at);
+            return 1;
+        }
+        dump_horizons(machine, out_dir, label);
+    }
+    if (sky_views) {
+        if (!teleporter.ready()) {
+            std::printf("sky views: no race frame reached by %.1f s\n", teleport_at);
+            return 1;
+        }
+        run_sky_views(world, machine, teleporter, tval, out_dir, label, sky_list.empty() ? default_sky_views(sky_sweep) : sky_list,
+                      scene_scale, replicas);
     }
     if (bridge_check) {
         if (!teleporter.ready()) {

@@ -55,8 +55,8 @@ keyboard, mouse, gamepad and PC-speaker sound. Native C++ ports of its routines 
 one at a time, each verified against the original (see [docs/PORTING.md](docs/PORTING.md)).
 
 **Launch menu.** VETTE! 2026 opens with a launch menu. Choose a preset there (**Classic**, VETTE!
-exactly as in 1989, or **Enhanced**), or set each option: frame rate, PC speed, draw distance, the
-manual check, joystick, window or fullscreen, scaling (sharp pixels, or smooth), sound, and whether the
+exactly as in 1989, or **Enhanced**), or set each option: frame rate, PC speed, draw distance, its
+resolution and skyline, the manual check, joystick, window or fullscreen, scaling (sharp pixels, or smooth), sound, and whether the
 menu appears at startup. **Game folder** shows
 where your game files were found; select it to choose another folder. If the files aren't found, the
 menu opens anyway and asks for the folder. It works with the keyboard, mouse or gamepad. Choices
@@ -74,17 +74,26 @@ between the last two game frames. This adds at most one game frame (~33 ms) of d
 shows only the frames the game draws itself.
 
 **Draw distance.** The original draws only the few city blocks around the car, about two blocks ahead.
-With **Maximum** (the Enhanced preset), VETTE! 2026 draws the race view's 3D world itself, at your
-display's full resolution, with the whole city in view to the horizon. **Extended** draws eight blocks
-around the car. The city is taken from your own copy of the game when it starts (about 0.1 s): every
-building, road and landmark with its most detailed model, and the cars and pedestrians where the game
-has them. It is drawn in the original's back-to-front order, so things hide each other just as they do
-in the original. The rear-view mirrors and the freeway sections are drawn the same way (the freeway
-road reaches further ahead than the original's 32 slices). Road markings are painted flat on the road;
-edges and cables stay crisp lines. The dash and messages are still the game's own. `--draw-distance
-original|extended|maximum` overrides the setting for one run. The painted skyline behind the city
-stays, so far buildings stand in front of their painted copies; with PC-98 or Mac graphics the mirror
-is the original's.
+With **Maximum** (the Enhanced preset), VETTE! 2026 draws the race view's 3D world itself, with the
+whole city in view to the horizon at once: every building, road and landmark with its most detailed
+model, and all of the game's traffic and pedestrians (they repeat across the city in a pattern every
+four blocks), so nothing pops in as you drive. **Extended** draws eight blocks around the car. The city is
+taken from your own copy of the game when it starts (about 0.1 s). It is drawn in the original's
+back-to-front order, so things hide each other just as they do in the original. The rear-view mirrors and
+the freeway sections are drawn the same way (at Maximum, the freeway's whole route). Road markings are
+painted flat on the road; edges and cables are thin, crisp lines. The dash and messages are still the
+game's own. With PC-98 or Mac graphics the mirror is the original's. `--draw-distance
+original|extended|maximum` overrides the setting for one run.
+
+**Resolution.** The long-distance view is drawn at your display's full resolution. With **Original
+320x200**, it is drawn at the original's own 320x200 instead and enlarged like the rest of the picture:
+the whole city and every other enhancement, with the chunky pixels and one-pixel lines of 1989
+(`--resolution original`).
+
+**Skyline.** Behind the long-distance view, **Hills** (the default) keeps only the landscape of the
+original's painted horizon: its painted buildings, towers and bridges are taken out, since the real city
+now stands in front of it. **Painted** keeps the original's backdrop as it is (`--skyline painted`).
+Hills is made for DOS VETTE! 1.1's pictures; with others, the backdrop stays painted.
 
 **Sound effects and music.** The original only had the PC speaker. VETTE! 2026 can instead play its
 sounds on an emulated **AdLib** card (the Enhanced preset; DOS VETTE! never supported one), or use the

@@ -39,8 +39,10 @@ std::unique_ptr<ScreenHandler> make_mac_map(const ArtFiles& files, std::vector<s
 
 // A rectangle of an art image placed at `dst` (art_w x art_h) in frame pixels.
 FRect art_to_frame(const FRect& dst, int art_w, int art_h, const IRect& a);
-// A Mac picture as an image (undrawn pixels transparent), or empty with a warning.
-Image load_mac_picture(const ArtFiles& files, int id, std::vector<std::string>& warnings);
+// A Mac picture as an image (undrawn pixels `background`: transparent by default; QuickDraw
+// erases windows and dialogs to white), or empty with a warning.
+Image load_mac_picture(const ArtFiles& files, int id, std::vector<std::string>& warnings,
+                       std::uint32_t background = 0);
 // A frame for highlighting a rectangle: `thickness` pixels of `argb`, transparent inside.
 Image frame_image(int w, int h, std::uint32_t argb, int thickness = 2);
 // Moves DOS frame pixels into the composite: the pixels of `dos` (frame rect) whose colour is in

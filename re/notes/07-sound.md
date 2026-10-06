@@ -284,7 +284,7 @@ Watches only (no hooks, nothing written):
 | 94A1 / 94C8, 94D2 / 94FB | noise start (past the enabled test) / RET; the meaning from the return address (5.6) |
 | 94FC | race frame: time, throttle (DS:2D48, still set here), gear; the player's z, pitch, speed (thud); the held states |
 | E6B0 / EB0C | options menu mute / restore, for `enabled()` |
-| BB00, 198A, 1562, C55D/C5A6/C612/C615, 3FFC:0219 | the silent moments (section 9) |
+| BB00, 198A, 1562, 1B74, C55D/C5A6/C612/C615, 3FFC:0219 | the silent moments (section 9) |
 
 `requested(engine|skid|siren|horn|helicopter)` reads `cs:926C`/`926E`/`9277` (and section 9's state) while race
 frames arrive (one within 1 s) and the game hasn't silenced everything since: a `snd_stop` from anything but
@@ -347,16 +347,13 @@ replacement can fill them in. The PC speaker plays nothing for them. They respec
 | `intro_cable_car` | Cue | title: the cable car starts rolling in (1.9 s) | the first `title_restore_band` step after the reveal (C5A6 after C55D) | `cable car bell` (the intro's use) |
 | `intro_car` | Cue | title: the Corvette comes at you (5.2 s) | `title_car_approach` call at C612 | `mic` |
 | `intro_logo` | Cue | title: the VETTE! logo drops in (5.5 s) | `title_logo_drop` call at C615 | `Signature` |
+| `service_station` | Cue | onto a service station's driveway, where stopping repairs the car (9.3); again only after a frame off it | `box_service_station` 1B74 (`collision_box_event`, box C358h, the player only) | `cable car bell` (the race's use) |
 
 `program()` gives the countdown cues the two unused DOS beeps (5.8) as their "original" notes; the others have
 none.
 
-Not reported: the race's **cable car bell**. The Mac rings it on entering a particular box (handler 6:5688,
-reached through jump table entry A5+6D2 from the box-type table in CODE 10; re-armed once the car leaves the
-box). DOS has no such box (the cases of `collision_box_event` 1976 are the water, rough surfaces, on-ramps,
-finish lines, C358 and crash boxes) and never draws a cable car in the race: model 2, the cable car's, isn't
-used by any traffic entity or scenery stub. The Mac's "landing after a jump" thud also has no DOS counterpart:
-DOS sets the car's height from the ground every frame (`ground_shape_height` 4160:0515), so it never leaves it.
+The Mac's "landing after a jump" thud has no DOS counterpart: DOS sets the car's height from the ground every
+frame (`ground_shape_height` 4160:0515), so it never leaves it.
 
 ### 9.1 The horn's key
 
@@ -380,7 +377,30 @@ pitch rising by ≥ 7 (the bottom of an uphill, or the end of a downhill) at spe
 a hard hit, `player_contact_response` 1652). The height check catches any step between cells; a map scan finds
 a few mismatched borders, but none on the roads driven here.
 
-### 9.3 Validation
+### 9.3 The service station (the Mac's "cable car bell" in races)
+
+The Mac sound is named for a cable car, but in races the Mac rings it at **service stations** (**confirmed**):
+
+- The Mac's box handler 6:5688 (notes 08) rings the bell, then, if the car has stopped and isn't already being
+  repaired, zeroes its speed, sums its eight damage counters (A5−$346A.., raised by the crash code at
+  6:4CD4-4D70 and drawn by the damage display at 6:4E58-506C) and, if there is damage, starts a repair:
+  60 ticks per damage point plus 120, the counters cleared.
+- Its box is the third of collision class 26, the class of Mac cell type 3 (13 cells, plus type 235 at one
+  more). DOS cell type 14 has the same class number, 1Ah, also with six boxes; its third is C358h. The
+  coordinates differ (the Mac's were re-authored), the role is the same:
+- DOS box C358h (`collision_box_event` 1B74) does the same repair: if the player has stopped there, on ROOKIE
+  or PRO, `repair_car` 2454 clears the eight damage bytes DS:3DC0-3DC7, the drivetrain and body damage
+  (2C4F, 2C5B, 2C5D) and the steering limits, and the damage display comes up for 2 s.
+- DOS cell type 14 is a service station: a red garage with brown bay doors west of the driveway (box C348h)
+  and blue pumps east of it. Twelve cells: (6, 13) at 38th Avenue and Santiago, (11, 9), (14, 12), (16, 2) on
+  the Great Highway, (22, 35), (28, 23), (29, 40), (30, 29), (34, 16), (35, 31), (37, 23), (39, 29).
+- The driveway box is x 400-504, y 1536-1791 in the cell (a 104 × 255 strip, entered heading north or south:
+  the garage is west of it and a thin wall, C350h, east).
+
+The observer rings on each entry, as the Mac does: `collision_box_event` runs the C358h case every frame the
+car is in the box, and the event fires again only after a race frame without it.
+
+### 9.4 Validation
 
 `vette_run --sound-log`, 12 MHz:
 
@@ -393,6 +413,11 @@ README drive + F4 at 40 s, F2 at 42, X held 43-44:
 PRO, Sledgehammer:    50.4133 start pulled_over   50.4961 stop siren
 North on the Great Highway (stock car, automatic, K to straighten every 5 s):
  115.0793 start thud   (cell (22, 2): pitch 0 -> 7 at speed 672)
+The same, braking at 88.4-90 s, right at 92-92.9 and K, left at 94.8-95.7 and K (keys only):
+  96.3220 start service_station   (the Great Highway station, cell (16, 2): east on the cross street, then
+                                   north up its driveway)
+Harness: put at cell (6, 13), x 200, y 1650 (38th Avenue station) during the countdown, then throttle:
+  40.3333 start service_station   (and once more after being put back at 43 s while rolling)
 ```
 
 Recordings from the game itself (`vette2026 --no-launcher --mute --pc 286 --effects mac --wav ...`, same keys),
@@ -409,6 +434,7 @@ each Mac sample found by normalized cross-correlation of the whole sample with t
 | splash 46.2409 | splash | 0.686 (next 0.043) | 46.241 s |
 | pulled_over 50.4133 (police run) | joel | 0.509 (0.074 elsewhere) | 50.397 s |
 | thud (hill run) | thud | 0.750 (0.280 elsewhere) | 115.18 s* |
+| service_station 40.3333 (station run, `--poke` the position) | cable car bell | 0.477 (next 0.061; 0 at 20-30 s) | 40.333 s |
 
 \*The game's own run drifts from vette_run's by up to 0.2 s over two minutes of driving (its pedestrian hit is
 0.2 s later too), so the thud is matched on the hill climb, not on the exact time.
@@ -416,7 +442,7 @@ each Mac sample found by normalized cross-correlation of the whole sample with t
 The AdLib recording of the README drive shows the defaults sounding at the events (new spectral peaks after
 each): the bell's 660/1320 Hz, the countdown's 660 Hz and 883 Hz (the unused DOS beeps' notes), the horn's
 partials (since tuned to 416/520 Hz), the rotor's low partials with the engine level unchanged (it replaced the
-engine). `tests/sound_game_audio_moments.cpp` checks on the running game that each moment reaches the
+engine), and in the station run the bell's 1040 Hz at 40.3 s. `tests/sound_game_audio_moments.cpp` checks on the running game that each moment reaches the
 replacement, that the rotor replaces the engine for exactly the view's time, and that with the PC speaker alone
 the output is unchanged sample for sample.
 
@@ -425,7 +451,8 @@ the output is unchanged sample for sample.
 - The unused beeps (5.8) as a cut countdown: the Mac's countdown supports it (section 9); the PC-98's is unchecked.
 - The Mac's horn key: its handler (1:30C0, released at 1:2E2C) tests a GetKeys bit; which key that is wasn't
   settled. The keyboard chart in the Mac box doesn't list a horn.
-- Where the Mac's cable car box is, and whether a DOS cell matches it (9).
+- The Mac's other two boxes on the same handler (box types 28 and 29: classes 89 and 90, cell types 151 and 139)
+  are on no cell of the main map; maybe another of its maps.
 - Whether the siren first-note quirk (3.3) is audible in practice (count ≥ 1 at a siren start never observed).
 - The PIT reprogramming between repeated notes resets the counter phase: is there an audible click on a real
   speaker?

@@ -5,6 +5,7 @@
 #include "core/game_dir.h"
 #include "core/path_utf8.h"
 #include "core/settings.h"
+#include "enhanced/backdrop.h"
 #include "enhanced/scene.h"
 #include "enhanced/world.h"
 #include "game/options.h"
@@ -57,8 +58,8 @@ constexpr const char* kUsage =
     "Usage: vette2026 [--[no-]launcher] [--game <dir>] [--fps smooth|original] [--pc fast|286]\n"
     "                 [--draw-distance original|extended|maximum] [--cpu-hz <n>] [--[no-]joystick]\n"
     "                 [--effects off|speaker|adlib|mac] [--music off|original|pc98] [--no-sound]\n"
-    "                 [--graphics dos|pc98|mac] [--scaling sharp|smooth]\n"
-    "                 [--manual-check] [--dump-frame <file.bmp>]\n"
+    "                 [--graphics dos|pc98|mac] [--scaling sharp|smooth] [--resolution display|original]\n"
+    "                 [--skyline hills|painted] [--manual-check] [--dump-frame <file.bmp>]\n"
     "Settings come from the launch menu (saved in settings.ini); these flags override them for one run.\n"
     "  --launcher           show the launch menu even if it's switched off (--no-launcher: skip it)\n"
     "  --game <dir>         folder with the DOS VETTE! files (default: search for Game/)\n"
@@ -78,6 +79,11 @@ constexpr const char* kUsage =
     "                       version's digitized sounds (Game/Mac); off\n"
     "  --music original     (default) the title and winner tunes on the effects' device; pc98: the PC-98\n"
     "                       version's FM songs (Game/PC98); off. --no-sound: no effects, no music\n"
+    "  --resolution display (default) the Enhanced 3D view at the display's resolution; original: at the\n"
+    "                       original's 320x200, enlarged like the rest of the picture\n"
+    "  --skyline hills      (default) with the extended or maximum draw distance, the horizon backdrop\n"
+    "                       keeps only the hills, trees and water, behind the real city; painted: the\n"
+    "                       original's backdrop, with its painted skyline and bridges\n"
     "  --scaling sharp      (default) the pictures simply enlarged, every pixel a solid block; smooth:\n"
     "                       the edges between pixels softened\n"
     "  --graphics dos       (default) the DOS screens; pc98 or mac: that version's art in their place\n"
@@ -140,6 +146,8 @@ struct Options {
     std::optional<Settings::Music> music;
     std::optional<Settings::Graphics> graphics;
     std::optional<Settings::Scaling> scaling;
+    std::optional<Settings::ViewResolution> view_resolution;
+    std::optional<Settings::Skyline> skyline;
     std::vector<ScriptedKey> keys;
     std::vector<ScriptedPoke> pokes;     // sorted by time
     std::vector<std::uint64_t> shots;    // emulated ns, sorted
@@ -167,6 +175,10 @@ struct Options {
             s.graphics = *graphics;
         if (scaling)
             s.scaling = *scaling;
+        if (view_resolution)
+            s.view_resolution = *view_resolution;
+        if (skyline)
+            s.skyline = *skyline;
     }
 };
 
@@ -204,6 +216,13 @@ std::optional<Options> parse_args(int argc, char** argv) {
                 return std::nullopt;
             }
             opts.effects = static_cast<Settings::Effects>(it - std::begin(kNames));
+        } else if (arg == "--resolution" && has_value && (std::string_view(argv[i + 1]) == "display" ||
+                                                         std::string_view(argv[i + 1]) == "original")) {
+            opts.view_resolution = std::string_view(argv[++i]) == "display" ? Settings::ViewResolution::Display
+                                                                            : Settings::ViewResolution::Original;
+        } else if (arg == "--skyline" && has_value && (std::string_view(argv[i + 1]) == "hills" ||
+                                                      std::string_view(argv[i + 1]) == "painted")) {
+            opts.skyline = std::string_view(argv[++i]) == "hills" ? Settings::Skyline::Hills : Settings::Skyline::Painted;
         } else if (arg == "--scaling" && has_value && (std::string_view(argv[i + 1]) == "sharp" ||
                                                       std::string_view(argv[i + 1]) == "smooth")) {
             opts.scaling = std::string_view(argv[++i]) == "sharp" ? Settings::Scaling::Sharp : Settings::Scaling::Smooth;
@@ -286,7 +305,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--key" || arg == "--hold" || arg == "--shot" || arg == "--quit-after" ||
                                      arg == "--poke" ||
                                      arg == "--wav" || arg == "--effects" || arg == "--music" ||
-                                     arg == "--graphics" || arg == "--scaling";
+                                     arg == "--graphics" || arg == "--scaling" ||
+                                     arg == "--resolution" || arg == "--skyline";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
                          argv[i], kUsage);
             return std::nullopt;
@@ -391,6 +411,8 @@ struct Artwork {
 
 struct EnhancedView {
     int radius = enhanced::kMapCells;
+    bool hills = true;  // Settings::Skyline::Hills: the backdrop without its painted city
+    enhanced::Backdrop backdrop;
     enhanced::World world;
     std::unique_ptr<enhanced::SceneBuilder> builder;  // once the world is extracted
     std::uint64_t next_try_ns = kExtractFromNs;
@@ -401,6 +423,7 @@ struct EnhancedView {
     Framebuffer under, over;
     std::uint64_t frames = 0;
     double build_ms = 0;
+    std::uint64_t vehicles = 0;  // drawn in the main view, over all frames
 
     void prepare(host::Machine& machine) {
         if (builder || failed || machine.emulated_ns() < next_try_ns)
@@ -427,9 +450,19 @@ struct EnhancedView {
             return false;
         enhanced::SceneOptions options;
         options.radius = radius;
+        options.replicas = radius >= enhanced::kMapCells;  // Maximum: the whole city, all its traffic included
         presenter.frame_scale(layers.under.width, layers.under.height, options.pixel_w, options.pixel_h);
+        if (presenter.original_resolution())
+            options.line_width = 1;  // the original's one-pixel lines
         builder->build(layers.ram.data(), options, scene);
         build_ms += scene.stats.milliseconds;
+        vehicles += static_cast<std::uint64_t>(scene.stats.vehicles);
+        // The Hills skyline wherever the real city is drawn (not on a freeway alone, whose painted
+        // skyline is the only city there is).
+        if (hills && scene.stats.city && layers.horizon.rows > 0) {
+            backdrop.apply(machine.ega(), layers.horizon.rows, layers.horizon.source, layers.horizon.dest,
+                           layers.under.pixels.data(), layers.under.width, layers.under.height);
+        }
         if (layers.mirror) {
             options.mirror = true;
             builder->build(layers.ram.data(), options, mirror);
@@ -780,6 +813,7 @@ int run(int argc, char** argv) {
         Presenter presenter(kAppName);
         presenter.set_fullscreen(settings.fullscreen);
         presenter.set_smooth_scaling(settings.scaling == Settings::Scaling::Smooth);
+        presenter.set_original_resolution(settings.view_resolution == Settings::ViewResolution::Original);
         Gamepad gamepad;
 
         // The launch menu: when it's switched on, or to let the player find the game files.
@@ -842,10 +876,12 @@ int run(int argc, char** argv) {
             view = std::make_unique<EnhancedView>();
             if (settings.draw_distance == Settings::DrawDistance::Extended)
                 view->radius = kExtendedRadius;
+            view->hills = settings.skyline == Settings::Skyline::Hills;
         }
-        SDL_Log("Frame rate: %s; draw distance: %s; emulated CPU %.0f MHz",
+        SDL_Log("Frame rate: %s; draw distance: %s%s; emulated CPU %.0f MHz",
                 smooth_fps ? "smooth (display refresh)" : "original",
                 !enhanced_view ? "original" : view->radius == kExtendedRadius ? "extended" : "maximum",
+                !enhanced_view ? "" : view->hills ? ", hills skyline" : ", painted skyline",
                 static_cast<double>(config.cpu_hz) / 1e6);
 
         // Sound: the emulated PC speaker, or a replacement driven by the game's sound events.
@@ -902,8 +938,9 @@ int run(int argc, char** argv) {
                     static_cast<unsigned long long>(smooth->stats().replays),
                     smooth->stats().replay_ms / static_cast<double>(smooth->stats().replays));
         if (view && view->frames)
-            SDL_Log("Enhanced view: %llu frames, %.2f ms per scene", static_cast<unsigned long long>(view->frames),
-                    view->build_ms / static_cast<double>(view->frames));
+            SDL_Log("Enhanced view: %llu frames, %.2f ms per scene, %.0f vehicles and pedestrians drawn",
+                    static_cast<unsigned long long>(view->frames), view->build_ms / static_cast<double>(view->frames),
+                    static_cast<double>(view->vehicles) / static_cast<double>(view->frames));
         return 0;
     } catch (const std::exception& e) {
         report_error(e.what(), !headless);

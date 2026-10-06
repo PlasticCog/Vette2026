@@ -26,6 +26,8 @@ constexpr uint16_t kHighwayBranch = 0x0342;   // highway mode (DS:2AD4 != 0) jum
 constexpr uint16_t kHighwayDrawEnd = 0x03A1;  // past the traffic, the cell window and 0374
 constexpr uint16_t kHighwayDrawn = 0x0405;    // after highway_frame and highway_draw_cars: the freeway drawn
 constexpr uint16_t kMirrorWorldDrawn = 0x075F;  // draw_mirror_view: its world drawn, its frame (6439) next
+constexpr uint16_t kHorizonCopy = 0x6773;  // vram_copy_rows, from blit_horizon: AX:SI -> DX:DI, BP rows of 40 bytes
+constexpr uint16_t kPanoramaSeg = 0xA400;  // cs:0013, the off-screen panorama buffer
 constexpr uint16_t kTrafficStep = 0xBCFB, kPedestrianStep = 0xBB72;  // simulation inside the section
 
 constexpr uint16_t kBackBufSeg = 0x0011;  // cs: segment the race view is drawn into (A000 / A200)
@@ -183,6 +185,14 @@ SmoothRenderer::SmoothRenderer(host::Machine& machine, bool world_layers)
     scratch_cpu_->set_code_hook(Cpu::linear(kCode, kPedestrianStep), near_return);
     scratch_cpu_->set_code_hook(Cpu::linear(kCode, kDrawEnd), [](Cpu& c) { c.request_stop(); });
     scratch_cpu_->set_code_hook(Cpu::linear(kCode, kHighwayDrawEnd), [](Cpu& c) { c.request_stop(); });
+    scratch_cpu_->add_watch(Cpu::linear(kCode, kHorizonCopy), [this](Cpu& c) {
+        if (c.regs.r[host::AX] != kPanoramaSeg) {
+            return;
+        }
+        const auto bp = static_cast<int16_t>(c.regs.r[host::BP]);
+        horizon_ = {bp > 0 ? bp : 1, c.regs.r[host::SI], c.regs.r[host::DI]};  // a do-while: one row at least
+        horizon_dest_seg_ = c.regs.r[host::DX];
+    });
     if (world_layers_) {
         // The world is drawn by the Enhanced renderer: take the memory it needs and skip the original's.
         scratch_cpu_->set_code_hook(Cpu::linear(kCode, kDrawWorld), [this](Cpu& c) {
@@ -370,6 +380,7 @@ bool SmoothRenderer::replay(double alpha, Ega::Frame& out) {
     cpu.regs = cur_->regs;
     cpu.regs.ip = kDrawStart;  // same CS, stack and segments as at the capture point
     world_copied_ = false;
+    horizon_ = {};
     cpu.run(kReplayBudget);
     const bool finished =
         cpu.regs.s[host::CS] == kCode && (cpu.regs.ip == kDrawEnd || cpu.regs.ip == kHighwayDrawEnd);
@@ -379,6 +390,9 @@ bool SmoothRenderer::replay(double alpha, Ega::Frame& out) {
     if (finished) {
         const uint16_t seg = rd16(scratch_mem_, kCode, kBackBufSeg);
         scratch_ega_.render_page(static_cast<uint16_t>((seg - 0xA000) * 16), out);
+        if (horizon_dest_seg_ != seg) {
+            horizon_ = {};  // drawn somewhere else than the page shown
+        }
     } else {
         broken_ = true;  // the section didn't end where expected: stop replaying, show the game's frames
     }
@@ -458,6 +472,7 @@ bool SmoothRenderer::render_layers(uint64_t now_ns, Layers& out) {
     if (!replayed) {
         return false;
     }
+    out.horizon = horizon_;
 
     // The displayed frame on top, except where it shows the original's own 3D view, or its mirror's
     // world (the mirror image captured on that page in the same game frame). The mirror's frame stays,

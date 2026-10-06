@@ -68,6 +68,10 @@ SDL_FRect Presenter::fit() const {
 }
 
 void Presenter::frame_scale(int frame_w, int frame_h, float& sx, float& sy) const {
+    if (original_resolution_) {
+        sx = sy = 1;
+        return;
+    }
     const SDL_FRect dst = fit();
     sx = dst.w / static_cast<float>(frame_w);
     sy = dst.h / static_cast<float>(frame_h);
@@ -100,7 +104,14 @@ SDL_Texture* Presenter::upload(Layer& layer, const std::uint8_t* src_pixels, int
             row[x] = transparency && src[x] == kTransparentPixel ? 0 : argb[src[x] & 0x0F];
     }
     SDL_UnlockTexture(layer.frame.get());
+    return enlarge(layer, transparency, dst);
+}
 
+// The layer's frame-sized texture, upscaled by whole factors for the final stretch (see upload()).
+SDL_Texture* Presenter::enlarge(Layer& layer, bool transparency, const SDL_FRect& dst) {
+    SDL_Renderer* renderer = renderer_.get();
+    const int w = layer.w;
+    const int h = layer.h;
     const int ix = std::max(1, static_cast<int>(dst.w) / w);
     const int iy = std::max(1, static_cast<int>(dst.h) / h);
     if (ix != layer.scale_x || iy != layer.scale_y) {
@@ -143,17 +154,40 @@ void Presenter::present(const Framebuffer& fb) {
 }
 
 // The Enhanced 3D view: the game's view without its world, then the scene's triangles (and the
-// mirror's), from frame coordinates to output pixels, each clipped to its viewport.
+// mirror's), from frame coordinates to output pixels, each clipped to its viewport. At the original
+// resolution, all of it is drawn into a frame-sized texture first, which is then enlarged like a frame.
 void Presenter::draw_scene(const Framebuffer& under, const enhanced::Scene& scene, const enhanced::Scene* inset,
                            const SDL_FRect& dst) {
     SDL_Renderer* renderer = renderer_.get();
-    SDL_RenderTexture(renderer, upload(base_, under, false, dst), nullptr, &dst);
-    draw_triangles(scene, under.width, under.height, dst);
+    if (!original_resolution_) {
+        draw_scene_layers(upload(base_, under, false, dst), under.width, under.height, scene, inset, dst);
+        return;
+    }
+    const SDL_FRect frame{0, 0, static_cast<float>(under.width), static_cast<float>(under.height)};
+    SDL_Texture* under_texture = upload(low_under_, under, false, frame);  // before the target changes
+    if (under.width != low_scene_.w || under.height != low_scene_.h) {
+        low_scene_.frame = create_texture(renderer, SDL_TEXTUREACCESS_TARGET, under.width, under.height,
+                                          SDL_SCALEMODE_NEAREST);
+        low_scene_.w = under.width;
+        low_scene_.h = under.height;
+        low_scene_.scale_x = low_scene_.scale_y = 0;
+    }
+    SDL_SetRenderTarget(renderer, low_scene_.frame.get());
+    draw_scene_layers(under_texture, under.width, under.height, scene, inset, frame);
+    SDL_SetRenderTarget(renderer, nullptr);
+    SDL_RenderTexture(renderer, enlarge(low_scene_, false, dst), nullptr, &dst);
+}
+
+void Presenter::draw_scene_layers(SDL_Texture* under, int frame_w, int frame_h, const enhanced::Scene& scene,
+                                  const enhanced::Scene* inset, const SDL_FRect& dst) {
+    SDL_Renderer* renderer = renderer_.get();
+    SDL_RenderTexture(renderer, under, nullptr, &dst);
+    draw_triangles(scene, frame_w, frame_h, dst);
     if (inset) {
         // Nothing of the main view may show in the mirror: its viewport is filled first (with its sky,
         // the colour of its first triangles), then its scene goes on top.
-        const float sx = dst.w / static_cast<float>(under.width);
-        const float sy = dst.h / static_cast<float>(under.height);
+        const float sx = dst.w / static_cast<float>(frame_w);
+        const float sy = dst.h / static_cast<float>(frame_h);
         const float x0 = std::round(dst.x + static_cast<float>(inset->view_x0) * sx);
         const float y0 = std::round(dst.y + static_cast<float>(inset->view_y0) * sy);
         const SDL_FRect rect{x0, y0, std::round(dst.x + static_cast<float>(inset->view_x1) * sx) - x0,
@@ -162,7 +196,7 @@ void Presenter::draw_scene(const Framebuffer& under, const enhanced::Scene& scen
                                                                   : inset->vertices.front();
         SDL_SetRenderDrawColorFloat(renderer, sky.r, sky.g, sky.b, 1);
         SDL_RenderFillRect(renderer, &rect);
-        draw_triangles(*inset, under.width, under.height, dst);
+        draw_triangles(*inset, frame_w, frame_h, dst);
     }
 }
 

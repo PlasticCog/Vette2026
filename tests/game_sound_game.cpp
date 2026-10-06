@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -331,4 +332,65 @@ TEST(game_sound_observer_changes_nothing) {
     plain->take_audio(a);
     watched->take_audio(b);
     CHECK(a == b);
+}
+
+TEST(game_sound_service_station) {
+    // The service station at 38th Avenue and Santiago, cell (6, 13) in the start's big tile: the car is
+    // put in front of its driveway during the countdown, drives through it, and is put back once to
+    // drive through again. One bell each time, as the Mac rings it.
+    const fs::path dir = game_dir();
+    if (!fs::exists(dir / "VETTE.EXE")) {
+        std::printf("  SKIPPED: no VETTE.EXE in %s\n", dir.string().c_str());
+        return;
+    }
+    auto m = boot(dir);
+    CHECK(m != nullptr);
+    if (!m) {
+        return;
+    }
+    SoundEvents sound(*m);
+    vette::host::Memory& mem = m->memory();
+    using vette::game::kDataSeg;
+    const auto place = [&] {
+        vette::game::wr16(mem, kDataSeg, 0x2D35, 6 * 0x800 + 200);    // x: the cell's south part
+        vette::game::wr16(mem, kDataSeg, 0x2D37, 13 * 0x800 + 1650);  // y: on the driveway's line
+        vette::game::wr16(mem, kDataSeg, 0x2D3B, 0);                  // heading north
+    };
+    struct Key {
+        double at;
+        uint8_t sc;
+    };
+    const Key keys[] = {{13, 0x39}, {13.1, 0xB9}, {17, 0x1C}, {17.1, 0x9C}, {21, 0x1C}, {21.1, 0x9C},
+                        {25, 0x1C}, {25.1, 0x9C}, {30, 0x1C}, {30.1, 0x9C}, {37.3, 0x02}, {37.4, 0x82},
+                        {37.5, 0x48}, {47, 0xC8}};
+    size_t next = 0;
+    bool placed = false, replaced = false;
+    std::vector<SoundEvent> events;
+    for (int ms = 0; ms < 47000 && !m->stopped(); ++ms) {
+        while (next < std::size(keys) && keys[next].at * 1000 <= ms) {
+            m->key(keys[next++].sc);
+        }
+        if (!placed && ms >= 32000) {
+            place();
+            placed = true;
+        }
+        if (!replaced && ms >= 43000) {
+            place();  // back in front of the driveway, still rolling
+            replaced = true;
+        }
+        m->run_for(1'000'000);
+        sound.take(events);
+    }
+    std::vector<double> bells;
+    for (const auto& e : events) {
+        if (e.sfx == Sfx::ServiceStation) {
+            CHECK(e.start);
+            bells.push_back(static_cast<double>(e.t_ns) / 1e9);
+        }
+    }
+    CHECK_EQ(bells.size(), size_t{2});
+    if (bells.size() == 2) {
+        CHECK(bells[0] > 38 && bells[0] < 43);
+        CHECK(bells[1] > 43 && bells[1] < 47);
+    }
 }

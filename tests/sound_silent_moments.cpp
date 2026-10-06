@@ -52,7 +52,7 @@ TEST(sound_silent_moments_mac_sounds) {
         {Sfx::Horn, "horn"},           {Sfx::Helicopter, "heli"},       {Sfx::CountdownBeep, "beep1"},
         {Sfx::CountdownGo, "beep2"},   {Sfx::Splash, "splash"},         {Sfx::Thud, "thud"},
         {Sfx::PulledOver, "joel"},     {Sfx::IntroCableCar, "cable car bell"}, {Sfx::IntroCar, "mic"},
-        {Sfx::IntroLogo, "signature"},
+        {Sfx::IntroLogo, "signature"},       {Sfx::ServiceStation, "cable car bell"},
     };
     CHECK_EQ(silent_moments().size(), std::size(want));
     for (const Want& w : want) {
@@ -67,6 +67,9 @@ TEST(sound_silent_moments_mac_sounds) {
     CHECK(vette::assets::mac_sound_for_dos("helicopter")->max_seconds == 0);
     const auto* bell = vette::assets::mac_sound_for_dos("intro_cable_car");
     CHECK(bell && bell->channel == 1 && std::fabs(bell->max_seconds - 2.0) < 0.01);
+    // The race's use of the same bell: the service station's driveway (channel 2, 3 s).
+    const auto* station = vette::assets::mac_sound_for_dos("service_station");
+    CHECK(station && station->channel == 2 && std::fabs(station->max_seconds - 3.0) < 0.01);
 }
 
 TEST(sound_silent_moments_adlib) {

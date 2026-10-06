@@ -44,6 +44,7 @@ struct Scene {
         int lines_dropped = 0; // shorter than SceneOptions::min_line_length
         int models = 0;        // segment-245A model instances (static and vehicles)
         int slices = 0;        // freeway road slices drawn (highway mode)
+        bool city = false;     // the city was drawn (not a freeway alone)
     } stats;
 
     void clear() {
@@ -61,10 +62,13 @@ struct SceneOptions {
     // Output pixels per race-frame pixel, horizontally and vertically (for line widths).
     float pixel_w = 1, pixel_h = 1;
     // Lines (outlines, barrier edges, posts, cables, model polylines) are drawn on screen, line_world_width
-    // world units wide in perspective, at most one race-frame pixel (the original's weight close up) and
-    // at least line_width output pixels or a quarter of a race-frame pixel, whichever is more.
+    // world units wide in perspective, at most line_max race-frame pixels (thin at high resolution: the
+    // original's whole-pixel weight looks heavy there) and at least line_width output pixels or a quarter
+    // of a race-frame pixel, whichever is more (so they stay visible). At the original's resolution, both
+    // limits come to one pixel.
     float line_width = 1.5f;
     float line_world_width = 2.5f;
+    float line_max = 0.35f;
     // Markings painted on the ground (the horizontal lines at the ground level of the ground layer's
     // objects, of the bridges' pieces and of the freeway's slices: lane dashes, centre and kerb lines,
     // crossings) are flat stripes this wide in world units (1 unit is about 3 inches), lying on the road
@@ -77,7 +81,9 @@ struct SceneOptions {
     // lane-marking dashes would only add speckle (each would be a line_width square).
     float min_line_length = 0.5f;
     // Traffic and pedestrians are a pattern that repeats every 4 cells (notes 03, "Traffic"). Off: each
-    // entity once, where the original binds it. On: every cell of its pattern within the radius.
+    // entity once, where the original binds it, so a far car jumps when its nearest copy changes, and
+    // pedestrians show only in the original's window. On: every cell of its pattern within the radius,
+    // the window's cells as the original binds them: the whole city populated, nothing popping in.
     bool replicas = false;
     // The ground quad of every big tile in its ground colour (DS:8556), drawn first, over water that
     // extends beyond the map's edge to the horizon.

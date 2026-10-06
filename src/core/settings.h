@@ -45,6 +45,11 @@ struct Settings {
     // city's traffic and pedestrians are drawn. Off (or without a GPU that can): the original's
     // back-to-front order, with traffic and pedestrians only near the car, where the original has them.
     bool depth_buffer = true;
+    // Driving (they change how the race plays, so they're off unless chosen; Classic turns them off).
+    // Improved: the player's car drifts a little through fast corners and leaves the ground over crests
+    // at speed. Lane centering: a slight steering assist toward the lane's direction and centre.
+    bool improved_driving = false;
+    bool lane_centering = false;
     Effects effects = Effects::AdLib;
     Music music = Music::Original;
     Graphics graphics = Graphics::Dos;

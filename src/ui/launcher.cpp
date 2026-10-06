@@ -26,7 +26,7 @@ namespace vette::ui {
 namespace {
 
 enum Row {
-    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
+    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kDriving, kLaneCentering, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
     kPlay, kQuit, kRows
 };
 
@@ -49,6 +49,8 @@ const char* label(int row) {
     case kSkyline: return "Skyline";
     case kViewResolution: return "Resolution";
     case kDepthBuffer: return "Depth buffer";
+    case kDriving: return "Driving";
+    case kLaneCentering: return "Lane centering";
     case kGraphics: return "Graphics";
     case kEffects: return "Sound effects";
     case kMusic: return "Music";
@@ -102,6 +104,8 @@ std::string value(int row, const Settings& s, const GameDirSearch& search, const
     case kSkyline: return s.skyline == Settings::Skyline::Hills ? "Hills only" : "Painted (original)";
     case kViewResolution:
         return s.view_resolution == Settings::ViewResolution::Display ? "Display" : "Original 320x200";
+    case kDriving: return s.improved_driving ? "Improved (drifts, jumps)" : "Original";
+    case kLaneCentering: return s.lane_centering ? "On (slight)" : "Off";
     case kDepthBuffer:
         return !s.depth_buffer ? "Off (original order)" : x.depth_buffer ? "On" : "On - not available here";
     case kGraphics: {
@@ -165,6 +169,15 @@ std::string_view help(int row, const Settings& s) {
                      "fine lines."
                    : "The long-distance 3D view is drawn at the original's 320x200 and enlarged like the rest "
                      "of the game, with every enhancement kept.";
+    case kDriving:
+        return s.improved_driving
+                   ? "Your car drifts a little through fast corners, and flies over the crest of a hill when "
+                     "it's going fast enough."
+                   : "The original's driving.";
+    case kLaneCentering:
+        return s.lane_centering ? "A slight steering assist that keeps your car straight in its lane. Steer to "
+                                  "override it."
+                                : "No steering assist, as in the original.";
     case kDepthBuffer:
         return s.depth_buffer
                    ? "Nearer things always cover farther ones, and the whole city's traffic and pedestrians are "
@@ -250,10 +263,10 @@ struct Layout {
     explicit Layout(int height) {
         margin = 16;
         list_y = 56;
-        // Rows as far apart as the height allows (10 to 14 pixels), with room below them for the
+        // Rows as far apart as the height allows (9 to 14 pixels), with room below them for the
         // versions found, the help (3 lines) and the key hints.
         const int below = 3 * kStatusPitch + 2 + 8 + 3 * 12 + 20;
-        pitch = std::clamp((height - list_y - below) / (kPlay + 3), 10, 14);
+        pitch = std::clamp((height - list_y - below) / (kPlay + 3), 9, 14);
         actions_y = list_y + kPlay * pitch + pitch / 2;
         status_y = actions_y + 2 * pitch + pitch / 2;
         rule_y = status_y + 3 * kStatusPitch + 2;  // a line per version
@@ -346,6 +359,8 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
         case kDepthBuffer:
             s.depth_buffer = !s.depth_buffer;
             break;
+        case kDriving: s.improved_driving = !s.improved_driving; break;
+        case kLaneCentering: s.lane_centering = !s.lane_centering; break;
         case kSkyline:
             s.skyline = s.skyline == Settings::Skyline::Hills ? Settings::Skyline::Painted : Settings::Skyline::Hills;
             break;

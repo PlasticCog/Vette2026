@@ -38,6 +38,9 @@ public:
     // The original's PC-speaker program for a sound (empty until the game has unpacked itself).
     const SpeakerProgram* original(game::Sfx sfx);
 
+    // The game's sound events, for native layers that report moments of their own (SoundEvents::report).
+    game::SoundEvents& events() { return events_; }
+
 private:
     // Where a sound plays: on the speaker, on a backend, or nowhere.
     struct Route {

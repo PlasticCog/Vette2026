@@ -128,6 +128,13 @@ public:
     bool requested(Sfx) const;
     std::optional<Sfx> playing() const;  // the speaker program (tone) sound playing now
 
+    // A cue from a native layer, for a moment it creates (Improved Driving's hard landings: Thud).
+    // Reported like the game's own cues (only while the game's sound is on).
+    void report(Sfx sfx);
+    // While this returns true at a race frame, the thud test (is_thud) is skipped: the car's height and
+    // pitch are a native layer's (Improved Driving's flight and landing), which reports its own thuds.
+    std::function<bool()> thud_hold;
+
     // The original's speaker program for a sound, read from the running game's memory (never stored
     // in the repo): for the sound editor's "original" preview. Empty until the game is unpacked, and for
     // the silent moments, except the countdown: the two beeps the DOS game has but never plays.

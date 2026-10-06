@@ -43,6 +43,8 @@ TEST(settings_round_trip) {
     s.skyline = Settings::Skyline::Painted;
     s.view_resolution = Settings::ViewResolution::Original;
     s.depth_buffer = false;
+    s.improved_driving = true;
+    s.lane_centering = true;
     s.effects = Settings::Effects::Mac;
     s.music = Settings::Music::Pc98;
     s.graphics = Settings::Graphics::Pc98;

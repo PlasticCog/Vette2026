@@ -6,8 +6,10 @@
 #include "core/path_utf8.h"
 #include "core/settings.h"
 #include "enhanced/backdrop.h"
+#include "enhanced/lanes.h"
 #include "enhanced/scene.h"
 #include "enhanced/world.h"
+#include "game/driving.h"
 #include "game/options.h"
 #include "game/smooth.h"
 #include "game/x86.h"
@@ -59,7 +61,8 @@ constexpr const char* kUsage =
     "                 [--draw-distance original|extended|maximum] [--cpu-hz <n>] [--[no-]joystick]\n"
     "                 [--effects off|speaker|adlib|mac] [--music off|original|pc98] [--no-sound]\n"
     "                 [--graphics dos|pc98|mac] [--scaling sharp|smooth] [--resolution display|original]\n"
-    "                 [--skyline hills|painted] [--depth-buffer on|off] [--manual-check]\n"
+    "                 [--skyline hills|painted] [--depth-buffer on|off] [--driving original|improved]\n"
+    "                 [--lane-centering on|off] [--manual-check]\n"
     "                 [--dump-frame <file.bmp>]\n"
     "Settings come from the launch menu (saved in settings.ini); these flags override them for one run.\n"
     "  --launcher           show the launch menu even if it's switched off (--no-launcher: skip it)\n"
@@ -88,6 +91,9 @@ constexpr const char* kUsage =
     "  --depth-buffer on    (default) the Enhanced 3D view on the GPU with a depth buffer: nearer things\n"
     "                       always cover farther ones, with the whole city's traffic; off: the original's\n"
     "                       drawing order, with traffic and pedestrians only near the car\n"
+    "  --driving original   (default) the original's driving; improved: the car drifts a little through\n"
+    "                       fast corners and leaves the ground over crests at speed\n"
+    "  --lane-centering on  a slight steering assist toward the lane's direction and centre (default off)\n"
     "  --scaling sharp      (default) the pictures simply enlarged, every pixel a solid block; smooth:\n"
     "                       the edges between pixels softened\n"
     "  --graphics dos       (default) the DOS screens; pc98 or mac: that version's art in their place\n"
@@ -153,6 +159,8 @@ struct Options {
     std::optional<Settings::ViewResolution> view_resolution;
     std::optional<Settings::Skyline> skyline;
     std::optional<bool> depth_buffer;
+    std::optional<bool> improved_driving;
+    std::optional<bool> lane_centering;
     std::vector<ScriptedKey> keys;
     std::vector<ScriptedPoke> pokes;     // sorted by time
     std::vector<std::uint64_t> shots;    // emulated ns, sorted
@@ -186,6 +194,10 @@ struct Options {
             s.skyline = *skyline;
         if (depth_buffer)
             s.depth_buffer = *depth_buffer;
+        if (improved_driving)
+            s.improved_driving = *improved_driving;
+        if (lane_centering)
+            s.lane_centering = *lane_centering;
     }
 };
 
@@ -227,6 +239,12 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                                          std::string_view(argv[i + 1]) == "original")) {
             opts.view_resolution = std::string_view(argv[++i]) == "display" ? Settings::ViewResolution::Display
                                                                             : Settings::ViewResolution::Original;
+        } else if (arg == "--driving" && has_value && (std::string_view(argv[i + 1]) == "original" ||
+                                                      std::string_view(argv[i + 1]) == "improved")) {
+            opts.improved_driving = std::string_view(argv[++i]) == "improved";
+        } else if (arg == "--lane-centering" && has_value && (std::string_view(argv[i + 1]) == "on" ||
+                                                             std::string_view(argv[i + 1]) == "off")) {
+            opts.lane_centering = std::string_view(argv[++i]) == "on";
         } else if (arg == "--depth-buffer" && has_value && (std::string_view(argv[i + 1]) == "on" ||
                                                            std::string_view(argv[i + 1]) == "off")) {
             opts.depth_buffer = std::string_view(argv[++i]) == "on";
@@ -317,7 +335,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--wav" || arg == "--effects" || arg == "--music" ||
                                      arg == "--graphics" || arg == "--scaling" ||
                                      arg == "--resolution" || arg == "--skyline" ||
-                                     arg == "--depth-buffer";
+                                     arg == "--depth-buffer" || arg == "--driving" || arg == "--lane-centering";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
                          argv[i], kUsage);
             return std::nullopt;
@@ -501,6 +519,46 @@ float soft_limit(float x) {
     return a <= kKnee ? x : std::copysign(kKnee + (1 - kKnee) * std::tanh((a - kKnee) / (1 - kKnee)), x);
 }
 
+// Improved Driving and Lane Centering (game/driving.h): the player's car on top of the original's
+// physics. Lane Centering follows the lane markings of the extracted city: the Enhanced view's, or its
+// own extraction when that view is off.
+struct DrivingAids {
+    game::Driving driving;
+    std::uint64_t next_try_ns = kExtractFromNs;
+    bool failed = false;
+
+    DrivingAids(host::Machine& machine, game::Driving::Options options) : driving(machine, options) {}
+
+    void set_lanes(const enhanced::World& world) {
+        auto lanes = enhanced::lane_map(world);
+        SDL_Log("Lane centering: %u lane markings", static_cast<unsigned>(lanes->size()));
+        driving.set_lanes(std::move(lanes));
+    }
+
+    // Between emulation slices.
+    void prepare(host::Machine& machine, const EnhancedView* view) {
+        if (!driving.options().lane_centering || driving.has_lanes() || failed)
+            return;
+        if (view && !view->failed) {
+            if (view->builder)
+                set_lanes(view->world);
+            return;
+        }
+        if (machine.emulated_ns() < next_try_ns)
+            return;
+        enhanced::World world;
+        std::string error;
+        if (enhanced::extract_world(machine, world, error)) {
+            set_lanes(world);
+        } else if (machine.emulated_ns() >= kExtractUntilNs) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "No lane centering: %s", error.c_str());
+            failed = true;
+        } else {
+            next_try_ns = machine.emulated_ns() + kExtractRetryNs;
+        }
+    }
+};
+
 struct GameSound {
     sound::AdlibBackend adlib{kAudioRate};
     std::unique_ptr<sound::SfxBackend> mac, pc98;
@@ -629,7 +687,7 @@ std::unique_ptr<sound::SfxBackend> pc98_music(const GameVersions& versions, host
 // the testing options (keys, screenshots, quit time).
 void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Gamepad& gamepad,
                game::SmoothRenderer* smooth, EnhancedView* view, GameSound* game_sound, Artwork* art,
-               const Options& script) {
+               DrivingAids* driving, const Options& script) {
     std::size_t next_key = 0;
     std::size_t next_poke = 0;
     std::size_t next_shot = 0;
@@ -748,6 +806,8 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
 
         if (view)
             view->prepare(machine);
+        if (driving)
+            driving->prepare(machine, view);
         const bool layered = view && smooth && view->render(machine, *smooth, presenter);
         if (!layered) {
             if (!smooth || !smooth->render(machine.emulated_ns(), frame))
@@ -943,8 +1003,22 @@ int run(int argc, char** argv) {
         // Another version's art may lay the dash out differently: the mirror then stays the game's own.
         if (smooth && art)
             smooth->set_mirror_inset(false);
+
+        // Driving: the original's physics, or Improved Driving and Lane Centering layered on them.
+        std::unique_ptr<DrivingAids> driving;
+        if (settings.improved_driving || settings.lane_centering) {
+            driving = std::make_unique<DrivingAids>(machine, game::Driving::Options{settings.improved_driving,
+                                                                                    settings.lane_centering});
+            if (game_sound) {
+                game::SoundEvents& events = game_sound->audio->events();
+                driving->driving.on_hard_landing = [&events](float) { events.report(game::Sfx::Thud); };
+                events.thud_hold = [aids = driving.get()] { return aids->driving.flying(); };
+            }
+        }
+        SDL_Log("Driving: %s physics; lane centering %s", settings.improved_driving ? "improved" : "original",
+                settings.lane_centering ? "on" : "off");
         main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad, smooth ? &*smooth : nullptr, view.get(),
-                  game_sound.get(), art.get(), *opts);
+                  game_sound.get(), art.get(), driving.get(), *opts);
         if (art && art->frames)
             SDL_Log("Graphics: %.2f ms per frame to compose", art->compose_ms / static_cast<double>(art->frames));
         if (smooth && smooth->stats().replays)

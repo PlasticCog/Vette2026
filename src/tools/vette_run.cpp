@@ -6,6 +6,7 @@
 // --shot T       save the screen at emulated second T (as shot_<T>.bmp)
 // --key T:SC     press scan code SC (hex, set 1) at second T; released 100 ms later
 // --hold A:B:SC  press scan code SC at second A, release at second B
+// --poke T:O:V  write word V (hex) to DS:O (hex) at second T (e.g. place or turn the player's car)
 // --watch S:O    print the word at emulator address S:O (hex) at every shot
 // --cpu-hz N     emulated CPU clock (default 12000000)
 // --verify F     run native function F (or "all") in Verify mode: every call is checked against the
@@ -16,6 +17,11 @@
 // --idle-skip    skip emulated time spent polling for vertical retrace (the game's default)
 // --sound-log    print the game's sound events (game/sound_events.h) as they happen, and the engine
 //                note once a second while a race runs
+// --driving M    original (default) or improved: the player's car with Improved Driving (game/driving.h)
+// --driving-log  print the player's car at every race frame: position, height, pitch, facing, travel
+//                direction, slip (facing minus travel), speed, wheel, skid flag; with improved driving
+//                also its vertical speed and flight
+// --tune N=V     set Improved Driving's tuning constant N (game/driving.h, DrivingTuning) to V
 // --skip-manual-check  skip the copy-protection question (the game's default; off here so key
 //                scripts that type an answer keep working)
 // --trace        log every DOS file access and unhandled BIOS/port use
@@ -30,7 +36,9 @@
 #include <string>
 #include <vector>
 
+#include "game/driving.h"
 #include "game/natives.h"
+#include "game/x86.h"
 #include "game/options.h"
 #include "game/smooth.h"
 #include "game/sound_events.h"
@@ -92,9 +100,10 @@ bool save_bmp(const std::filesystem::path& path, const Ega::Frame& frame) {
 
 int usage() {
     std::fprintf(stderr, "usage: vette_run --game <dir> [--seconds N] [--shot T]... [--key T:SC]... "
-                         "[--hold A:B:SC]... [--watch S:O]... [--cpu-hz N] [--out dir] [--trace]\n"
+                         "[--hold A:B:SC]... [--poke T:O:V]... [--watch S:O]... [--cpu-hz N] [--out dir] [--trace]\n"
                          "       [--verify F|all]... [--native F|all]... [--skip-manual-check] [--smooth]\n"
-                         "       [--smooth-check] [--idle-skip] [--sound-log]\n");
+                         "       [--smooth-check] [--idle-skip] [--sound-log] [--driving original|improved]\n"
+                         "       [--driving-log] [--tune name=value]...\n");
     return 2;
 }
 
@@ -108,6 +117,11 @@ int main(int argc, char* argv[]) {
     std::vector<double> shots;
     std::vector<KeyEvent> keys;
     std::vector<std::pair<uint16_t, uint16_t>> watches;
+    struct Poke {
+        uint64_t at_ms;
+        uint16_t off, value;
+    };
+    std::vector<Poke> pokes;
     std::vector<std::pair<std::string, NativeRunner::Mode>> natives;
     std::filesystem::path out_dir = ".";
     bool trace = false;
@@ -116,6 +130,9 @@ int main(int argc, char* argv[]) {
     bool idle_skip = false;     // skip time spent polling for vertical retrace (the game's default)
     bool smooth_check = false;  // replay every game frame and compare it with the original's drawing
     bool sound_log = false;     // print the sound events
+    bool improved_driving = false;
+    bool driving_log = false;   // print the player's car every race frame
+    vette::game::DrivingTuning tuning;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -147,6 +164,15 @@ int main(int argc, char* argv[]) {
             const auto sc = static_cast<uint8_t>(std::strtoul(v.substr(c2 + 1).c_str(), nullptr, 16));
             keys.push_back({from, sc});
             keys.push_back({to, static_cast<uint8_t>(sc | 0x80)});
+        } else if (a == "--poke" && has_value) {
+            const std::string v = argv[++i];
+            const size_t c1 = v.find(':'), c2 = v.find(':', c1 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos) {
+                return usage();
+            }
+            pokes.push_back({static_cast<uint64_t>(std::atof(v.substr(0, c1).c_str()) * 1000),
+                             static_cast<uint16_t>(std::strtoul(v.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 16)),
+                             static_cast<uint16_t>(std::strtoul(v.substr(c2 + 1).c_str(), nullptr, 16))});
         } else if (a == "--watch" && has_value) {
             const std::string v = argv[++i];
             const size_t colon = v.find(':');
@@ -173,6 +199,22 @@ int main(int argc, char* argv[]) {
             smooth_check = true;
         } else if (a == "--sound-log") {
             sound_log = true;
+        } else if (a == "--driving" && has_value) {
+            const std::string v = argv[++i];
+            if (v != "original" && v != "improved") {
+                return usage();
+            }
+            improved_driving = v == "improved";
+        } else if (a == "--driving-log") {
+            driving_log = true;
+        } else if (a == "--tune" && has_value) {
+            const std::string v = argv[++i];
+            const size_t eq = v.find('=');
+            if (eq == std::string::npos ||
+                !vette::game::set_tuning(tuning, v.substr(0, eq), static_cast<float>(std::atof(v.c_str() + eq + 1)))) {
+                std::fprintf(stderr, "--tune: unknown constant in '%s'\n", v.c_str());
+                return usage();
+            }
         } else {
             return usage();
         }
@@ -180,6 +222,7 @@ int main(int argc, char* argv[]) {
     config.save_dir = out_dir / "save";
     std::sort(keys.begin(), keys.end(), [](const KeyEvent& a, const KeyEvent& b) { return a.at_ms < b.at_ms; });
     std::sort(shots.begin(), shots.end());
+    std::stable_sort(pokes.begin(), pokes.end(), [](const Poke& a, const Poke& b) { return a.at_ms < b.at_ms; });
     std::filesystem::create_directories(out_dir);
 
     Machine machine(config);
@@ -228,12 +271,48 @@ int main(int argc, char* argv[]) {
         sound = std::make_unique<vette::game::SoundEvents>(machine);
     }
 
+    std::unique_ptr<vette::game::Driving> driving;
+    if (improved_driving) {
+        driving = std::make_unique<vette::game::Driving>(machine, vette::game::Driving::Options{true, false}, tuning);
+        if (sound) {
+            driving->on_hard_landing = [&sound](float) { sound->report(vette::game::Sfx::Thud); };
+            sound->thud_hold = [&driving] { return driving->flying(); };
+        }
+    }
+    if (driving_log) {
+        // After the player step (3009:020A): this frame's car.
+        machine.cpu().add_watch(vette::host::Cpu::linear(vette::game::emu_seg(0x3009), 0x020D), [&](vette::host::Cpu&) {
+            vette::host::Memory& m = machine.memory();
+            const auto w = [&m](uint16_t off) {
+                return static_cast<int16_t>(vette::game::rd16(m, vette::game::kDataSeg, off));
+            };
+            const int heading = w(0x2D3B), travel = w(0x2C45);
+            const int slip = ((heading - travel) % 360 + 540) % 360 - 180;
+            std::printf("car t=%8.3fs fr %2d x %6ld y %6ld z %4d pitch %+3d facing %3d travel %3d slip %+3d speed %4d "
+                        "wheel %+2d skid %d",
+                        static_cast<double>(machine.emulated_ns()) / 1e9, w(0x2CD3),
+                        static_cast<long>(w(0x2D57)) * 0x8000 + static_cast<uint16_t>(w(0x2D35)),
+                        static_cast<long>(w(0x2D59)) * 0x8000 + static_cast<uint16_t>(w(0x2D37)), w(0x2D39), w(0x2D3D),
+                        heading, travel, slip, w(0x2D43), w(0x2B84), w(0x2C4B) != 0 ? 1 : 0);
+            if (driving) {
+                const auto& t = driving->telemetry();
+                std::printf(" ground %4.0f vz %+6.1f %s air %.2fs slip_f %+5.1f jumps %d landings %d hard %d",
+                            t.ground_z, t.vz, t.airborne ? "AIR" : "gnd", t.air_time, t.slip, t.jumps, t.landings,
+                            t.hard_landings);
+            }
+            std::printf("\n");
+        });
+    }
+
     const auto total_ms = static_cast<uint64_t>(seconds * 1000);
-    size_t next_key = 0, next_shot = 0;
+    size_t next_key = 0, next_shot = 0, next_poke = 0;
     Ega::Frame frame;
     for (uint64_t ms = 0; ms < total_ms && !machine.stopped(); ++ms) {
         while (next_key < keys.size() && keys[next_key].at_ms <= ms) {
             machine.key(keys[next_key++].scancode);
+        }
+        for (; next_poke < pokes.size() && pokes[next_poke].at_ms <= ms; ++next_poke) {
+            vette::game::wr16(machine.memory(), vette::game::kDataSeg, pokes[next_poke].off, pokes[next_poke].value);
         }
         machine.run_for(kNsPerMs);
         runner.poll();

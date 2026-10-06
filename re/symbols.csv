@@ -498,3 +498,16 @@ addr,name,kind,comment
 124A:C358,box_driveway,data,"4 w; the service station driveway box {x 400, y 1536, x 504, y 1791}, third box of collision class 1Ah (cell type 14)."
 3009:2454,repair_car,func,"Clears the damage (DS:3DC0-3DC7, 2C4F, 2C5B, 2C5D) and resets the steering limits (2AEA/2AEB); service stations and race setup."
 124A:3DC0,damage_parts,data,8 b; damage per part (shown by the damage display); cleared by repair_car.
+# --- Driving: the player's steering, skid and height (re/notes/11-driving.md) -------------------------
+3009:1E40,call_ground_shape_height,func,Near thunk: lcall 4160:0515 (ground_shape_height).
+3009:1E46,call_vehicle_set_pitch,func,Near thunk: lcall 4160:0004 (vehicle_set_pitch).
+3009:1E4C,call_player_steer_skid,func,"Near thunk: DS:2C67 = car model (cs:8DAE), lcall 4160:037F (player_steer_skid). vehicle_move 176A, player only."
+124A:2BF1,skid_grip,data,"w[model*9 + |steer|], |steer| 0..8: the speed from which the player's car skids at that steering lock (player_steer_skid)."
+4160:0373,skid_grip_bonus,data,"b[model + 4*level] (code segment): added to skid_grip; TRAINEE's 255 makes skids rare."
+124A:2C47,travel_pitch,data,"w; the move's pitch (= the car's pitch 2D3D, set by player_steer_skid)."
+124A:2C49,travel_roll,data,w; = the car's roll (set by player_steer_skid).
+124A:2C67,car_model_copy,data,w; the player's car model (cs:8DAE) for the grip tables (call_player_steer_skid).
+124A:2D39,player_z,data,"w; height: the ground's (cell elevation*224 + ground_shape_height), set by vehicle_move 1852 every frame."
+124A:2D3B,player_heading,data,"w; facing, degrees 0..359 (0 north, 90 east); += steer every frame at 01A5-01C3 while moving."
+124A:2D3D,player_pitch,data,"w; 0 or +-7 on ramps (vehicle_set_pitch); not shown in the cockpit view (cam_pitch is 2BEB's)."
+124A:2BEB,view_pitch,data,"w; camera pitch offset: 0 in the car, -17 helicopter view, -8/-17 bridge decks (3009:1954); copied to cam_pitch at 01E0."

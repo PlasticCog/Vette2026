@@ -367,6 +367,8 @@ void SoundEvents::cue(Sfx sfx) {
     }
 }
 
+void SoundEvents::report(Sfx sfx) { cue(sfx); }
+
 void SoundEvents::on_countdown() {
     // Called every frame of the countdown: light 1 ("buckle up"), light 2 ("get ready"), light 3 ("go").
     const int light = rd8(machine_.memory(), kData, kStartLight);
@@ -437,7 +439,8 @@ void SoundEvents::on_frame() {
     // The last player step's result (this frame's comes after the dispatcher).
     const CarMotion now{static_cast<int16_t>(rd16(m, kData, kZ)), static_cast<int16_t>(rd16(m, kData, kPitch)),
                         static_cast<int16_t>(rd16(m, kData, kSpeed)), rd8(m, kData, kHighway) != 0};
-    if (was_running && motion_ && is_thud(*motion_, now)) {
+    const bool held = thud_hold && thud_hold();
+    if (was_running && motion_ && !held && is_thud(*motion_, now)) {
         cue(Sfx::Thud);
     }
     motion_ = now;

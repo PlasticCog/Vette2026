@@ -283,7 +283,11 @@ function(vette_fetch_port_mapping)
             target_sources(vette_natpmp PRIVATE ${src}/wingettimeofday.c)
             target_link_libraries(vette_natpmp PUBLIC ws2_32 iphlpapi)
         endif()
-        target_include_directories(vette_natpmp SYSTEM PUBLIC ${src})
+        # Only the public headers, from a folder of their own: the source folder has a file named VERSION,
+        # which a case-insensitive file system (macOS) takes for C++20's <version>.
+        file(COPY ${src}/natpmp.h ${src}/natpmp_declspec.h DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/natpmp/include)
+        target_include_directories(vette_natpmp SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/natpmp/include)
+        target_include_directories(vette_natpmp PRIVATE ${src})
         target_compile_definitions(vette_natpmp PUBLIC NATPMP_STATICLIB PRIVATE ENABLE_STRNATPMPERR
                                    NATPMP_MAX_RETRIES=4)
         target_compile_options(vette_natpmp PRIVATE $<IF:$<C_COMPILER_ID:MSVC>,/W0,-w>)  # third-party

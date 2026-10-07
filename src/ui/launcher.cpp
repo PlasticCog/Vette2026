@@ -18,6 +18,7 @@
 #include "platform/url_scheme.h"
 #include "ui/canvas.h"
 #include "ui/online.h"
+#include "ui/shortcuts.h"
 #include "ui/text.h"
 #include "ui/theme.h"
 
@@ -229,7 +230,7 @@ std::string_view help(int row, const Settings& s) {
     case kLauncher:
         return "Skip: the game starts straight away next time. Run vette2026 --launcher to see this screen "
                "again.";
-    case kPlay: return "Start VETTE! with these settings. They are saved for next time.";
+    case kPlay: return "Start VETTE! with these settings. They are saved for next time. In the game, Ctrl+H shows the keys.";
     case kOnline:
         return "Race a friend over the internet: host a race and tell them its code, or join theirs with the "
                "code they give you.";
@@ -432,6 +433,8 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
 
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            if (quit_shortcut(e))
+                continue;  // (the quit it posts comes next)
             pad_keys.clear();
             gamepad.handle_event(e, pad_keys);  // hot-plug; D-pad/Start/Back arrive as scan codes
             bool done = false;

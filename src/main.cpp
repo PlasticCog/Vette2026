@@ -32,8 +32,10 @@
 #include "sound/pc98_sound.h"
 #include "sound/sfx_backend.h"
 #include "sound/sfx_bank.h"
+#include "ui/key_sheet.h"
 #include "ui/launcher.h"
 #include "ui/online.h"
+#include "ui/shortcuts.h"
 #include "platform/url_scheme.h"
 #ifdef VETTE_ONLINE
 #include "net/online.h"
@@ -44,6 +46,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -109,9 +112,11 @@ constexpr const char* kUsage =
     "  --manual-check       show the original's manual-lookup question before the first race\n"
     "                       (skipped by default; this version accepts any answer anyway)\n"
     "  --dump-frame <file>  write the title screen to a 640x200 BMP and exit, without a window\n"
-    "Testing (times are emulated seconds):\n"
+    "Testing (times are emulated seconds, and go on while the key sheet pauses the game):\n"
     "  --key T:SC, --hold A:B:SC   press scan code SC (hex, set 1) at second T for 100 ms, or hold it\n"
     "                       from second A to B, as vette_run does\n"
+    "  --press T:KEYS       press a key at second T as the player would, through the window (this\n"
+    "                       program's keys too): e.g. ctrl+h, alt+q, escape\n"
     "  --shot T             save the window's picture at second T to shot_T.bmp (repeatable)\n"
     "  --poke T:OFF:VAL     write VAL to the game's data segment at offset OFF (hex) at second T: a byte\n"
     "                       for two hex digits, else a word (e.g. a freeway on the next frame:\n"
@@ -121,9 +126,10 @@ constexpr const char* kUsage =
     "  --mute               make the sound (for --wav) but don't play it\n"
     "Two players over TCP, for development (the original's own two-player race; see\n"
     "re/notes/12-two-player.md):\n"
-    "  --online-host        host an online race without the menu: the room's code is logged, and the race\n"
-    "                       starts when the friend joins (the course and server from the settings)\n"
-    "  --online-join CODE   join the friend's online race without the menu\n"
+    "  --online-host        host an online race without the menu: the codes are logged, and the race\n"
+    "                       starts when the friend joins (the course from the settings)\n"
+    "  --online-lan-host    the same, a LAN race: on this network only\n"
+    "  --online-join CODE   join the friend's online race without the menu (CODE \"lan\": the first LAN race)\n"
     "  --online-server URL  the relay server for this run (wss://...)\n"
     "  --link-listen PORT   be the host: wait for the other game on PORT\n"
     "  --link-connect HOST:PORT  be the guest: connect to the host\n"
@@ -132,7 +138,8 @@ constexpr const char* kUsage =
     "  --link-delay MS, --link-jitter MS   delay what arrives by MS plus a random 0..jitter, in order\n"
     "  --link-manual        don't drive the menus: Esc > Communications > Two players yourself\n"
     "\n"
-    "F11 or Alt+Enter toggles fullscreen. Every other key, Esc included, goes to the game.\n"
+    "Ctrl+H shows the keys during the game; Alt+Q quits to the desktop from any screen; F11 or\n"
+    "Alt+Enter toggles fullscreen. Every other key, Esc included, goes to the game.\n"
     "A gamepad connected at launch becomes the PC's analog joystick. DOS games look for one only\n"
     "at startup, so whether the joystick exists is decided then (see README.md for the mapping).\n";
 
@@ -153,6 +160,26 @@ struct ScriptedKey {
     std::uint64_t at_ns;
     std::uint8_t scancode;
 };
+
+// A scripted key press through the window (--press): the key's events, as SDL gives the player's.
+struct ScriptedPress {
+    std::uint64_t at_ns;
+    SDL_Scancode scancode;
+    SDL_Keymod mod;
+};
+
+void push_press(const ScriptedPress& p, SDL_Window* window) {
+    for (const bool down : {true, false}) {
+        SDL_Event e{};
+        e.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+        e.key.windowID = SDL_GetWindowID(window);
+        e.key.scancode = p.scancode;
+        e.key.key = SDL_GetKeyFromScancode(p.scancode, SDL_KMOD_NONE, false);
+        e.key.mod = p.mod;
+        e.key.down = down;
+        SDL_PushEvent(&e);
+    }
+}
 
 // A scripted write to the game's data (--poke).
 struct ScriptedPoke {
@@ -182,6 +209,7 @@ struct Options {
     std::optional<bool> improved_driving;
     std::optional<bool> lane_centering;
     std::vector<ScriptedKey> keys;
+    std::vector<ScriptedPress> presses;  // sorted by time
     std::vector<ScriptedPoke> pokes;     // sorted by time
     std::vector<std::uint64_t> shots;    // emulated ns, sorted
     std::optional<std::uint64_t> quit_after;  // emulated ns
@@ -252,6 +280,9 @@ std::optional<Options> parse_args(int argc, char** argv) {
             opts.online_server = argv[++i];
         } else if (arg == "--online-host") {
             opts.online_host = true;
+        } else if (arg == "--online-lan-host") {
+            opts.online_host = true;
+            opts.online_join = "lan";  // (connect_online: a LAN race)
         } else if (arg == "--online-join" && has_value) {
             opts.online_join = argv[++i];
         } else if (arg == "--link-listen" && has_value) {
@@ -359,6 +390,26 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const auto sc = static_cast<std::uint8_t>(std::strtoul(v.substr(c2 + 1).c_str(), nullptr, 16) & 0x7F);
             opts.keys.push_back({from, sc});
             opts.keys.push_back({to, static_cast<std::uint8_t>(sc | 0x80)});
+        } else if (arg == "--press" && has_value) {
+            // T:KEYS: ctrl+, alt+ and shift+ before a key's SDL name (case doesn't matter).
+            const std::string v = argv[++i];
+            const std::size_t c = v.find(':');
+            ScriptedPress p{static_cast<std::uint64_t>(std::atof(v.substr(0, c).c_str()) * static_cast<double>(kNsPerSecond)),
+                            SDL_SCANCODE_UNKNOWN, SDL_KMOD_NONE};
+            std::string name = c == std::string::npos ? std::string() : v.substr(c + 1);
+            for (std::size_t plus; (plus = name.find('+')) != std::string::npos && plus + 1 < name.size();) {
+                std::string m = name.substr(0, plus);
+                std::transform(m.begin(), m.end(), m.begin(), [](unsigned char ch) { return std::tolower(ch); });
+                p.mod = static_cast<SDL_Keymod>(p.mod | (m == "ctrl" ? SDL_KMOD_LCTRL : m == "alt" ? SDL_KMOD_LALT
+                                                         : m == "shift" ? SDL_KMOD_LSHIFT : SDL_KMOD_NONE));
+                name = name.substr(plus + 1);
+            }
+            p.scancode = SDL_GetScancodeFromName(name.c_str());
+            if (p.scancode == SDL_SCANCODE_UNKNOWN) {
+                std::fprintf(stderr, "--press needs T:KEYS, e.g. 40:ctrl+h (not \"%s\")\n", v.c_str());
+                return std::nullopt;
+            }
+            opts.presses.push_back(p);
         } else if (arg == "--poke" && has_value) {
             const std::string v = argv[++i];
             const std::size_t c1 = v.find(':');
@@ -382,6 +433,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
             const bool needs_value = arg == "--game" || arg == "--dump-frame" || arg == "--cpu-hz" ||
                                      arg == "--fps" || arg == "--pc" || arg == "--draw-distance" ||
                                      arg == "--key" || arg == "--hold" || arg == "--shot" || arg == "--quit-after" ||
+                                     arg == "--press" ||
                                      arg == "--poke" ||
                                      arg == "--wav" || arg == "--effects" || arg == "--music" ||
                                      arg == "--graphics" || arg == "--scaling" ||
@@ -397,6 +449,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
     }
     std::stable_sort(opts.keys.begin(), opts.keys.end(),
                      [](const ScriptedKey& a, const ScriptedKey& b) { return a.at_ns < b.at_ns; });
+    std::stable_sort(opts.presses.begin(), opts.presses.end(),
+                     [](const ScriptedPress& a, const ScriptedPress& b) { return a.at_ns < b.at_ns; });
     std::stable_sort(opts.pokes.begin(), opts.pokes.end(),
                      [](const ScriptedPoke& a, const ScriptedPoke& b) { return a.at_ns < b.at_ns; });
     std::sort(opts.shots.begin(), opts.shots.end());
@@ -948,7 +1002,9 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
                game::SmoothRenderer* smooth, EnhancedView* view, GameSound* game_sound, Artwork* art,
                DrivingAids* driving, const Options& script, TwoPlayerLink* link) {
     std::size_t next_key = 0;
+    std::size_t next_press = 0;
     std::size_t next_poke = 0;
+    std::uint64_t paused_ns = 0;  // the key sheet's pauses: the testing options' clock goes on through them
     std::size_t next_shot = 0;
     std::optional<WavWriter> wav;
     if (script.wav)
@@ -971,11 +1027,36 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
     float mouse_dx = 0;
     float mouse_dy = 0;
     std::uint64_t last = SDL_GetTicksNS();
+    // The key sheet (Ctrl+H). The keys pressed while it's open stay out of the game, releases and all;
+    // the releases of keys held from before go in, so none sticks. It pauses the game, except an online
+    // race (the other game goes on).
+    bool keys_open = false;
+    std::array<bool, SDL_SCANCODE_COUNT> kept_out{};
+    ui::Canvas sheet;
+    const auto close_keys = [&] {
+        keys_open = false;
+        presenter.hide_overlay();
+    };
 
     for (;;) {
+        for (const std::uint64_t t = machine.emulated_ns() + paused_ns;
+             next_press < script.presses.size() && script.presses[next_press].at_ns <= t; ++next_press)
+            push_press(script.presses[next_press], presenter.window());
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             scancodes.clear();  // keyboard bytes this event produces, sent after the switch
+            if (ui::quit_shortcut(event))
+                continue;  // (the quit it posts comes next)
+            if (ui::keys_shortcut(event)) {
+                if (!event.key.repeat) {
+                    if (keys_open)
+                        close_keys();
+                    else
+                        keys_open = true;
+                }
+                kept_out[event.key.scancode] = true;
+                continue;
+            }
             switch (event.type) {
             case SDL_EVENT_QUIT:
                 return;
@@ -989,6 +1070,19 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
                         presenter.toggle_fullscreen();
                     break;
                 }
+                const SDL_Scancode sc = event.key.scancode;
+                if (!down && kept_out[sc]) {
+                    kept_out[sc] = false;
+                    break;
+                }
+                if (down && keys_open) {
+                    if (!event.key.repeat) {
+                        kept_out[sc] = true;
+                        if (key == SDLK_ESCAPE || key == SDLK_RETURN || key == SDLK_KP_ENTER)
+                            close_keys();
+                    }
+                    break;
+                }
                 // Auto-repeat is forwarded too: a real keyboard repeats make codes while a key is held.
                 xt_scancode(event.key.scancode, down, scancodes);
                 break;
@@ -999,6 +1093,8 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
                 break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
             case SDL_EVENT_MOUSE_BUTTON_UP: {
+                if (keys_open && event.button.down)
+                    break;
                 const std::uint8_t bit = event.button.button == SDL_BUTTON_LEFT    ? 1
                                          : event.button.button == SDL_BUTTON_RIGHT ? 2
                                                                                    : 0;
@@ -1009,6 +1105,11 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
             }
             default:  // gamepad hot-plug, and D-pad/Start/Back as keys
                 gamepad.handle_event(event, scancodes);
+                if (keys_open && event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+                    scancodes.clear();  // (its release goes in: a key the game never saw pressed)
+                    if (event.gbutton.button == SDL_GAMEPAD_BUTTON_START || event.gbutton.button == SDL_GAMEPAD_BUTTON_BACK)
+                        close_keys();
+                }
                 break;
             }
             for (const std::uint8_t b : scancodes)
@@ -1027,7 +1128,7 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
         machine.joystick_axes(stick.x, stick.y);
         machine.joystick_buttons(stick.buttons);
 
-        const std::uint64_t t = machine.emulated_ns();
+        const std::uint64_t t = machine.emulated_ns() + paused_ns;
         for (; next_key < script.keys.size() && script.keys[next_key].at_ns <= t; ++next_key)
             machine.key(script.keys[next_key].scancode);
         for (; next_poke < script.pokes.size() && script.pokes[next_poke].at_ns <= t; ++next_poke) {
@@ -1047,7 +1148,11 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
         }
         const std::uint64_t now = SDL_GetTicksNS();
         const std::uint64_t t0 = machine.emulated_ns();
-        machine.run_for(std::min(now - last, kMaxStepNs));
+        const bool paused = keys_open && !link;
+        if (paused)
+            paused_ns += std::min(now - last, kMaxStepNs);
+        else
+            machine.run_for(std::min(now - last, kMaxStepNs));
         last = now;
         if (!machine.fault().empty())
             throw std::runtime_error("VETTE.EXE stopped: " + machine.fault());
@@ -1098,6 +1203,13 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
         if (!presenter.visible()) {
             SDL_Delay(10);  // VSync doesn't pace a hidden window
             continue;
+        }
+        if (keys_open) {
+            int out_w = 0;
+            int out_h = 0;
+            presenter.output_size(out_w, out_h);
+            ui::draw_key_sheet(sheet, out_w, out_h, paused);
+            presenter.show_overlay(sheet);
         }
         const bool replaced = art && art->compose(top);
         if (layered && replaced)

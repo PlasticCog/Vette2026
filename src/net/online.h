@@ -32,6 +32,7 @@
 
 #include "host/serial_link.h"
 #include "net/invite.h"
+#include "net/lan.h"
 #include "net/protocol.h"
 #include "net/session.h"
 
@@ -87,6 +88,10 @@ struct OnlineOptions {
     // Host: make the direct code from this IPv4 address instead of the internet address, with no router
     // involved: for a local network, or tests ("127.0.0.1").
     std::string code_address;
+    // Host: only on the local network (a LAN race): the same-network code and the answers to the games
+    // looking for races there (net/lan.h), no room, router or internet address.
+    bool lan_only = false;
+    std::uint16_t lan_port = kLanPort;  // where the LAN questions come (0: answer none)
     // Testing.
     bool loopback_only = false;  // the host listens on loopback only
     std::vector<std::string> offer_endpoints;  // host: offer these addresses instead (e.g. unreachable ones)

@@ -480,6 +480,32 @@ Socket Socket::udp(bool v6, std::string& error) {
     return s;
 }
 
+Socket Socket::udp_lan(std::uint32_t local, std::uint16_t port, std::string& error) {
+    init();
+    const Fd fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd == kBad) {
+        error = error_text(last_error());
+        return {};
+    }
+    Socket s(static_cast<std::uintptr_t>(fd));
+    set_nonblocking(fd);
+    const int on = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&on), sizeof on);
+    if (port != 0) {
+        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&on), sizeof on);
+#if defined(SO_REUSEPORT)
+        ::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, reinterpret_cast<const char*>(&on), sizeof on);
+#endif
+    }
+    sockaddr_storage ss;
+    const SockLen len = to_sockaddr(SocketAddress::ipv4(local, port), ss);
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&ss), len) != 0) {
+        error = error_text(last_error());
+        return {};
+    }
+    return s;
+}
+
 bool Socket::send_to(const SocketAddress& to, std::span<const std::uint8_t> data) {
     sockaddr_storage ss;
     const SockLen len = to_sockaddr(to, ss);

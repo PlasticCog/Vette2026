@@ -17,12 +17,14 @@
 #include "net/default_server.h"
 #include "net/instance.h"
 #include "net/invite.h"
+#include "net/lan.h"
 #include "net/online.h"
 #include "net/protocol.h"
 #include "platform/gamepad.h"
 #include "platform/presenter.h"
 #include "platform/url_scheme.h"
 #include "ui/canvas.h"
+#include "ui/shortcuts.h"
 #include "ui/text.h"
 #include "ui/theme.h"
 
@@ -31,8 +33,8 @@ namespace {
 
 using namespace theme;
 
-enum Row { kHost, kJoin, kCourse, kRouter, kAddress, kBack, kRows };
-enum class Page { Menu, Hosting, Joining, Address };
+enum Row { kHost, kJoin, kLanHost, kLanJoin, kCourse, kRouter, kAddress, kBack, kRows };
+enum class Page { Menu, Hosting, Joining, Address, Lan };
 
 constexpr std::uint64_t kStartDelayNs = 800'000'000;  // "Starting the race..." shows this long
 
@@ -49,6 +51,8 @@ const char* row_label(int row) {
     switch (row) {
     case kHost: return "Host a race";
     case kJoin: return "Join a race";
+    case kLanHost: return "Host a LAN race";
+    case kLanJoin: return "Join a LAN race";
     case kCourse: return "Course";
     case kRouter: return "Router";
     case kAddress: return "Internet address";
@@ -65,6 +69,10 @@ std::string_view row_help(int row) {
         return "Start a race and send your friend its code (it's copied for you). The race begins as soon as they "
                "join, on your course and with your Driving setting for both of you.";
     case kJoin: return "Paste the code your friend sent you.";
+    case kLanHost:
+        return "Race someone on the same network (the same Wi-Fi or router): no code to send, no router to set "
+               "up. They choose Join a LAN race.";
+    case kLanJoin: return "The races hosted on this network: pick one to join it.";
     case kCourse: return "The course you race on when you host.";
     case kRouter:
         return "To host over the internet, your router must let your friend in. Most open the game's port "
@@ -202,13 +210,40 @@ bool connect_online(const Settings& s, const GameDir& game, bool host, std::stri
     register_links();
     net::OnlineOptions o = online_options(s, game);
     std::unique_ptr<net::OnlineLink> link;
+    const bool lan_race = code == "lan";
+    const std::uint64_t deadline = SDL_GetTicksNS() + static_cast<std::uint64_t>(timeout_s * 1e9);
     if (host) {
         o.race_settings = race_settings(s);
+        o.lan_only = lan_race;
         link = net::OnlineLink::host(std::move(o));
+    } else if (lan_race) {
+        // The first race on this network that this game can join.
+        net::LanSearch search;
+        if (!search.start(error)) {
+            error = "Can't look for races on this network: " + error;
+            return false;
+        }
+        const std::string build = game_build(game);
+        std::string found;
+        while (found.empty()) {
+            search.poll();
+            for (const net::LanRace& r : search.races()) {
+                if (r.app_version == VETTE_VERSION && r.game_build == build) {
+                    found = r.code();
+                    SDL_Log("Online race: %s's race on this network (%s)", r.name.c_str(), r.host.to_string().c_str());
+                    break;
+                }
+            }
+            if (found.empty() && SDL_GetTicksNS() > deadline) {
+                error = "No race found on this network.";
+                return false;
+            }
+            SDL_Delay(50);
+        }
+        link = net::OnlineLink::join(std::move(o), found);
     } else {
         link = net::OnlineLink::join(std::move(o), code);
     }
-    const std::uint64_t deadline = SDL_GetTicksNS() + static_cast<std::uint64_t>(timeout_s * 1e9);
     std::string shown, invite, lan;
     for (;;) {
         const net::OnlineStatus st = link->status();
@@ -263,6 +298,12 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
     std::uint64_t connected_at = 0;  // when the friend was there (the race starts a moment later)
     bool invite_copied = false;
     std::string field;  // Joining: what's pasted or typed; Server: the address
+    bool lan_hosting = false;                // Hosting: a LAN race
+    bool joined_from_lan = false;            // Joining: picked from the LAN list (Esc goes back there)
+    std::unique_ptr<net::LanSearch> search;  // Lan: the races on this network
+    int lan_selected = 0;
+    const std::string my_build = game_build(game);
+    const std::string my_name = net::computer_name();
     Canvas canvas;
     std::vector<std::uint8_t> pad_keys;
     s.online_course = std::clamp(s.online_course, 1, 4);
@@ -278,11 +319,13 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
         connected_at = 0;
         invite_copied = false;
     };
-    const auto host = [&] {
+    const auto host = [&](bool lan) {
         net::OnlineOptions o = online_options(s, game);
         o.race_settings = race_settings(s);
+        o.lan_only = lan;
         link = net::OnlineLink::host(std::move(o));
         page = Page::Hosting;
+        lan_hosting = lan;
         status.clear();
     };
     const auto join = [&] {
@@ -299,7 +342,19 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
         leave();
         field = preset.empty() ? clipboard_invite() : std::string(preset);
         status = !preset.empty() || field.empty() ? "" : "From your clipboard. Press Enter to join.";
+        joined_from_lan = false;
         text_input(true);
+    };
+    const auto open_lan = [&] {
+        leave();
+        text_input(false);
+        page = Page::Lan;
+        lan_selected = 0;
+        status.clear();
+        search = std::make_unique<net::LanSearch>();
+        std::string error;
+        if (!search->start(error))
+            status = "Can't look for races on this network: " + error;
     };
     const auto activate = [&](int row, int dir) {
         status.clear();
@@ -310,9 +365,11 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
                 selected = kAddress;
                 break;
             }
-            host();
+            host(false);
             break;
         case kJoin: open_join({}); break;
+        case kLanHost: host(true); break;
+        case kLanJoin: open_lan(); break;
         case kCourse: s.online_course = (s.online_course - 1 + dir + 4) % 4 + 1; break;
         case kRouter: s.online_port_forwarded = !s.online_port_forwarded; break;
         case kAddress:
@@ -339,9 +396,13 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
                 return false;
             }
             text_input(false);
-            page = Page::Menu;
+            if (joined_from_lan)
+                open_lan();
+            else
+                page = Page::Menu;
             return false;
         case Page::Address: text_input(false); page = Page::Menu; return false;
+        case Page::Lan: search.reset(); page = Page::Menu; return false;
         }
         return false;
     };
@@ -393,6 +454,29 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
                 }
             }
             break;
+        case Page::Lan: {
+            const std::vector<net::LanRace> races = search ? search->races() : std::vector<net::LanRace>{};
+            const int n = static_cast<int>(races.size());
+            if (n == 0)
+                break;
+            lan_selected = (std::clamp(lan_selected, 0, n - 1) + up_down + n) % n;
+            if (enter) {
+                const net::LanRace& r = races[static_cast<std::size_t>(lan_selected)];
+                if (r.app_version != VETTE_VERSION) {
+                    status = r.name + " has VETTE! 2026 " + r.app_version + " and you have " VETTE_VERSION
+                             ". You both need the same version.";
+                } else if (r.game_build != my_build) {
+                    status = r.name + " has another version of the original game: you both need DOS VETTE! 1.1.";
+                } else {
+                    search.reset();
+                    open_join(r.code());
+                    joined_from_lan = true;
+                    text_input(false);
+                    join();
+                }
+            }
+            break;
+        }
         case Page::Hosting:
             if (left_right && link && link->status().state != net::LinkState::Connected) {
                 s.online_course = (s.online_course - 1 + left_right + 4) % 4 + 1;
@@ -417,6 +501,8 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
         while (SDL_PollEvent(&e)) {
             pad_keys.clear();
             gamepad.handle_event(e, pad_keys);
+            if (quit_shortcut(e))
+                continue;  // (the quit it posts comes next)
             bool done = false;
             switch (e.type) {
             case SDL_EVENT_QUIT:
@@ -500,6 +586,9 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
             }
         }
 
+        if (search)
+            search->poll();
+
         // An invite link opened while this screen is up: join it (unless a friend is already connected).
         if (const auto forwarded = take_forwarded_invite()) {
             SDL_RaiseWindow(presenter.window());
@@ -516,7 +605,7 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
                 if (!link->invite_url().empty()) {
                     copy_to_clipboard(link->invite_url());
                     invite_copied = true;
-                } else if (st.direct.state == net::RouteStatus::State::Failed &&
+                } else if ((st.direct.state == net::RouteStatus::State::Failed || lan_hosting) &&
                            st.lan.state == net::RouteStatus::State::Ready) {
                     copy_to_clipboard(st.lan.code);
                     invite_copied = true;
@@ -556,7 +645,7 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
         canvas.text(m, 12, "VETTE!", kGold, 3, true);
         const int sub_x = m + text_width("VETTE!", 3) + 32;
         canvas.text(sub_x, 14, "Online race", kSubtitle);
-        canvas.text(sub_x, 26, "Race a friend over the internet", kSubtitle);
+        canvas.text(sub_x, 26, "Race a friend online or on your network", kSubtitle);
         const auto lines = [&](int y, std::string_view text, std::uint32_t color, size_t max_lines) {
             const std::vector<std::string> wrapped = wrap(text, line_chars);
             for (size_t i = 0; i < wrapped.size() && i < max_lines; ++i)
@@ -567,13 +656,14 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
         if (page == Page::Menu) {
             const int pitch = 14;
             for (int row = 0; row < kRows; ++row) {
-                const int y = 64 + row * pitch + (row >= kCourse ? pitch / 2 : 0) + (row == kBack ? pitch / 2 : 0);
+                const int y = 64 + row * pitch + (row >= kLanHost ? pitch / 2 : 0) + (row >= kCourse ? pitch / 2 : 0) +
+                              (row == kBack ? pitch / 2 : 0);
                 const bool sel = row == selected;
                 if (sel)
                     canvas.fill_rect(6, y - 3, canvas.width - 12, pitch, kSelection);
                 if (row == kCourse || row == kRouter || row == kAddress) {
                     canvas.text(m, y, row_label(row), sel ? kGold : kLabel);
-                    const int vx = m + 12 * kGlyph;
+                    const int vx = m + 18 * kGlyph;
                     const size_t room_chars = static_cast<size_t>(std::max(0, (canvas.width - vx - m) / kGlyph));
                     std::string v;
                     std::uint32_t color = kValue;
@@ -594,7 +684,7 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
                 }
             }
             if (!status.empty())
-                lines(64 + kRows * 14 + 20, status, kBad, 2);
+                lines(64 + kRows * 14 + 27, status, kBad, 2);
             help = std::string(row_help(selected));
             hints = "Up/Down choose   Left/Right change   Enter select   Esc back";
         } else if (page == Page::Hosting) {
@@ -604,7 +694,20 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
             const bool lan = st.lan.state == net::RouteStatus::State::Ready;
             const bool direct_failed = st.direct.state == net::RouteStatus::State::Failed;
             int y = 60;
-            if (room) {
+            if (lan_hosting) {
+                if (lan) {
+                    y = lines(y,
+                              "Hosting on this network as " + my_name +
+                                  ". Your friend chooses Online race > Join a LAN race and picks you, or types this "
+                                  "code (it's on your clipboard):",
+                              kHelp, 3);
+                    canvas.text(m, y + 4, st.lan.code, kGold, 3, true);
+                    y += 34;
+                } else if (!trouble(st.state)) {
+                    canvas.text(m, y, "Getting your race ready...", kHelp);
+                    y += 14;
+                }
+            } else if (room) {
                 y = lines(y, "Send your friend this invite link. It's on your clipboard: paste it in a chat.", kHelp, 2);
                 canvas.text(m, y + 2, fit_left(link->invite_url(), line_chars), kGood);
                 canvas.text(m, y + 16, "Or tell them the code:", kLabel);
@@ -647,6 +750,45 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
                         kValue);
             hints = std::string(room || direct ? "C copy code   " : "") + (lan ? "L copy same-network code   " : "") +
                     "Esc cancel";
+        } else if (page == Page::Lan) {
+            const std::vector<net::LanRace> races = search ? search->races() : std::vector<net::LanRace>{};
+            canvas.text(m, 64, "Races on this network:", kLabel);
+            int y = 82;
+            if (races.empty()) {
+                canvas.text(m, y, "Looking...", kGood);
+                y = lines(y + 16,
+                          "None yet. Your friend chooses Online race > Host a LAN race (or Host a race) on the same "
+                          "Wi-Fi or router.",
+                          kHelp, 3);
+            }
+            lan_selected = std::clamp(lan_selected, 0, std::max(0, static_cast<int>(races.size()) - 1));
+            const int what_x = m + 26 * kGlyph;
+            const size_t what_chars = static_cast<size_t>(std::max(0, (canvas.width - what_x - m) / kGlyph));
+            for (size_t i = 0; i < races.size() && i < 8; ++i) {
+                const net::LanRace& r = races[i];
+                const bool sel = static_cast<int>(i) == lan_selected;
+                if (sel)
+                    canvas.fill_rect(6, y - 3, canvas.width - 12, 14, kSelection);
+                const bool same = r.app_version == VETTE_VERSION && r.game_build == my_build;
+                std::string what;
+                if (r.app_version != VETTE_VERSION) {
+                    what = "VETTE! 2026 " + r.app_version + ": can't join";
+                } else if (!same) {
+                    what = "another original game: can't join";
+                } else if (const auto text = r.settings.get("setup")) {
+                    if (const auto setup = game::TwoPlayerSetup::decode(*text))
+                        what = std::string(course_name(setup->course)) + ", " +
+                               (setup->improved_driving ? "Improved" : "Original") + " driving";
+                }
+                canvas.text(m, y, std::string(sel ? "> " : "  ") + fit_left(r.name, 22), sel ? kGold : kValue);
+                canvas.text(what_x, y, fit_left(what, what_chars), same ? kLabel : kBad);
+                y += 14;
+            }
+            if (!status.empty())
+                lines(y + 8, status, kBad, 2);
+            help = "Races hosted on the same network as this computer (the same Wi-Fi or router). Not listed? Both "
+                   "computers must be on that network, and the host's firewall must let VETTE! 2026 in.";
+            hints = races.empty() ? "Esc back" : "Up/Down choose   Enter join   Esc back";
         } else if (page == Page::Joining) {
             canvas.text(m, 64, "Paste the code your friend sent:", kLabel);
             canvas.fill_rect(m - 2, 78, canvas.width - 2 * m + 4, 14, kSelection);

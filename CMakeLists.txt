@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(vette2026 VERSION 0.1.7 LANGUAGES C CXX)
+project(vette2026 VERSION 0.1.8 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -371,6 +371,7 @@ if(VETTE_BUILD_GAME)
         src/platform/presenter.cpp
         src/ui/app_icon.cpp
         src/ui/canvas.cpp
+        src/ui/key_sheet.cpp
         src/ui/launcher.cpp
         src/ui/online.cpp
         src/platform/url_scheme.cpp
@@ -458,7 +459,7 @@ if(VETTE_BUILD_TESTS)
     file(GLOB VETTE_TEST_SOURCES CONFIGURE_DEPENDS tests/*.cpp)
     list(FILTER VETTE_TEST_SOURCES EXCLUDE REGEX "/online_[^/]*\\.cpp$")  # vette_online_tests below
     list(FILTER VETTE_TEST_SOURCES EXCLUDE REGEX "/enhanced_[^/]*\\.cpp$")  # vette_enhanced_tests below
-    add_executable(vette_tests ${VETTE_TEST_SOURCES} src/ui/app_icon.cpp)
+    add_executable(vette_tests ${VETTE_TEST_SOURCES} src/ui/app_icon.cpp src/ui/canvas.cpp src/ui/key_sheet.cpp)
     target_link_libraries(vette_tests PRIVATE vette_sound vette_core vette_game vette_net_core)
     if(TARGET vette_graphics)
         target_link_libraries(vette_tests PRIVATE vette_graphics)

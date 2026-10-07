@@ -78,6 +78,10 @@ public:
     void show_system_cursor(bool show);
     // Saves the next presented picture, as the window shows it, to a BMP file (UTF-8 path).
     void request_screenshot(std::string path_utf8) { screenshot_ = std::move(path_utf8); }
+    // Drawn over every picture presented until hide_overlay() (the key sheet): the picture darkened,
+    // then `canvas` (copied) at its scale, centered, without its pixels of its background colour.
+    void show_overlay(const ui::Canvas& canvas);
+    void hide_overlay() { overlay_on_ = false; }
 
 private:
     // A Framebuffer on its way to the screen: converted to ARGB at its own size, then upscaled by whole
@@ -115,6 +119,9 @@ private:
     Layer low_under_, low_scene_;  // set_original_resolution(): `under`, and the view drawn at the frame's size
     std::unordered_map<const graphics::Image*, SdlPtr<SDL_Texture>> art_;  // its art, by image
     SdlPtr<SDL_Texture> canvas_;   // the last Canvas, at its own size
+    SdlPtr<SDL_Texture> overlay_;  // show_overlay()'s canvas
+    int overlay_w_ = 0, overlay_h_ = 0, overlay_scale_ = 1;
+    bool overlay_on_ = false;
     std::vector<float> scene_xy_;  // the scene's vertices in render output pixels
     std::string screenshot_;       // request_screenshot()
     int canvas_w_ = 0;

@@ -81,6 +81,10 @@ public:
 
     // UDP, bound to any port.
     static Socket udp(bool v6, std::string& error);
+    // UDP (IPv4) for finding races on the local network (net/lan.h): allowed to send broadcasts; bound to
+    // `local` (0: every interface; an interface's address: its broadcasts leave through it) and `port` (0:
+    // any; else shared, so several games on one computer can each have it).
+    static Socket udp_lan(std::uint32_t local, std::uint16_t port, std::string& error);
     bool send_to(const SocketAddress& to, std::span<const std::uint8_t> data);
     // Bytes received (0 if nothing waiting); `from` is the sender.
     std::size_t receive_from(std::span<std::uint8_t> buf, SocketAddress& from);

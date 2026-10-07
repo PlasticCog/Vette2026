@@ -260,8 +260,9 @@ void OnlineLink::run() {
 }
 
 void OnlineLink::run_host() {
-    const bool server = !options_.server_url.empty();
+    const bool server = !options_.server_url.empty() && !options_.lan_only;
     std::mt19937_64 rng(std::random_device{}());
+    std::optional<DirectCode> lan_code;  // the same-network code, which the LAN answers give
     {
         std::lock_guard lock(mutex_);
         status_.state = LinkState::Connecting;
@@ -312,14 +313,20 @@ void OnlineLink::run_host() {
                 }
             }
             if (lan_ip) {
-                const DirectCode code = DirectCode::make(lan_ip, direct_host_->port(), rng);
-                direct_host_->allow("lan", code.key());
+                lan_code = DirectCode::make(lan_ip, direct_host_->port(), rng);
+                direct_host_->allow("lan", lan_code->key());
                 status_.lan.state = RouteStatus::State::Ready;
-                status_.lan.code = code.encode();
-                status_.lan.detail = format_ipv4(lan_ip) + ":" + std::to_string(code.port);
+                status_.lan.code = lan_code->encode();
+                status_.lan.detail = format_ipv4(lan_ip) + ":" + std::to_string(lan_code->port);
+            } else {
+                status_.lan.state = RouteStatus::State::Failed;
+                status_.lan.reason = "This computer isn't on a local network: connect it to the router (Wi-Fi or "
+                                     "cable).";
             }
-            status_.direct.state = RouteStatus::State::Starting;
-            if (!options_.code_address.empty()) {
+            if (options_.lan_only) {
+                // The same-network code only.
+            } else if (!options_.code_address.empty()) {
+                status_.direct.state = RouteStatus::State::Starting;
                 // A code for a given address (on a local network, or for tests): no router involved.
                 const auto ip = parse_ipv4(options_.code_address);
                 const DirectCode code = DirectCode::make(ip.value_or(0x7F000001), direct_host_->port(), rng);
@@ -328,9 +335,24 @@ void OnlineLink::run_host() {
                 status_.direct.code = code.encode();
                 status_.direct.detail = format_ipv4(code.ipv4) + ":" + std::to_string(code.port);
             } else {
+                status_.direct.state = RouteStatus::State::Starting;
                 mapper_ = std::make_unique<PortMapper>(direct_host_->port(), options_.manual_port_forward,
                                                        options_.use_stun);
             }
+        }
+    }
+
+    // Answers the games on this network that look for a race (net/lan.h), with this one, until a friend
+    // is in. (Not being able to is no failure: the same-network code still works.)
+    LanHost lan;
+    bool lan_answering = false;               // set_race done
+    std::optional<RaceSettings> lan_settings;  // with these settings
+    const std::string name = computer_name();
+    if (lan_code && options_.lan_port != 0) {
+        std::string error;
+        if (!lan.start(error, options_.lan_port)) {
+            std::lock_guard lock(mutex_);
+            status_.lan.log = "Not answering on the network: " + error;
         }
     }
 
@@ -366,6 +388,29 @@ void OnlineLink::run_host() {
                 rs.reason = room.reason;
                 rs.suggestion = options_.direct_code ? "Give your friend the direct code instead." : "";
             }
+        }
+
+        // The LAN answers, with the race as it is now (the host may change the course while waiting).
+        if (lan.running() && route != Route::None) {
+            lan = LanHost();  // a friend is in: no more answers
+        } else if (lan.running()) {
+            const std::optional<RaceSettings> settings = [&] {
+                std::lock_guard lock(mutex_);
+                return settings_;
+            }();
+            if (!lan_answering || settings != lan_settings) {
+                lan_answering = true;
+                lan_settings = settings;
+                LanRace race;
+                race.host.port = lan_code->port;
+                race.secret = lan_code->secret;
+                race.name = name;
+                race.app_version = options_.app_version;
+                race.game_build = options_.game_build;
+                race.settings = settings.value_or(RaceSettings{});
+                lan.set_race(race);
+            }
+            lan.poll();
         }
 
         // The router.
@@ -488,12 +533,18 @@ void OnlineLink::run_host() {
                     status_.reason = "Neither a room code nor a direct code could be made. " + status_.room.reason +
                                      " " + status_.direct.reason;
                     status_.suggestion = status_.direct.suggestion;
-                } else if (room_failed || status_.direct.reason.empty()) {
+                } else if (room_failed) {
                     status_.reason = status_.room.reason;
                     status_.suggestion = status_.room.suggestion;
-                } else {
+                } else if (!status_.direct.reason.empty()) {
                     status_.reason = status_.direct.reason;
                     status_.suggestion = status_.direct.suggestion;
+                } else if (options_.lan_only && !status_.lan.reason.empty()) {
+                    status_.reason = status_.lan.reason;
+                    status_.suggestion.clear();
+                } else {
+                    status_.reason = status_.room.reason;
+                    status_.suggestion = status_.room.suggestion;
                 }
             } else if (room_friend_at == 0) {
                 const bool ready = status_.room.state == RouteStatus::State::Ready ||

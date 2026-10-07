@@ -718,8 +718,46 @@ void Presenter::present(const ui::Canvas& canvas) {
     picture_h_ = canvas.height;
 }
 
+void Presenter::show_overlay(const ui::Canvas& canvas) {
+    SDL_Renderer* renderer = renderer_.get();
+    if (!overlay_ || canvas.width != overlay_w_ || canvas.height != overlay_h_) {
+        overlay_ = create_texture(renderer, SDL_TEXTUREACCESS_STREAMING, canvas.width, canvas.height,
+                                  SDL_SCALEMODE_NEAREST);
+        SDL_SetTextureBlendMode(overlay_.get(), SDL_BLENDMODE_BLEND);
+        overlay_w_ = canvas.width;
+        overlay_h_ = canvas.height;
+    }
+    void* pixels = nullptr;
+    int pitch = 0;
+    if (!SDL_LockTexture(overlay_.get(), nullptr, &pixels, &pitch))
+        throw_sdl_error("SDL_LockTexture");
+    for (int y = 0; y < canvas.height; ++y) {
+        auto* row = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(pixels) + y * pitch);
+        const std::uint32_t* src = canvas.pixels.data() + y * canvas.width;
+        for (int x = 0; x < canvas.width; ++x)
+            row[x] = src[x] == canvas.background ? 0u : 0xFF000000u | src[x];
+    }
+    SDL_UnlockTexture(overlay_.get());
+    overlay_scale_ = canvas.scale;
+    overlay_on_ = true;
+}
+
 void Presenter::finish_frame() {
     SDL_Renderer* renderer = renderer_.get();
+    if (overlay_on_ && overlay_) {
+        int out_w = 0;
+        int out_h = 0;
+        SDL_GetCurrentRenderOutputSize(renderer, &out_w, &out_h);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 150);
+        SDL_RenderFillRect(renderer, nullptr);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        const int w = overlay_w_ * overlay_scale_;
+        const int h = overlay_h_ * overlay_scale_;
+        const SDL_FRect dst{static_cast<float>((out_w - w) / 2), static_cast<float>((out_h - h) / 2),
+                            static_cast<float>(w), static_cast<float>(h)};
+        SDL_RenderTexture(renderer, overlay_.get(), nullptr, &dst);
+    }
     if (!screenshot_.empty()) {
         SDL_Surface* shot = SDL_RenderReadPixels(renderer, nullptr);
         if (!shot || !SDL_SaveBMP(shot, screenshot_.c_str()))

@@ -120,6 +120,11 @@ if VETTE! 2026 is already running, that copy joins. The race is on the host's co
 Driving setting; Lane centering stays each player's own, and jumps show on both screens. Both players
 need the same version of VETTE! 2026 and their own copy of DOS VETTE! 1.1.
 
+**LAN races.** Two players on the same network (the same Wi-Fi or router) choose **Host a LAN race** and
+**Join a LAN race**: the second lists the races hosted on the network, and Enter joins one. There's no code
+to send and nothing to set up on the router. The games find each other by a broadcast on UDP port 26990
+that never leaves the local network; races from **Host a race** are listed too.
+
 The host's router must let the friend in. Most routers open the game's port themselves when asked (UPnP,
 NAT-PMP or PCP). If yours doesn't, the game says so and gives a **same-network code** that works for a
 friend on your own network; for one over the internet, either let your friend host, or forward **TCP port
@@ -129,7 +134,7 @@ some internet providers that share one address between customers) can't be reach
 other player hosts. The first time you host, Windows asks whether to let the game through its firewall:
 allow it. As in the original, each game runs its own race: the traffic differs between the two screens,
 and when both cars cross the line within a moment of each other, both players may see themselves win.
-`--online-host` and `--online-join CODE` do the same from the command line. (A relay server for room
+`--online-host`, `--online-lan-host` and `--online-join CODE` (or `lan`) do the same from the command line. (A relay server for room
 codes is in `server/`, [server/README.md](server/README.md), for those who run one: `--online-server URL`.)
 
 **Sound effects and music.** The original only had the PC speaker. VETTE! 2026 can instead play its
@@ -159,8 +164,10 @@ windows. `--pc 286` emulates a 12 MHz PC/AT of 1989 (about 12-17 fps); `--cpu-hz
 
 ## Controls
 
-- **Keyboard:** every key goes to the game, Esc included. F11 or Alt+Enter toggles fullscreen.
-  **X** is the horn (with AdLib or the Mac sounds): the DOS game has none, so it plays the Mac's.
+- **Keyboard:** every key goes to the game, Esc included, except this program's own: **Ctrl+H** shows
+  the keys over the game (it pauses, except in an online race), **Alt+Q** quits to the desktop from any
+  screen, and F11 or Alt+Enter toggles fullscreen. **X** is the horn (with AdLib or the Mac sounds): the
+  DOS game has none, so it plays the Mac's. The original's own Ctrl+Q leaves the race, as does Esc's menu.
 - **Mouse:** acts as the PC's mouse. When the game shows the mouse pointer, it's drawn over the picture
   as the classic DOS arrow, and the Windows pointer is hidden while it's over the window.
 - **Gamepad:** acts as the PC's analog joystick. The D-pad, Start and Back also work as keys for the

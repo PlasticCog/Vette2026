@@ -108,13 +108,15 @@ TEST(net_reachability) {
     RouterMapping none;
     r = judge_reachability(none, *parse_ipv4("153.66.209.28"), 26989);
     CHECK(r.problem == Reachability::Problem::NoMapping);
-    CHECK(r.reason.find("UPnP") != std::string::npos && r.suggestion.find("room code") != std::string::npos);
+    CHECK(r.reason.find("UPnP") != std::string::npos && r.suggestion.find("friend to host") != std::string::npos);
     r = judge_reachability(none, *parse_ipv4("153.66.209.28"), 26989, true);  // forwarded by hand
     CHECK(r.ok() && r.public_port == 26989);
     r = judge_reachability(none, *parse_ipv4("100.64.0.9"), 26989);
     CHECK(r.problem == Reachability::Problem::SharedAddress);
     r = judge_reachability(none, std::nullopt, 26989);
     CHECK(r.problem == Reachability::Problem::NoInternet);
+    r = judge_reachability(none, std::nullopt, 26989, false, false);  // no STUN: the router's silence
+    CHECK(r.problem == Reachability::Problem::NoMapping && r.reason.find("UPnP") != std::string::npos);
 }
 
 TEST(net_direct_offer) {

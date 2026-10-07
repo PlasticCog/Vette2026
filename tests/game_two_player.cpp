@@ -48,6 +48,20 @@ TEST(two_player_setup_text) {
     CHECK(!TwoPlayerSetup::decode("hello"));
 }
 
+TEST(two_player_link_config) {
+    // The shipped CONFIG.BIN: Direct, COM2, 9600, Answer, Take over call, Special, Pulse, Dial string,
+    // Save Yes, DONE? Yes; then the dial text.
+    std::vector<uint8_t> shipped = {4, 0, 8, 0, 0x10, 0, 8, 0, 8, 0, 8, 0, 8, 0, 8, 0, 4, 0, 4, 0};
+    shipped.resize(0x3C, 0x20);
+    const std::vector<uint8_t> link = vette::game::link_config(shipped);
+    CHECK(link.size() == shipped.size());
+    const std::vector<uint8_t> rows(link.begin(), link.begin() + 20);
+    // Direct, COM1, 57.6k; the rest as they were.
+    CHECK(rows == std::vector<uint8_t>({4, 0, 4, 0, 0x1C, 0, 8, 0, 8, 0, 8, 0, 8, 0, 8, 0, 4, 0, 4, 0}));
+    CHECK(std::equal(link.begin() + 20, link.end(), shipped.begin() + 20));
+    CHECK(vette::game::link_config(std::vector<uint8_t>(10, 0)).empty());
+}
+
 namespace {
 
 // A packet as serial_send_packet (422F:01C8) puts it on the line.
@@ -384,6 +398,8 @@ TEST(two_player_finish_reaches_the_other_game) {
 // physics and takes the host's before the race. The guest's car flies over the Great Highway crest; its
 // packets carry its height in the air, and the host shows the car in the air (not on the road), also
 // with latency and stalls, when frames pass without a packet (then it continues the flight under gravity).
+// (A stall over the take-off itself keeps the car on the road until a packet says it flies: the host can't
+// know before; the stalls come at random moments.)
 TEST(two_player_improved_jump_seen_by_the_other_game) {
     const fs::path dir = game_dir();
     if (!have_game(dir)) return;
@@ -418,7 +434,9 @@ TEST(two_player_improved_jump_seen_by_the_other_game) {
             if (p.side[1].t() >= 70) own.push_back({tm.x, tm.z, tm.ground_z, tm.airborne});
         };
         host.m->cpu().add_watch(Cpu::linear(kCode, 0x026A), [&](Cpu&) {  // after opponent_step
-            if (p.side[1].t() >= 70) shown.push_back({static_cast<double>(host.abs_x(0x2F09)), static_cast<double>(host.w(0x2F0D)), 0, false});
+            if (p.side[1].t() >= 70)
+                shown.push_back({static_cast<double>(host.abs_x(0x2F09)), static_cast<double>(host.w(0x2F0D)), 0,
+                                 host.driving->remote().packets_airborne > 0});  // (airborne: the host knows of the jump)
         });
         CHECK(p.run(95, [&] { return p.side[1].t() < 90; }));
         // The flight, along x (north): where the jumper was in the air, and the ground under each point.
@@ -437,11 +455,11 @@ TEST(two_player_improved_jump_seen_by_the_other_game) {
             }
             return best->ground;
         };
-        // Wherever the host shows the car over that stretch, it shows it in the air.
+        // Wherever the host shows the car over that stretch, once it knows of the jump, it shows it in the air.
         int over = 0, in_air = 0, on_road = 0;
         double max_shown = 0;
         for (const Point& q : shown) {
-            if (q.x > lo + 40 && q.x < hi - 40) {
+            if (q.airborne && q.x > lo + 40 && q.x < hi - 40) {
                 ++over;
                 in_air += q.z > ground_at(q.x) + 4;
                 on_road += std::fabs(q.z - ground_at(q.x)) <= 1;

@@ -70,8 +70,9 @@ struct Reachability {
     bool ok() const { return problem == Problem::None; }
 };
 // From what the router did and what STUN saw. `manual_forward`: the player has forwarded the port in the
-// router themselves, so no mapping is needed.
+// router themselves, so no mapping is needed. `stun_asked`: false when STUN wasn't tried, so only the
+// router could have told the internet address.
 Reachability judge_reachability(const RouterMapping& mapping, std::optional<std::uint32_t> stun_ip,
-                                std::uint16_t internal_port, bool manual_forward = false);
+                                std::uint16_t internal_port, bool manual_forward = false, bool stun_asked = true);
 
 }  // namespace vette::net

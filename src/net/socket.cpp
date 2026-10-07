@@ -601,6 +601,16 @@ void wait_sockets(std::span<PollItem> items, Waker* waker, int timeout_ms) {
     }
 }
 
+std::uint32_t outward_ipv4() {
+    std::string error;
+    Socket s = Socket::udp(false, error);
+    if (!s.valid() || !s.connect_udp(SocketAddress::ipv4(0x08080808, 53))) {
+        return 0;
+    }
+    const auto a = s.local_address();
+    return a && !a->v6 ? a->ipv4() : 0;
+}
+
 std::vector<SocketAddress> local_addresses() {
     init();
     std::vector<SocketAddress> out;

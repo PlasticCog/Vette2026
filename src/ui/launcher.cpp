@@ -255,6 +255,8 @@ struct Layout {
         hints_y = height - 14;
     }
     int row_y(int row) const { return row < kPlay ? list_y + row * pitch : actions_y + (row - kPlay) * pitch; }
+    // The top of a row's selection bar (`pitch` high), with its text in the middle.
+    int bar_y(int row) const { return row_y(row) - (pitch - kGlyph) / 2; }
 };
 
 // The native folder dialog reports on any thread; the launcher picks the result up each frame.
@@ -397,6 +399,12 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
     };
 
     for (;;) {
+        // An invite link opened while the menu is up (handed over by the new copy it started).
+        if (const auto forwarded = take_forwarded_invite()) {
+            SDL_RaiseWindow(presenter.window());
+            if (game && online && online_available() && run_online(presenter, gamepad, s, *game, *online, *forwarded))
+                return LaunchChoice::Online;
+        }
         // A folder chosen in the dialog: use it if VETTE!'s files are all there.
         {
             const std::lock_guard lock(pick.mutex);
@@ -467,7 +475,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
                                                fy))
                     break;
                 for (int row = 0; row < kRows; ++row) {
-                    const int y = lay.row_y(row) - 3;
+                    const int y = lay.bar_y(row);
                     if (fy >= y && fy < y + lay.pitch) {
                         selected = row;
                         if (click)
@@ -524,7 +532,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             const int y = lay.row_y(row);
             const bool sel = row == selected;
             if (sel)
-                canvas.fill_rect(6, y - 3, canvas.width - 12, lay.pitch, kSelection);
+                canvas.fill_rect(6, lay.bar_y(row), canvas.width - 12, lay.pitch, kSelection);
             if (row >= kPlay) {
                 canvas.text(m, y, std::string(sel ? "> " : "  ") + label(row), sel ? kGold : kValue);
                 continue;

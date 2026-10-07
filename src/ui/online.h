@@ -6,6 +6,7 @@
 // Keyboard or gamepad.
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -34,6 +35,15 @@ struct OnlineSession {
 
 // False when this build has no online play (built without libcurl).
 bool online_available();
+
+// Invite links that start a new copy of the program while a game runs (net/instance.h): the first copy
+// takes them. Call accept_forwarded_invites() at the start, with argv[0]; take_forwarded_invite() each
+// frame. leave_for_invite() makes way for a new copy of the program that joins `link` (the caller then
+// quits); false if it couldn't start one.
+bool forward_invite(const std::string& link);  // true: a running game took it
+void accept_forwarded_invites(const char* program);
+std::optional<std::string> take_forwarded_invite();
+bool leave_for_invite(const std::string& link);
 
 // Runs the online race screen. True: `session` is ready (the race can start); false: the player went
 // back. Edits the server address and the host's course in `settings`. `join_now`: an invite link or code

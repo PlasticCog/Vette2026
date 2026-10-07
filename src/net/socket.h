@@ -112,6 +112,10 @@ void wait_sockets(std::span<PollItem> items, Waker* waker, int timeout_ms);
 // IPv6, for the direct connection's offer.
 std::vector<SocketAddress> local_addresses();
 
+// This computer's IPv4 address on the network that leads to the internet (it may have others: VPNs,
+// virtual machines' networks), found by "connecting" a UDP socket, which sends nothing. 0: none.
+std::uint32_t outward_ipv4();
+
 // Looks a name up (blocking): its IPv4 addresses (and IPv6 ones if `v6`).
 std::vector<SocketAddress> resolve(const std::string& host, std::uint16_t port, bool v6 = false);
 

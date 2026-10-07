@@ -38,10 +38,11 @@ constexpr uint16_t kSetupRow = 0x7709;      // 0ACB: w, the setup screen's row *
 constexpr uint16_t kSetupItems = 0x770B;    // 0ACB: w[10], each row's item offset (4 = the first item)
 
 // The setup screen's rows (re/notes/12-two-player.md): Connection, Port, Baud rate, Mode, Procedure,
-// Dial, Line type, Phone, Save options, DONE?. -1: left as it is.
+// Dial, Line type, Phone, Save options, DONE?. -1: left as it is (saving writes the same link to the save
+// folder's CONFIG.BIN: link_config's, the screen's default here).
 constexpr int kSetupRows = 10;
 constexpr int kItemCount[kSetupRows] = {2, 2, 7, 2, 2, 2, 2, 2, 2, 2};
-constexpr int kWanted[kSetupRows] = {0 /*Direct*/, 0 /*COM1*/, 6 /*57.6k*/, -1, -1, -1, -1, -1, 1 /*Save: No*/, 0 /*Yes*/};
+constexpr int kWanted[kSetupRows] = {0 /*Direct*/, 0 /*COM1*/, 6 /*57.6k*/, -1, -1, -1, -1, -1, -1, 0 /*Yes*/};
 
 // Scan codes (set 1).
 constexpr uint8_t kEsc = 0x01, kEnter = 0x1C, kSpace = 0x39, kDown = 0x50, kLeft = 0x4B, kRight = 0x4D;
@@ -273,6 +274,21 @@ const char* TwoPlayerStart::phase_name(Phase p) {
     case Phase::Racing: return "racing";
     default: return "failed";
     }
+}
+
+std::vector<uint8_t> link_config(std::span<const uint8_t> config) {
+    if (config.size() < 2 * kSetupRows) {
+        return {};
+    }
+    std::vector<uint8_t> out(config.begin(), config.end());
+    for (int row = 0; row < kSetupRows; ++row) {
+        if (kWanted[row] >= 0) {
+            const int offset = 4 * (kWanted[row] + 1);  // the item's offset in its row record
+            out[static_cast<size_t>(2 * row)] = static_cast<uint8_t>(offset);
+            out[static_cast<size_t>(2 * row + 1)] = static_cast<uint8_t>(offset >> 8);
+        }
+    }
+    return out;
 }
 
 TwoPlayerStart::TwoPlayerStart(host::Machine& machine, Role role, TwoPlayerSetup setup, Own own)

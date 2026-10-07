@@ -38,7 +38,7 @@ std::int64_t now_ms() {
         .count();
 }
 
-const char* kAnotherWay = "Ask your friend to host instead, or use a room code.";
+const char* kAnotherWay = "Or ask your friend to host instead.";
 
 }  // namespace
 
@@ -171,7 +171,7 @@ const char* to_string(RouterMapping::Method method) {
 }
 
 Reachability judge_reachability(const RouterMapping& mapping, std::optional<std::uint32_t> stun_ip,
-                                std::uint16_t internal_port, bool manual_forward) {
+                                std::uint16_t internal_port, bool manual_forward, bool stun_asked) {
     Reachability r;
     const std::uint32_t router = mapping.router_ip;
     auto shared = [&](std::uint32_t seen_by_router, std::uint32_t seen_outside) {
@@ -204,18 +204,25 @@ Reachability judge_reachability(const RouterMapping& mapping, std::optional<std:
         return r;
     }
     const std::uint32_t ip = router ? router : stun_ip.value_or(0);
-    if (!ip || !ipv4_public(ip)) {
-        r.problem = Reachability::Problem::NoInternet;
-        r.reason = "Couldn't find your internet address: there's no internet connection, or the network blocks it.";
-        r.suggestion = "Check your connection, or use a room code.";
-        return r;
-    }
-    if (mapping.method == RouterMapping::Method::None && !manual_forward) {
+    const auto no_mapping = [&] {
         r.problem = Reachability::Problem::NoMapping;
         r.reason = "Your router didn't open a port for the game: it doesn't do UPnP or NAT-PMP, or they're "
                    "switched off in its settings.";
         r.suggestion = "Switch UPnP on in your router, or forward TCP port " + std::to_string(internal_port) +
                        " to this computer yourself. " + kAnotherWay;
+    };
+    if (!ip && !stun_asked && mapping.method == RouterMapping::Method::None) {
+        no_mapping();  // (and only the router could have said the internet address)
+        return r;
+    }
+    if (!ip || !ipv4_public(ip)) {
+        r.problem = Reachability::Problem::NoInternet;
+        r.reason = "Couldn't find your internet address: there's no internet connection, or the network blocks it.";
+        r.suggestion = "Check your connection.";
+        return r;
+    }
+    if (mapping.method == RouterMapping::Method::None && !manual_forward) {
+        no_mapping();
         r.public_ip = ip;
         r.public_port = internal_port;
         return r;

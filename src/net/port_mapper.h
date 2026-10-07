@@ -27,7 +27,9 @@ public:
 
     // Starts mapping `port` (TCP, to this computer, same external port if the router agrees).
     // `manual_forward`: the player has forwarded the port themselves (see judge_reachability).
-    explicit PortMapper(std::uint16_t port, bool manual_forward = false);
+    // `use_stun`: also ask the STUN servers (outside machines) for the public address; without, the
+    // router's word is all there is.
+    explicit PortMapper(std::uint16_t port, bool manual_forward = false, bool use_stun = true);
     ~PortMapper();  // removes the mapping
     PortMapper(const PortMapper&) = delete;
     PortMapper& operator=(const PortMapper&) = delete;
@@ -50,6 +52,7 @@ private:
 
     std::uint16_t port_;
     bool manual_forward_;
+    bool use_stun_;
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::optional<Result> result_;

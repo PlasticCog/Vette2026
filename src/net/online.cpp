@@ -60,7 +60,7 @@ std::unique_ptr<OnlineLink> OnlineLink::join(OnlineOptions options, std::string_
     std::unique_ptr<OnlineLink> link(new OnlineLink(std::move(options), false));
     link->invite_ = parse_invite(pasted);
     if (!link->invite_) {
-        link->failure_ = "That isn't a room code, a direct code or an invite link.";
+        link->failure_ = "That isn't a VETTE! 2026 code or invite link.";
     } else if (link->invite_->kind == Invite::Kind::Room && link->options_.server_url.empty()) {
         link->failure_ = "Room codes need the online server, and none is set.";
     }
@@ -294,8 +294,30 @@ void OnlineLink::run_host() {
         if (!direct_host_ && options_.direct_code) {
             status_.direct.state = RouteStatus::State::Failed;
             status_.direct.reason = error;
-            status_.direct.suggestion = "Use a room code.";
+            status_.direct.suggestion = server ? "Use a room code." : "Ask your friend to host instead.";
         } else if (direct_host_ && options_.direct_code) {
+            // A code for a friend on the same network: this computer's address there, no router involved
+            // (on the network toward the internet, not a VPN's or a virtual machine's, if it can tell).
+            const auto private_ip = [](std::uint32_t ip) {  // 10/8, 172.16/12, 192.168/16
+                return (ip >> 24) == 10 || (ip >> 20) == 0xAC1 || (ip >> 16) == 0xC0A8;
+            };
+            std::uint32_t lan_ip = outward_ipv4();
+            if (!private_ip(lan_ip)) {
+                lan_ip = 0;
+                for (const SocketAddress& a : local_addresses()) {
+                    if (!a.v6 && private_ip(a.ipv4())) {
+                        lan_ip = a.ipv4();
+                        break;
+                    }
+                }
+            }
+            if (lan_ip) {
+                const DirectCode code = DirectCode::make(lan_ip, direct_host_->port(), rng);
+                direct_host_->allow("lan", code.key());
+                status_.lan.state = RouteStatus::State::Ready;
+                status_.lan.code = code.encode();
+                status_.lan.detail = format_ipv4(lan_ip) + ":" + std::to_string(code.port);
+            }
             status_.direct.state = RouteStatus::State::Starting;
             if (!options_.code_address.empty()) {
                 // A code for a given address (on a local network, or for tests): no router involved.
@@ -306,7 +328,8 @@ void OnlineLink::run_host() {
                 status_.direct.code = code.encode();
                 status_.direct.detail = format_ipv4(code.ipv4) + ":" + std::to_string(code.port);
             } else {
-                mapper_ = std::make_unique<PortMapper>(direct_host_->port(), options_.manual_port_forward);
+                mapper_ = std::make_unique<PortMapper>(direct_host_->port(), options_.manual_port_forward,
+                                                       options_.use_stun);
             }
         }
     }
@@ -374,7 +397,7 @@ void OnlineLink::run_host() {
         if (route == Route::None) {
             // A friend by the direct code: straight in.
             if (direct_host_ && direct_host_->status().state == LinkState::Connected &&
-                direct_host_->joined_via() == "code") {
+                (direct_host_->joined_via() == "code" || direct_host_->joined_via() == "lan")) {
                 choose(Route::Direct, direct_host_.get());
                 continue;
             }
@@ -455,19 +478,26 @@ void OnlineLink::run_host() {
                                  status_.room.state == RouteStatus::State::Starting;
             const bool direct_up = status_.direct.state == RouteStatus::State::Ready ||
                                    status_.direct.state == RouteStatus::State::Starting;
-            if (!room_up && !direct_up) {
+            const bool lan_up = status_.lan.state == RouteStatus::State::Ready;  // a friend nearby can come
+            if (!room_up && !direct_up && !lan_up) {
                 status_.state = LinkState::Failed;
                 status_.activity.clear();
-                status_.reason = !status_.room.reason.empty() ? status_.room.reason : status_.direct.reason;
-                status_.suggestion = status_.direct.suggestion;
-                if (status_.room.state == RouteStatus::State::Failed &&
-                    status_.direct.state == RouteStatus::State::Failed) {
+                const bool room_failed = status_.room.state == RouteStatus::State::Failed;
+                const bool direct_failed = status_.direct.state == RouteStatus::State::Failed;
+                if (room_failed && direct_failed) {
                     status_.reason = "Neither a room code nor a direct code could be made. " + status_.room.reason +
                                      " " + status_.direct.reason;
+                    status_.suggestion = status_.direct.suggestion;
+                } else if (room_failed || status_.direct.reason.empty()) {
+                    status_.reason = status_.room.reason;
+                    status_.suggestion = status_.room.suggestion;
+                } else {
+                    status_.reason = status_.direct.reason;
+                    status_.suggestion = status_.direct.suggestion;
                 }
             } else if (room_friend_at == 0) {
                 const bool ready = status_.room.state == RouteStatus::State::Ready ||
-                                   status_.direct.state == RouteStatus::State::Ready;
+                                   status_.direct.state == RouteStatus::State::Ready || lan_up;
                 status_.state = ready ? LinkState::Waiting : LinkState::Connecting;
                 status_.activity = ready ? "Waiting for your friend..." : "Getting ready...";
             }

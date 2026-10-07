@@ -67,6 +67,7 @@ struct OnlineStatus {
     std::string reason, suggestion;  // Failed, PeerLeft, Closed
     double rtt_ms = -1;              // to the friend's game and back, on the route in use (-1: not yet)
     RouteStatus room, direct;        // host: both ways in; guest: the one it's joining by
+    RouteStatus lan;                 // host: a direct code with this computer's address on its own network
     LinkStatus link;                 // the route in use: counters, reconnects
 };
 
@@ -80,6 +81,7 @@ struct OnlineOptions {
     bool go_direct = true;    // through a room, try connecting straight to each other first
     std::uint16_t port = kDirectPort;
     bool manual_port_forward = false;  // the player forwarded the port on the router themselves
+    bool use_stun = true;  // ask STUN servers for the internet address when the router doesn't say
     // Guest: how long to try going direct before racing through the server.
     int direct_wait_ms = 2500;
     // Host: make the direct code from this IPv4 address instead of the internet address, with no router

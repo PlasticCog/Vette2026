@@ -122,6 +122,11 @@ struct TwoPlayerSetup {
 };
 
 // --- Into a race ---------------------------------------------------------------------------------------
+// The setup screen's saved choices (CONFIG.BIN, notes 12: ten words, each row's item offset, then the dial
+// text) with the link this program makes already chosen: Direct, COM1, 57.6k (the copy DOS 1.1 shipped
+// with says a modem's COM2 and 9600). The other rows as in `config`; empty if `config` is too short.
+std::vector<uint8_t> link_config(std::span<const uint8_t> config);
+
 class TwoPlayerStart {
 public:
     enum class Role { Host, Guest };  // who chose the setup (the original itself has no such roles)

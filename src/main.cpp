@@ -441,6 +441,31 @@ std::filesystem::path pref_dir(const char* app) {
 // The game's saves (CONFIG.BIN, SCORE.BIN, ...) go here, never into the player's game folder.
 std::filesystem::path save_dir() { return pref_dir("save"); }
 
+// The two-player setup screen opens on the link this program makes (game::link_config: Direct, COM1,
+// 57.6k), so an online race's start just goes down it; unless the player has saved choices of their own.
+void default_link_config(const GameDir& game, const std::filesystem::path& saves) {
+    std::vector<std::uint8_t> shipped;
+    try {
+        shipped = game.read("CONFIG.BIN");
+    } catch (const std::exception&) {
+        return;  // (the game makes one when the screen is saved)
+    }
+    const std::filesystem::path path = saves / "CONFIG.BIN";
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) {
+        std::ifstream in(path, std::ios::binary);
+        const std::vector<std::uint8_t> saved{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+        if (saved != shipped)
+            return;  // the player's own (or already the link's)
+    }
+    const std::vector<std::uint8_t> config = game::link_config(shipped);
+    if (config.empty())
+        return;
+    std::filesystem::create_directories(saves, ec);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(config.data()), static_cast<std::streamsize>(config.size()));
+}
+
 // settings.ini (the launch menu's choices).
 std::filesystem::path settings_dir() { return pref_dir("config"); }
 
@@ -1044,6 +1069,19 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
             driving->prepare(machine, view);
         if (link)
             link->update(machine, driving);
+        // An invite link opened while a game runs (handed over by the new copy it started): leave and join?
+        if (const auto invite = ui::take_forwarded_invite()) {
+            SDL_RaiseWindow(presenter.window());
+            const SDL_MessageBoxButtonData buttons[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Join now"},
+                                                        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Keep playing"}};
+            const SDL_MessageBoxData box{SDL_MESSAGEBOX_INFORMATION, presenter.window(), kAppName,
+                                         "A friend invited you to an online race. Leave this game and join it?", 2,
+                                         buttons, nullptr};
+            int chosen = 0;
+            if (SDL_ShowMessageBox(&box, &chosen) && chosen == 1 && ui::leave_for_invite(*invite))
+                return;  // this copy closes; the new one joins
+            last = SDL_GetTicksNS();  // (the emulation doesn't catch up on the time the question took)
+        }
         const bool layered = view && smooth && view->render(machine, *smooth, presenter);
         if (!layered) {
             if (!smooth || !smooth->render(machine.emulated_ns(), frame))
@@ -1119,6 +1157,13 @@ int run(int argc, char** argv) {
         }
         std::optional<GameDir> game = search.dir;
 
+        // Opened by an invite link while a game is running: that game takes it, and this copy is done.
+        if (opts->invite && ui::online_available() && ui::forward_invite(*opts->invite)) {
+            SDL_Log("Invite: handed to the game that's already running.");
+            return 0;
+        }
+        ui::accept_forwarded_invites(argv[0]);
+
         Presenter presenter(kAppName);
         presenter.set_fullscreen(settings.fullscreen);
         presenter.set_smooth_scaling(settings.scaling == Settings::Scaling::Smooth);
@@ -1189,6 +1234,7 @@ int run(int argc, char** argv) {
         host::MachineConfig config;
         config.game_dir = game->root();
         config.save_dir = save_dir();
+        default_link_config(*game, config.save_dir);
         config.audio_rate = kAudioRate;
         config.cpu_hz = opts->cpu_hz.value_or(settings.pc == Settings::Pc::Fast ? kFastPcHz : kAtHz);
         // Fixed for the session: DOS games detect the game port once, at startup.

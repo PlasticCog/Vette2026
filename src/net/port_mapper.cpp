@@ -38,18 +38,6 @@ namespace {
 constexpr std::uint32_t kLifetimeS = 3600;  // the router forgets the mapping after an hour if we die
 #if defined(VETTE_HAVE_MINIUPNPC)
 const char* kDescription = "VETTE! 2026 online race";
-
-// This computer's address on the network that leads to the internet (it may have others: VPNs, virtual
-// machines' networks), found by "connecting" a UDP socket, which sends nothing.
-std::string outward_ipv4() {
-    std::string error;
-    Socket s = Socket::udp(false, error);
-    if (!s.valid() || !s.connect_udp(SocketAddress::ipv4(0x08080808, 53))) {
-        return {};
-    }
-    const auto a = s.local_address();
-    return a && a->ipv4() != 0 ? a->ip_string() : std::string();
-}
 #endif
 
 std::int64_t now_ms() {
@@ -81,8 +69,8 @@ bool PortMapper::available() {
 #endif
 }
 
-PortMapper::PortMapper(std::uint16_t port, bool manual_forward)
-    : port_(port), manual_forward_(manual_forward), state_(new State) {
+PortMapper::PortMapper(std::uint16_t port, bool manual_forward, bool use_stun)
+    : port_(port), manual_forward_(manual_forward), use_stun_(use_stun), state_(new State) {
     thread_ = std::thread([this] { run(); });
 }
 
@@ -110,7 +98,9 @@ void PortMapper::remove() {
 void PortMapper::run() {
     init_sockets();
     // STUN alongside the router: they take about as long.
-    auto stun = std::async(std::launch::async, [this] { return stun_public_ipv4(kStunServers, 1500, &stop_); });
+    std::future<std::optional<std::uint32_t>> stun;
+    if (use_stun_)
+        stun = std::async(std::launch::async, [this] { return stun_public_ipv4(kStunServers, 1500, &stop_); });
     RouterMapping m;
     m.external_port = port_;
     // (A router whose own internet address isn't public can't make us reachable by any of them.)
@@ -123,9 +113,10 @@ void PortMapper::run() {
     state_->external_port = m.external_port;
     state_->renew_at_ms = now_ms() + kLifetimeS * 1000 / 2;
     Result r;
-    r.stun_ip = stun.get();
+    if (stun.valid())
+        r.stun_ip = stun.get();
     r.mapping = m;
-    r.reachability = judge_reachability(m, r.stun_ip, port_, manual_forward_);
+    r.reachability = judge_reachability(m, r.stun_ip, port_, manual_forward_, use_stun_);
     {
         std::lock_guard lock(mutex_);
         result_ = r;
@@ -155,7 +146,8 @@ bool PortMapper::map_upnp([[maybe_unused]] RouterMapping& m) {
                                          "urn:schemas-upnp-org:service:WANIPConnection:1",
                                          "urn:schemas-upnp-org:service:WANPPPConnection:1", nullptr};
     int error = 0;
-    const std::string outward = outward_ipv4();
+    const std::uint32_t outward_ip = outward_ipv4();
+    const std::string outward = outward_ip ? format_ipv4(outward_ip) : std::string();
     UPNPDev* devices = upnpDiscoverDevices(kTypes, 2000, outward.empty() ? nullptr : outward.c_str(), nullptr,
                                            UPNP_LOCAL_PORT_ANY, 0, 2, &error, 1);
     if (!devices) {

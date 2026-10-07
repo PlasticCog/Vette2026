@@ -55,9 +55,14 @@ struct Settings {
     Graphics graphics = Graphics::Dos;
     bool show_launcher = true;
     std::string game_folder;  // UTF-8; empty: look for Game/ next to the program
-    // Online races (ui/online.h): the relay server (wss://...), and the course the player hosts.
-    std::string online_server;
+    // Online races (ui/online.h): the course the player hosts; whether they forwarded the game's port on
+    // their router by hand (then the direct code is made from `online_address`, their internet address,
+    // as the router won't tell); and a relay server (wss://...) for this run only, from --online-server
+    // (not saved: online races need no server).
     int online_course = 1;  // 1-3, or 4: the three in a row
+    bool online_port_forwarded = false;
+    std::string online_address;
+    std::string online_server;
 
     // Classic is VETTE! exactly as shipped in 1989 (its own frames, a 12 MHz PC/AT, the manual
     // question); Enhanced switches every improvement on. Presets set only the options that change

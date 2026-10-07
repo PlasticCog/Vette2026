@@ -149,6 +149,20 @@ TEST(net_direct_refusals) {
     CHECK(third->status().reason.find("already has a player") != std::string::npos);
 }
 
+TEST(net_direct_same_network_code) {
+    // The host's internet code failed; its same-network code works, though the guest joins "by code".
+    auto host = start_host("code:7");
+    if (!host) {
+        CHECK(false);
+        return;
+    }
+    host->disallow("code");
+    host->allow("lan", "code:8");
+    auto guest = start_join(host->port(), "code:8");
+    CHECK(wait_for([&] { return guest->connected() && host->connected(); }));
+    CHECK_EQ(host->joined_via(), std::string("lan"));
+}
+
 TEST(net_direct_unreachable) {
     // Nothing listens on port 9 of the loopback interface: refused at once.
     DirectJoinOptions o;
@@ -160,7 +174,7 @@ TEST(net_direct_unreachable) {
     auto j = DirectJoin::start(o);
     CHECK(wait_for([&] { return j->status().state == LinkState::Failed; }, 4000));
     CHECK(j->status().reason.find("127.0.0.1:9") != std::string::npos);
-    CHECK(j->suggestion().find("room code") != std::string::npos);
+    CHECK(j->suggestion().find("host the race yourself") != std::string::npos);
 }
 
 TEST(net_direct_lockout) {

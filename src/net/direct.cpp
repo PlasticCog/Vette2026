@@ -347,17 +347,23 @@ struct DirectHost::Impl {
         if (locked) {
             return refuse(p, "closed", "Your friend's game isn't taking players any more. Ask them to host again.");
         }
-        std::string key;
-        {
+        // The key the guest proves it has. A direct code's guest can't tell which of the host's codes it
+        // has: the internet one ("code") or the same-network one ("lan").
+        const std::string asked_via = field(*m, "via");
+        const std::string guest_nonce = field(*m, "nonce");
+        std::string key, key_via;
+        if (guest_nonce.size() >= 16) {
             std::lock_guard lock(keys_mutex);
-            const auto it = keys.find(field(*m, "via"));
-            if (it != keys.end()) {
-                key = it->second;
+            for (const auto& [purpose, k] : keys) {
+                if ((purpose == asked_via || (asked_via == "code" && purpose == "lan")) &&
+                    field(*m, "proof") == direct_guest_proof(k, p.nonce, guest_nonce)) {
+                    key = k;
+                    key_via = purpose;
+                    break;
+                }
             }
         }
-        const std::string guest_nonce = field(*m, "nonce");
-        if (key.empty() || guest_nonce.size() < 16 ||
-            field(*m, "proof") != direct_guest_proof(key, p.nonce, guest_nonce)) {
+        if (key.empty()) {
             if (++wrong >= kMaxWrong) {
                 locked = true;
                 reason = "Someone tried to join with a wrong code " + std::to_string(kMaxWrong) +
@@ -374,7 +380,7 @@ struct DirectHost::Impl {
         }
         if (!resume) {
             session = random_hex(rng, 8);
-            via = field(*m, "via");
+            via = key_via;
             stream.reset();
             friend_left = false;
             reason.clear();
@@ -827,7 +833,7 @@ struct DirectJoin::Impl {
                std::string("Your friend's game ") + (refused ? "refused the connection" : "didn't answer") + " at " +
                    (where.empty() ? std::string("the code's address") : where) + ".",
                "Check the code with your friend. If it's right, their router or firewall is blocking the "
-               "connection: use a room code instead, or let your friend join you.");
+               "connection: host the race yourself and send them your code instead.");
     }
 
     void publish(std::atomic<bool>& connected) {

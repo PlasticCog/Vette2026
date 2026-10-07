@@ -50,9 +50,15 @@ TEST(settings_round_trip) {
     s.graphics = Settings::Graphics::Pc98;
     s.show_launcher = false;
     s.game_folder = "C:\\Old Games\\VETTE = 1989 #1";  // spaces, '=' and '#' survive
-    s.online_server = "wss://vette2026-relay.example.workers.dev";
     s.online_course = 3;
+    s.online_port_forwarded = true;
+    s.online_address = "203.0.113.5";
     CHECK(Settings::parse(s.serialize()) == s);
+}
+
+TEST(settings_ignore_old_online_server) {
+    // Online races need no server now: an old settings.ini's relay is forgotten.
+    CHECK(Settings::parse("online_server = ws://127.0.0.1:8787\n").online_server.empty());
 }
 
 TEST(settings_old_sound_values) {

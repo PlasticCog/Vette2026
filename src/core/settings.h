@@ -54,6 +54,8 @@ struct Settings {
     // shows (not out of nowhere a few hundred yards ahead), and with the long draw distance they fade in
     // and out. Off: the original's.
     bool smooth_traffic = true;
+    // The city played: a map made in the map editor (ui/map_editor.h), by name; empty: the original.
+    std::string map_name;
     Effects effects = Effects::AdLib;
     Music music = Music::Original;
     Graphics graphics = Graphics::Dos;

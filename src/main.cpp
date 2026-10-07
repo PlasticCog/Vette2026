@@ -11,6 +11,7 @@
 #include "enhanced/world.h"
 #include "game/driving.h"
 #include "game/options.h"
+#include "game/city_map.h"
 #include "game/smooth.h"
 #include "game/two_player.h"
 #include "game/x86.h"
@@ -34,6 +35,7 @@
 #include "sound/sfx_bank.h"
 #include "ui/key_sheet.h"
 #include "ui/launcher.h"
+#include "ui/map_editor.h"
 #include "ui/online.h"
 #include "ui/shortcuts.h"
 #include "platform/url_scheme.h"
@@ -107,6 +109,7 @@ constexpr const char* kUsage =
     "  --lane-centering on  a slight steering assist toward the lane's direction and centre (default off)\n"
     "  --freeway-traffic smooth   (default) new freeway cars come at the far end of the road and fade in\n"
     "                       and out; original: they appear a few hundred yards ahead and vanish far off\n"
+    "  --map NAME           play a map made in the map editor (original: the original's city)\n"
     "  --scaling sharp      (default) the pictures simply enlarged, every pixel a solid block; smooth:\n"
     "                       the edges between pixels softened\n"
     "  --graphics dos       (default) the DOS screens; pc98 or mac: that version's art in their place\n"
@@ -211,6 +214,7 @@ struct Options {
     std::optional<bool> improved_driving;
     std::optional<bool> lane_centering;
     std::optional<bool> smooth_traffic;
+    std::optional<std::string> map_name;
     std::vector<ScriptedKey> keys;
     std::vector<ScriptedPress> presses;  // sorted by time
     std::vector<ScriptedPoke> pokes;     // sorted by time
@@ -264,6 +268,8 @@ struct Options {
             s.lane_centering = *lane_centering;
         if (smooth_traffic)
             s.smooth_traffic = *smooth_traffic;
+        if (map_name)
+            s.map_name = *map_name == "original" ? std::string() : *map_name;
     }
 };
 
@@ -332,6 +338,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
         } else if (arg == "--lane-centering" && has_value && (std::string_view(argv[i + 1]) == "on" ||
                                                              std::string_view(argv[i + 1]) == "off")) {
             opts.lane_centering = std::string_view(argv[++i]) == "on";
+        } else if (arg == "--map" && has_value) {
+            opts.map_name = argv[++i];
         } else if (arg == "--freeway-traffic" && has_value && (std::string_view(argv[i + 1]) == "smooth" ||
                                                               std::string_view(argv[i + 1]) == "original")) {
             opts.smooth_traffic = std::string_view(argv[++i]) == "smooth";
@@ -447,7 +455,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--graphics" || arg == "--scaling" ||
                                      arg == "--resolution" || arg == "--skyline" ||
                                      arg == "--depth-buffer" || arg == "--driving" || arg == "--lane-centering" ||
-                                     arg == "--freeway-traffic" ||
+                                     arg == "--freeway-traffic" || arg == "--map" ||
                                      arg == "--link-listen" || arg == "--link-connect" || arg == "--link-course" ||
                                      arg == "--link-delay" || arg == "--link-jitter" || arg == "--online-server" ||
                                      arg == "--online-join";
@@ -503,6 +511,9 @@ std::filesystem::path pref_dir(const char* app) {
 
 // The game's saves (CONFIG.BIN, SCORE.BIN, ...) go here, never into the player's game folder.
 std::filesystem::path save_dir() { return pref_dir("save"); }
+
+// The map editor's maps (ui/map_editor.h).
+std::filesystem::path maps_dir() { return pref_dir("maps"); }
 
 // The two-player setup screen opens on the link this program makes (game::link_config: Direct, COM1,
 // 57.6k), so an online race's start just goes down it; unless the player has saved choices of their own.
@@ -1315,12 +1326,12 @@ int run(int argc, char** argv) {
         if (invite && game && ui::online_available()) {
             SDL_Log("Invite: %s", invite->c_str());
             if (!ui::run_online(presenter, gamepad, settings, *game, online, *invite) && !online.link &&
-                ui::run_launcher(presenter, gamepad, settings, game, search, &online) == ui::LaunchChoice::Quit)
+                ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir()) == ui::LaunchChoice::Quit)
                 return 0;
             if (!save_settings(settings_file, settings))
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't save %s", path_to_utf8(settings_file).c_str());
         } else if (opts->launcher.value_or(settings.show_launcher) || !game) {
-            if (ui::run_launcher(presenter, gamepad, settings, game, search, &online) == ui::LaunchChoice::Quit)
+            if (ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir()) == ui::LaunchChoice::Quit)
                 return 0;
             if (!save_settings(settings_file, settings))
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't save %s", path_to_utf8(settings_file).c_str());
@@ -1372,6 +1383,18 @@ int run(int argc, char** argv) {
         std::string error;
         if (!machine.boot(error))
             throw std::runtime_error("Couldn't start VETTE.EXE: " + error);
+        // A map of the player's own (ui/map_editor.h), except in two-player races: both need the same city.
+        if (!settings.map_name.empty()) {
+            if (online.link || opts->link_listen || opts->link_connect) {
+                SDL_Log("Map: the original (two-player races use it)");
+            } else if (const auto map = ui::load_map(maps_dir(), settings.map_name, error)) {
+                game::install_city_map(machine, *map);
+                SDL_Log("Map: %s", settings.map_name.c_str());
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Map %s: %s; the original instead",
+                            settings.map_name.c_str(), error.c_str());
+            }
+        }
         SDL_Log("Saves: %s", path_to_utf8(config.save_dir).c_str());
         if (!settings.manual_check || online.link)  // (an online race's menus are driven: no question then)
             game::install_skip_manual_check(machine.cpu());

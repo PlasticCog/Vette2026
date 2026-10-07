@@ -78,10 +78,29 @@ public:
     void show_system_cursor(bool show);
     // Saves the next presented picture, as the window shows it, to a BMP file (UTF-8 path).
     void request_screenshot(std::string path_utf8) { screenshot_ = std::move(path_utf8); }
-    // Drawn over every picture presented until hide_overlay() (the key sheet): the picture darkened,
-    // then `canvas` (copied) at its scale, centered, without its pixels of its background colour.
-    void show_overlay(const ui::Canvas& canvas);
+    // Drawn over every picture presented until hide_overlay() (the key sheet, the map editor's panels):
+    // the picture darkened (if `dim`), then `canvas` (copied) at its scale, centered, without its pixels
+    // of its background colour.
+    void show_overlay(const ui::Canvas& canvas, bool dim = true);
     void hide_overlay() { overlay_on_ = false; }
+
+    // A big picture kept on the GPU (the map editor's map, 0xRRGGBB pixels): set_picture uploads it whole,
+    // update_picture the rectangle (x, y, w, h) that changed, from the same pixels. present_picture draws
+    // `src` of it (picture pixels) into `dst` (output pixels; it may reach past the window), each pixel a
+    // solid block, over `background`, with the marks, then the overlay.
+    struct PictureMarks {
+        float grid_step = 0;  // output pixels between grid lines, from dst's corner (0: none)
+        uint32_t grid_colour = 0;
+        struct Box {
+            SDL_FRect rect;  // output pixels
+            uint32_t colour;
+            float thickness;
+        };
+        std::vector<Box> boxes;
+    };
+    void set_picture(const std::vector<std::uint32_t>& pixels, int w, int h);
+    void update_picture(const std::vector<std::uint32_t>& pixels, int x, int y, int w, int h);
+    void present_picture(const SDL_FRect& src, const SDL_FRect& dst, std::uint32_t background, const PictureMarks& marks);
 
 private:
     // A Framebuffer on its way to the screen: converted to ARGB at its own size, then upscaled by whole
@@ -122,6 +141,9 @@ private:
     SdlPtr<SDL_Texture> overlay_;  // show_overlay()'s canvas
     int overlay_w_ = 0, overlay_h_ = 0, overlay_scale_ = 1;
     bool overlay_on_ = false;
+    bool overlay_dim_ = true;
+    SdlPtr<SDL_Texture> picture_tex_;  // set_picture()
+    int picture_tex_w_ = 0, picture_tex_h_ = 0;
     std::vector<float> scene_xy_;  // the scene's vertices in render output pixels
     std::string screenshot_;       // request_screenshot()
     int canvas_w_ = 0;

@@ -17,6 +17,7 @@
 #include "platform/presenter.h"
 #include "platform/url_scheme.h"
 #include "ui/canvas.h"
+#include "ui/map_editor.h"
 #include "ui/online.h"
 #include "ui/shortcuts.h"
 #include "ui/text.h"
@@ -30,7 +31,7 @@ namespace vette::ui {
 namespace {
 
 enum Row {
-    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kDriving, kLaneCentering, kTraffic, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
+    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kDriving, kLaneCentering, kTraffic, kMap, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
     kPlay, kOnline, kQuit, kRows
 };
 
@@ -56,6 +57,7 @@ const char* label(int row) {
     case kDriving: return "Driving";
     case kLaneCentering: return "Lane centering";
     case kTraffic: return "Freeway traffic";
+    case kMap: return "Map";
     case kGraphics: return "Graphics";
     case kEffects: return "Sound effects";
     case kMusic: return "Music";
@@ -113,6 +115,7 @@ std::string value(int row, const Settings& s, const GameDirSearch& search, const
     case kDriving: return s.improved_driving ? "Improved (drifts, jumps)" : "Original";
     case kLaneCentering: return s.lane_centering ? "On (slight)" : "Off";
     case kTraffic: return s.smooth_traffic ? "Smooth (no pop-in)" : "Original";
+    case kMap: return s.map_name.empty() ? "Original" : s.map_name;
     case kDepthBuffer:
         return !s.depth_buffer ? "Off (original order)" : x.depth_buffer ? "On" : "On - not available here";
     case kGraphics: {
@@ -181,6 +184,9 @@ std::string_view help(int row, const Settings& s) {
                    ? "Your car drifts a little through fast corners, and flies over the crest of a hill when "
                      "it's going fast enough."
                    : "The original's driving.";
+    case kMap:
+        return "The city you race in: the original, or a map made in the map editor. Enter opens the map "
+               "editor on the map shown here.";
     case kTraffic:
         return s.smooth_traffic
                    ? "New freeway cars come onto the road far ahead, at the end of what the original shows, and "
@@ -300,7 +306,7 @@ std::string describe_problem(const GameDirSearch& search) {
 }  // namespace
 
 LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, std::optional<GameDir>& game,
-                          GameDirSearch& search, OnlineSession* online) {
+                          GameDirSearch& search, OnlineSession* online, const std::filesystem::path& maps_dir) {
     static FolderPick pick;  // static: a dialog left open must not outlive what its callback writes to
     int selected = game ? kPlay : kFolder;
     std::string status = game ? "" : describe_problem(search);
@@ -354,6 +360,16 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
         case kDriving: s.improved_driving = !s.improved_driving; break;
         case kLaneCentering: s.lane_centering = !s.lane_centering; break;
         case kTraffic: s.smooth_traffic = !s.smooth_traffic; break;
+        case kMap: {
+            // The original, then the maps saved, in a ring.
+            std::vector<std::string> maps = list_maps(maps_dir);
+            maps.insert(maps.begin(), std::string());
+            const auto at = std::find(maps.begin(), maps.end(), s.map_name);
+            const int n = static_cast<int>(maps.size());
+            const int i = at == maps.end() ? 0 : static_cast<int>(at - maps.begin());
+            s.map_name = maps[static_cast<size_t>((i + dir + n) % n)];
+            break;
+        }
         case kSkyline:
             s.skyline = s.skyline == Settings::Skyline::Hills ? Settings::Skyline::Painted : Settings::Skyline::Hills;
             break;
@@ -392,6 +408,13 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             } else if (run_online(presenter, gamepad, s, *game, *online)) {
                 choice = LaunchChoice::Online;
                 return true;
+            }
+        } else if (row == kMap && dir > 0) {
+            if (!game) {
+                status = "Choose the game folder first.";
+                selected = kFolder;
+            } else if (!maps_dir.empty()) {
+                s.map_name = run_map_editor(presenter, gamepad, *game, maps_dir, s.map_name);
             }
         } else if (row == kQuit) {
             choice = LaunchChoice::Quit;

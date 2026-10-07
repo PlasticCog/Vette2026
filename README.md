@@ -120,6 +120,18 @@ slow) and, in the Enhanced view, fades them in, and fades out a car the original
 on along the road. The traffic itself (speeds, lanes, how often cars come, collisions) is the original's.
 `--freeway-traffic original` turns it off for one run.
 
+**Map editor.** The launch menu's **Map** row picks the city you race in: the original, or a map of your
+own. Enter on it opens the map editor, which shows the whole city from above and lets you change it cell
+by cell with the original's own 161 cell types (streets, city blocks, parks, water, bridge pieces):
+left-click paints the brush, right-click picks a cell as the brush, the wheel zooms, right-drag moves,
+0-3 set the brush's height, `[` and `]` change which design a big tile uses, W makes a big tile water or
+land, Ctrl+Z/Ctrl+Y undo and redo, Ctrl+S saves (F1 lists every key). The city is 5 x 5 big tiles of
+16 x 16 cells, and big tiles that share a design (the water around the city, for one) change together.
+Maps are saved in VETTE! 2026's own folder (`maps`, next to `save`) and put into the game as it starts;
+the game's files are never changed. `--map NAME` plays one for one run. For now the original's traffic,
+pedestrians and computer opponent keep their fixed routes, which can run through what you change, the
+street names and dashboard signs are the original's, and online races use the original map.
+
 **Online races.** Two players can race each other over the internet, in the original's two-player
 mode, with no server in between: the games connect straight to each other. In the launch menu, choose
 **Online race**, then **Host a race**: a code like **7K3M-QX9P-2HDA** goes onto your clipboard. Paste it to

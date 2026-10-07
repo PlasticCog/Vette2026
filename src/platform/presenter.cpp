@@ -718,7 +718,8 @@ void Presenter::present(const ui::Canvas& canvas) {
     picture_h_ = canvas.height;
 }
 
-void Presenter::show_overlay(const ui::Canvas& canvas) {
+void Presenter::show_overlay(const ui::Canvas& canvas, bool dim) {
+    overlay_dim_ = dim;
     SDL_Renderer* renderer = renderer_.get();
     if (!overlay_ || canvas.width != overlay_w_ || canvas.height != overlay_h_) {
         overlay_ = create_texture(renderer, SDL_TEXTUREACCESS_STREAMING, canvas.width, canvas.height,
@@ -742,16 +743,79 @@ void Presenter::show_overlay(const ui::Canvas& canvas) {
     overlay_on_ = true;
 }
 
+void Presenter::set_picture(const std::vector<std::uint32_t>& pixels, int w, int h) {
+    if (!picture_tex_ || w != picture_tex_w_ || h != picture_tex_h_) {
+        picture_tex_ = create_texture(renderer_.get(), SDL_TEXTUREACCESS_STATIC, w, h, SDL_SCALEMODE_NEAREST);
+        picture_tex_w_ = w;
+        picture_tex_h_ = h;
+    }
+    update_picture(pixels, 0, 0, w, h);
+}
+
+void Presenter::update_picture(const std::vector<std::uint32_t>& pixels, int x, int y, int w, int h) {
+    if (!picture_tex_ || w <= 0 || h <= 0)
+        return;
+    // ARGB with the alpha byte set, a row at a time into the rectangle.
+    std::vector<std::uint32_t> rows(static_cast<size_t>(w) * static_cast<size_t>(h));
+    for (int r = 0; r < h; ++r) {
+        const std::uint32_t* src = pixels.data() + static_cast<size_t>(y + r) * static_cast<size_t>(picture_tex_w_) + x;
+        for (int c = 0; c < w; ++c)
+            rows[static_cast<size_t>(r) * static_cast<size_t>(w) + static_cast<size_t>(c)] = 0xFF000000u | src[c];
+    }
+    const SDL_Rect rect{x, y, w, h};
+    SDL_UpdateTexture(picture_tex_.get(), &rect, rows.data(), w * 4);
+}
+
+void Presenter::present_picture(const SDL_FRect& src, const SDL_FRect& dst, std::uint32_t background,
+                                const PictureMarks& marks) {
+    SDL_Renderer* renderer = renderer_.get();
+    SDL_SetRenderDrawColor(renderer, static_cast<std::uint8_t>(background >> 16), static_cast<std::uint8_t>(background >> 8),
+                           static_cast<std::uint8_t>(background), SDL_ALPHA_OPAQUE);
+    SDL_RenderClear(renderer);
+    if (picture_tex_)
+        SDL_RenderTexture(renderer, picture_tex_.get(), &src, &dst);
+    int out_w = 0;
+    int out_h = 0;
+    SDL_GetCurrentRenderOutputSize(renderer, &out_w, &out_h);
+    if (marks.grid_step >= 4) {
+        const std::uint32_t g = marks.grid_colour;
+        SDL_SetRenderDrawColor(renderer, static_cast<std::uint8_t>(g >> 16), static_cast<std::uint8_t>(g >> 8),
+                               static_cast<std::uint8_t>(g), SDL_ALPHA_OPAQUE);
+        const float x0 = std::max(dst.x, 0.0f), x1 = std::min(dst.x + dst.w, static_cast<float>(out_w));
+        const float y0 = std::max(dst.y, 0.0f), y1 = std::min(dst.y + dst.h, static_cast<float>(out_h));
+        for (float x = dst.x + std::ceil((x0 - dst.x) / marks.grid_step) * marks.grid_step; x <= x1; x += marks.grid_step)
+            SDL_RenderLine(renderer, std::floor(x), y0, std::floor(x), y1);
+        for (float y = dst.y + std::ceil((y0 - dst.y) / marks.grid_step) * marks.grid_step; y <= y1; y += marks.grid_step)
+            SDL_RenderLine(renderer, x0, std::floor(y), x1, std::floor(y));
+    }
+    for (const PictureMarks::Box& b : marks.boxes) {
+        SDL_SetRenderDrawColor(renderer, static_cast<std::uint8_t>(b.colour >> 16), static_cast<std::uint8_t>(b.colour >> 8),
+                               static_cast<std::uint8_t>(b.colour), SDL_ALPHA_OPAQUE);
+        const float t = std::max(1.0f, b.thickness);
+        const SDL_FRect sides[4] = {{b.rect.x, b.rect.y, b.rect.w, t},
+                                    {b.rect.x, b.rect.y + b.rect.h - t, b.rect.w, t},
+                                    {b.rect.x, b.rect.y, t, b.rect.h},
+                                    {b.rect.x + b.rect.w - t, b.rect.y, t, b.rect.h}};
+        SDL_RenderFillRects(renderer, sides, 4);
+    }
+    finish_frame();
+    picture_ = dst;
+    picture_w_ = static_cast<int>(src.w);
+    picture_h_ = static_cast<int>(src.h);
+}
+
 void Presenter::finish_frame() {
     SDL_Renderer* renderer = renderer_.get();
     if (overlay_on_ && overlay_) {
         int out_w = 0;
         int out_h = 0;
         SDL_GetCurrentRenderOutputSize(renderer, &out_w, &out_h);
-        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 150);
-        SDL_RenderFillRect(renderer, nullptr);
-        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        if (overlay_dim_) {
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 150);
+            SDL_RenderFillRect(renderer, nullptr);
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        }
         const int w = overlay_w_ * overlay_scale_;
         const int h = overlay_h_ * overlay_scale_;
         const SDL_FRect dst{static_cast<float>((out_w - w) / 2), static_cast<float>((out_h - h) / 2),

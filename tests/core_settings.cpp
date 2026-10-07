@@ -46,6 +46,7 @@ TEST(settings_round_trip) {
     s.improved_driving = true;
     s.lane_centering = true;
     s.smooth_traffic = false;
+    s.map_name = "No freeways";
     s.effects = Settings::Effects::Mac;
     s.music = Settings::Music::Pc98;
     s.graphics = Settings::Graphics::Pc98;

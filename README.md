@@ -111,6 +111,15 @@ Either one also evens out the original's rounding of sideways movement, which ma
 straight creep left but never right; speeds and race times are unchanged. `--driving improved` and
 `--lane-centering on` turn them on for one run.
 
+**Freeway traffic.** The original puts a new freeway car on the road 5 to 12 road slices ahead of you
+(each slice is 128 of its units, about 30 feet), and takes cars off as they get more than 22 slices ahead
+or 7 behind. In its own 320x200 view that hardly shows; with the long draw distance, cars appear out of
+nowhere in front of you and vanish up the road. **Smooth** (the default; Classic turns it off) brings new
+cars in at the far end of the road the original shows (14 to 21 slices ahead, or 6 to 7 behind when you're
+slow) and, in the Enhanced view, fades them in, and fades out a car the original takes off while it drives
+on along the road. The traffic itself (speeds, lanes, how often cars come, collisions) is the original's.
+`--freeway-traffic original` turns it off for one run.
+
 **Online races.** Two players can race each other over the internet, in the original's two-player
 mode, with no server in between: the games connect straight to each other. In the launch menu, choose
 **Online race**, then **Host a race**: a code like **7K3M-QX9P-2HDA** goes onto your clipboard. Paste it to

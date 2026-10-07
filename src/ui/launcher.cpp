@@ -30,7 +30,7 @@ namespace vette::ui {
 namespace {
 
 enum Row {
-    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kDriving, kLaneCentering, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
+    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kDriving, kLaneCentering, kTraffic, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
     kPlay, kOnline, kQuit, kRows
 };
 
@@ -55,6 +55,7 @@ const char* label(int row) {
     case kDepthBuffer: return "Depth buffer";
     case kDriving: return "Driving";
     case kLaneCentering: return "Lane centering";
+    case kTraffic: return "Freeway traffic";
     case kGraphics: return "Graphics";
     case kEffects: return "Sound effects";
     case kMusic: return "Music";
@@ -111,6 +112,7 @@ std::string value(int row, const Settings& s, const GameDirSearch& search, const
         return s.view_resolution == Settings::ViewResolution::Display ? "Display" : "Original 320x200";
     case kDriving: return s.improved_driving ? "Improved (drifts, jumps)" : "Original";
     case kLaneCentering: return s.lane_centering ? "On (slight)" : "Off";
+    case kTraffic: return s.smooth_traffic ? "Smooth (no pop-in)" : "Original";
     case kDepthBuffer:
         return !s.depth_buffer ? "Off (original order)" : x.depth_buffer ? "On" : "On - not available here";
     case kGraphics: {
@@ -179,6 +181,12 @@ std::string_view help(int row, const Settings& s) {
                    ? "Your car drifts a little through fast corners, and flies over the crest of a hill when "
                      "it's going fast enough."
                    : "The original's driving.";
+    case kTraffic:
+        return s.smooth_traffic
+                   ? "New freeway cars come onto the road far ahead, at the end of what the original shows, and "
+                     "fade in and out instead of appearing and vanishing in view."
+                   : "The original's freeway traffic: new cars appear a few hundred yards ahead, and cars "
+                     "vanish as they get far away.";
     case kLaneCentering:
         return s.lane_centering ? "A slight steering assist that keeps your car straight in its lane. Steer to "
                                   "override it."
@@ -345,6 +353,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             break;
         case kDriving: s.improved_driving = !s.improved_driving; break;
         case kLaneCentering: s.lane_centering = !s.lane_centering; break;
+        case kTraffic: s.smooth_traffic = !s.smooth_traffic; break;
         case kSkyline:
             s.skyline = s.skyline == Settings::Skyline::Hills ? Settings::Skyline::Painted : Settings::Skyline::Hills;
             break;

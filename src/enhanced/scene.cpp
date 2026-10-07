@@ -68,6 +68,7 @@ constexpr uint16_t kPlayerCar = 0x2D35;
 constexpr uint16_t kDrawPlayerCar = 0x28D3;  // draw_player_car_chase
 constexpr int kRingSlices = 32, kHighwayCarSlots = 11, kSliceVerts = 21;
 constexpr int kSliceLength = 128;            // a straight slice's advance (type 0, vertex 2)
+constexpr double kTrafficFadeSeconds = 0.75;  // SceneOptions::smooth_traffic
 constexpr int kGroundHighway = 6;            // cs:57E0 while DS:2AD4 != 0 (5A41)
 
 struct V3 {
@@ -421,10 +422,38 @@ struct SceneBuilder::Impl {
         float dist = 0;
         int player = -1;  // >= 0: the player's car, the vehicle_models range
         int16_t key = 0;  // the original's sort key (DS:340A)
+        float alpha = 1;  // SceneOptions::smooth_traffic: fading in or out
     };
     std::vector<HighwayObject> highway_objects;
     void read_slice_types(uint16_t table, std::array<SliceType, 16>& types_out);
     void draw_freeway();
+    // SceneOptions::smooth_traffic: each highway car slot as last seen, and the cars the original took
+    // off, drawn on along the road while they fade out. A car's place is its slice (the route's slices
+    // counted from its start) and where on it, along the road from the slice's start and across, so it
+    // doesn't depend on the frame the original re-centres.
+    struct TrafficCar {
+        bool on = false;
+        double since = 0;  // when it came (seconds)
+        int slice = -1;
+        double along = 0, across = 0;
+        int heading = 0, model = -1, lane = -1;
+        double speed = 0;  // units per second
+        float alpha = 1;
+    };
+    std::array<TrafficCar, kHighwayCarSlots> traffic_slots{};
+    struct Departed {
+        TrafficCar car;
+        double gone = 0;
+    };
+    std::vector<Departed> departed;
+    bool traffic_seen = false;  // false: the cars on the road now were there all along (they don't fade in)
+    double traffic_time = 0;
+    void reset_traffic() {
+        traffic_slots = {};
+        departed.clear();
+        traffic_seen = false;
+    }
+    float fade = 1;  // the alpha of what's drawn now (a fading car)
     void draw_sky();
     void draw_plane(int colour);
 
@@ -1579,10 +1608,10 @@ void SceneBuilder::Impl::emit_quad_2d(V3 ea, V3 eb, float x0, float y0, float x1
     const float d0 = depth(z0), d1 = depth(z1);
     SceneVertex* v = grow_vertices(4);
     const auto base = static_cast<int32_t>(out->vertices.size()) - 4;
-    v[0] = {x0 + ax, y0 + ay, c.r, c.g, c.b, 1, d0};
-    v[1] = {x0 - ax, y0 - ay, c.r, c.g, c.b, 1, d0};
-    v[2] = {x1 - bx, y1 - by, c.r, c.g, c.b, 1, d1};
-    v[3] = {x1 + bx, y1 + by, c.r, c.g, c.b, 1, d1};
+    v[0] = {x0 + ax, y0 + ay, c.r, c.g, c.b, fade, d0};
+    v[1] = {x0 - ax, y0 - ay, c.r, c.g, c.b, fade, d0};
+    v[2] = {x1 - bx, y1 - by, c.r, c.g, c.b, fade, d1};
+    v[3] = {x1 + bx, y1 + by, c.r, c.g, c.b, fade, d1};
     int32_t* ix = grow_indices(6);
     ix[0] = base;
     ix[1] = base + 1;
@@ -1675,7 +1704,7 @@ void SceneBuilder::Impl::draw_model(int model, const M3& rotation, V3 origin_cam
         const ModelFace& f = mesh.faces[fi];
         if (f.flags & 0x4000) continue;
         const SceneColour col = scene_colour(f.colour);
-        const float alpha = (f.flags & 0x8000) ? 0.5f : 1.0f;
+        const float alpha = ((f.flags & 0x8000) ? 0.5f : 1.0f) * fade;
         for (size_t pi = 0; pi < f.prims.size(); ++pi) {
             const auto& prim = f.prims[pi];
             const PrimData& pd = md.faces[fi][pi];
@@ -3019,20 +3048,99 @@ void SceneBuilder::Impl::draw_freeway() {
 
     // Highway cars (highway_draw_cars 7F09: at {x, y} of the record, z by type from DS:8222, yaw =
     // heading + 270, model = type, B9D6) and, outside the car, the player's (775E: 28D3).
+    const bool fades = opt->smooth_traffic && !opt->original_window;
+    const double now = opt->time_s;
+    if (!fades || now < traffic_time - 1) reset_traffic();  // (time went back: another race)
+    const auto on_road = [&](int g) { return g >= lo && g + 1 < hi; };
+    // The road's direction at slice g (to the next one), unit length.
+    const auto direction = [&](int g, double& ux, double& uy) {
+        const double dx = at(g + 1).x - at(g).x, dy = at(g + 1).y - at(g).y;
+        const double len = std::max(1e-6, std::sqrt(dx * dx + dy * dy));
+        ux = dx / len;
+        uy = dy / len;
+        return len;
+    };
     highway_objects.clear();
     for (int i = 0; i < kHighwayCarSlots; ++i) {
-        if (ram.d8(static_cast<uint16_t>(kCarActive + i)) == 0) continue;
-        const int16_t key = ram.s16(static_cast<uint16_t>(kCarKeys + 2 * i));
-        if (opt->original_window && !mirror && key < 0) continue;  // the mirror's keys come later (4021:1358)
         const auto rec = static_cast<uint16_t>(kHighwayCars + 0x16 * i);
+        const bool on = ram.d8(static_cast<uint16_t>(kCarActive + i)) != 0;
         HighwayObject o;
-        o.key = key;
-        o.model = ram.d8(static_cast<uint16_t>(rec + 0x13));
-        o.x = abs_x(ram.d16(static_cast<uint16_t>(rec + 4)));
-        o.y = abs_y(ram.d16(static_cast<uint16_t>(rec + 6)));
-        o.z = ram.d8(static_cast<uint16_t>(kCarHeights + o.model));
-        o.heading = wrap(ram.s16(static_cast<uint16_t>(rec + 0x0C)) + 270);
+        if (on) {
+            o.key = ram.s16(static_cast<uint16_t>(kCarKeys + 2 * i));
+            o.model = ram.d8(static_cast<uint16_t>(rec + 0x13));
+            o.x = abs_x(ram.d16(static_cast<uint16_t>(rec + 4)));
+            o.y = abs_y(ram.d16(static_cast<uint16_t>(rec + 6)));
+            o.z = ram.d8(static_cast<uint16_t>(kCarHeights + o.model));
+            o.heading = wrap(ram.s16(static_cast<uint16_t>(rec + 0x0C)) + 270);
+        }
+        // Slot 10 is the opponent's (or the other player's), which doesn't come and go.
+        if (fades && i < kHighwayCarSlots - 1) {
+            TrafficCar& was = traffic_slots[static_cast<size_t>(i)];
+            TrafficCar car;
+            if (on) {
+                car.on = true;
+                car.slice = global(ram.s16(rec), ram.s16(static_cast<uint16_t>(rec + 2)));
+                car.model = o.model;
+                car.lane = ram.d8(static_cast<uint16_t>(rec + 0x12));
+                car.heading = o.heading;
+                car.speed = ram.s16(static_cast<uint16_t>(rec + 0x0E));
+                if (on_road(car.slice)) {
+                    double ux = 0, uy = 0;
+                    direction(car.slice, ux, uy);
+                    const double dx = o.x - at(car.slice).x, dy = o.y - at(car.slice).y;
+                    car.along = dx * ux + dy * uy;
+                    car.across = dy * ux - dx * uy;
+                } else {
+                    car.slice = -1;
+                }
+            }
+            // The same car as before: same slot, model and lane, and about where it was (a slot can be
+            // freed and filled again within a frame).
+            const bool same = was.on && on && was.model == car.model && was.lane == car.lane &&
+                              std::abs(car.slice - was.slice) <= 3;
+            if (was.on && !same && was.slice >= 0) departed.push_back({was, now});
+            if (on) {
+                car.since = same ? was.since : traffic_seen ? now : -1e9;
+                car.alpha = static_cast<float>(std::clamp((now - car.since) / kTrafficFadeSeconds, 0.0, 1.0));
+                o.alpha = car.alpha;
+            }
+            was = car;
+        }
+        if (!on) continue;
+        if (opt->original_window && !mirror && o.key < 0) continue;  // the mirror's keys come later (4021:1358)
         highway_objects.push_back(o);
+    }
+    if (fades) {
+        traffic_seen = true;
+        traffic_time = now;
+        // The cars the original took off: on along the road at their speed, fading out.
+        for (size_t k = 0; k < departed.size();) {
+            const Departed& dep = departed[k];
+            const double dt = now - dep.gone;
+            const float alpha = dep.car.alpha * static_cast<float>(1 - dt / kTrafficFadeSeconds);
+            int g = dep.car.slice;
+            if (dt < 0 || alpha <= 0 || !on_road(g)) {
+                departed.erase(departed.begin() + static_cast<std::ptrdiff_t>(k));
+                continue;
+            }
+            double ux = 0, uy = 0;
+            double rest = dep.car.along + dep.car.speed * dt;  // from slice g's start
+            double len = direction(g, ux, uy);
+            while (rest > len && on_road(g + 1)) {
+                rest -= len;
+                ++g;
+                len = direction(g, ux, uy);
+            }
+            HighwayObject o;
+            o.model = dep.car.model;
+            o.x = at(g).x + ux * rest - uy * dep.car.across;
+            o.y = at(g).y + uy * rest + ux * dep.car.across;
+            o.z = ram.d8(static_cast<uint16_t>(kCarHeights + o.model));
+            o.heading = wrap(dep.car.heading + at(g).heading - at(dep.car.slice).heading);
+            o.alpha = alpha;
+            highway_objects.push_back(o);
+            ++k;
+        }
     }
     vehicle_models.clear();
     if (ram.d8(kExternalView) != 0) {
@@ -3086,7 +3194,9 @@ void SceneBuilder::Impl::draw_freeway() {
         ++out->stats.vehicles;
         lod_key = static_cast<uint16_t>(o.key);
         cam.clear();
+        fade = o.alpha;
         draw_model(o.model, heading_rot[static_cast<size_t>(o.heading)], c, true);
+        fade = 1;
     }
 }
 
@@ -3117,6 +3227,7 @@ void SceneBuilder::build(const uint8_t* ram, const SceneOptions& options, Scene&
     m.lod_key = m.ram.u16(addr::kCodeSeg, addr::kSortKey);
     // Highway mode: the freeway, and the city only once the end of the road is in sight (0342-034E).
     m.freeway = m.ram.d8(addr::kHighway) == 0xFF;
+    if (!m.freeway) m.reset_traffic();
     const bool city = !m.freeway || m.ram.d8(kEndOfRoad) != 0;
     out.stats.city = city;
 

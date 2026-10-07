@@ -17,6 +17,11 @@ constexpr uint16_t kCodeSeg = emu_seg(0x3009);        // main code segment
 constexpr uint16_t kQuestion = 0x6EC0, kAttempts = 0x6EC2;
 constexpr uint16_t kCheckState = 0x2AEC;              // DS: FFh = not asked yet, 1 = passed
 
+// hw_spawn_car: CX = slices from the player, just drawn (AND CX,7 / ADD CX,5 ahead; AND CX,3 / ADD CX,3
+// behind), at the MOV BP,CX that follows.
+constexpr uint16_t kHighwaySeg = emu_seg(0x4021);
+constexpr uint16_t kSpawnAhead = 0x1089, kSpawnBehind = 0x1052;
+
 } // namespace
 
 void install_skip_manual_check(Cpu& cpu) {
@@ -42,6 +47,14 @@ void install_skip_manual_check(Cpu& cpu) {
         r.ip = c.pop16();
         r.s[CS] = c.pop16();
     });
+}
+
+void install_far_freeway_spawns(Cpu& cpu) {
+    using namespace host;
+    cpu.add_watch(Cpu::linear(kHighwaySeg, kSpawnAhead),
+                  [](Cpu& c) { c.regs.r[CX] = static_cast<uint16_t>(c.regs.r[CX] + 9); });  // 5-12 -> 14-21
+    cpu.add_watch(Cpu::linear(kHighwaySeg, kSpawnBehind),
+                  [](Cpu& c) { c.regs.r[CX] = static_cast<uint16_t>(6 + (c.regs.r[CX] & 1)); });  // 3-6 -> 6-7
 }
 
 void install_idle_skip(host::Machine& machine) {

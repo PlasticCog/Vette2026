@@ -50,6 +50,10 @@ struct Settings {
     // at speed. Lane centering: a slight steering assist toward the lane's direction and centre.
     bool improved_driving = false;
     bool lane_centering = false;
+    // Freeway traffic, smooth: new cars come onto the freeway at the far end of the road the original
+    // shows (not out of nowhere a few hundred yards ahead), and with the long draw distance they fade in
+    // and out. Off: the original's.
+    bool smooth_traffic = true;
     Effects effects = Effects::AdLib;
     Music music = Music::Original;
     Graphics graphics = Graphics::Dos;

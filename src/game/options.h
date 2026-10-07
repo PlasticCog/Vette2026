@@ -27,4 +27,12 @@ void install_skip_manual_check(host::Cpu& cpu);
 // later), but it is deterministic.
 void install_idle_skip(host::Machine& machine);
 
+// Freeway traffic, smooth (Settings::smooth_traffic). `hw_spawn_car` (4021:1007) puts a new highway car
+// 5-12 road slices ahead of the player (above 364 speed units; below, 3-6 behind), in plain view of the
+// long-distance 3D view, and the original takes cars off more than 22 slices ahead or 7 behind (4021:11C4).
+// Watches after its random draws move a new car to 14-21 slices ahead (the far end of the road the
+// original shows) or 6-7 behind, so the random sequence stays the original's. The Enhanced view fades
+// them in and out (SceneOptions::smooth_traffic).
+void install_far_freeway_spawns(host::Cpu& cpu);
+
 } // namespace vette::game

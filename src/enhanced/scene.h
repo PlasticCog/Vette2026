@@ -126,6 +126,13 @@ struct SceneOptions {
     // the picture mirrored left to right, in the mirror's own viewport (DS:35A3 / 3587 / 3595), over a
     // sky of its own (the original fills it with sky and ground, without the horizon panorama).
     bool mirror = false;
+
+    // Freeway traffic, smooth: the original puts a new highway car on the road in plain view of the long
+    // draw distance and takes one off as it gets more than 22 slices ahead (or 7 behind). Each then fades
+    // in where it comes, and one taken off goes on along the road at its speed while it fades out. The
+    // fades run by `time_s`, the frame's emulated time (so the mirror's build agrees with the main view's).
+    bool smooth_traffic = false;
+    double time_s = 0;
 };
 
 // Validation only: chooses each static object's variant as the original would (vette_world runs the

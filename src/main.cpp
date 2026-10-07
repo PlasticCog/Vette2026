@@ -73,7 +73,7 @@ constexpr const char* kUsage =
     "                 [--effects off|speaker|adlib|mac] [--music off|original|pc98] [--no-sound]\n"
     "                 [--graphics dos|pc98|mac] [--scaling sharp|smooth] [--resolution display|original]\n"
     "                 [--skyline hills|painted] [--depth-buffer on|off] [--driving original|improved]\n"
-    "                 [--lane-centering on|off] [--manual-check]\n"
+    "                 [--lane-centering on|off] [--freeway-traffic smooth|original] [--manual-check]\n"
     "                 [--dump-frame <file.bmp>]\n"
     "Settings come from the launch menu (saved in settings.ini); these flags override them for one run.\n"
     "  --launcher           show the launch menu even if it's switched off (--no-launcher: skip it)\n"
@@ -105,6 +105,8 @@ constexpr const char* kUsage =
     "  --driving original   (default) the original's driving; improved: the car drifts a little through\n"
     "                       fast corners and leaves the ground over crests at speed\n"
     "  --lane-centering on  a slight steering assist toward the lane's direction and centre (default off)\n"
+    "  --freeway-traffic smooth   (default) new freeway cars come at the far end of the road and fade in\n"
+    "                       and out; original: they appear a few hundred yards ahead and vanish far off\n"
     "  --scaling sharp      (default) the pictures simply enlarged, every pixel a solid block; smooth:\n"
     "                       the edges between pixels softened\n"
     "  --graphics dos       (default) the DOS screens; pc98 or mac: that version's art in their place\n"
@@ -208,6 +210,7 @@ struct Options {
     std::optional<bool> depth_buffer;
     std::optional<bool> improved_driving;
     std::optional<bool> lane_centering;
+    std::optional<bool> smooth_traffic;
     std::vector<ScriptedKey> keys;
     std::vector<ScriptedPress> presses;  // sorted by time
     std::vector<ScriptedPoke> pokes;     // sorted by time
@@ -259,6 +262,8 @@ struct Options {
             s.improved_driving = *improved_driving;
         if (lane_centering)
             s.lane_centering = *lane_centering;
+        if (smooth_traffic)
+            s.smooth_traffic = *smooth_traffic;
     }
 };
 
@@ -327,6 +332,9 @@ std::optional<Options> parse_args(int argc, char** argv) {
         } else if (arg == "--lane-centering" && has_value && (std::string_view(argv[i + 1]) == "on" ||
                                                              std::string_view(argv[i + 1]) == "off")) {
             opts.lane_centering = std::string_view(argv[++i]) == "on";
+        } else if (arg == "--freeway-traffic" && has_value && (std::string_view(argv[i + 1]) == "smooth" ||
+                                                              std::string_view(argv[i + 1]) == "original")) {
+            opts.smooth_traffic = std::string_view(argv[++i]) == "smooth";
         } else if (arg == "--depth-buffer" && has_value && (std::string_view(argv[i + 1]) == "on" ||
                                                            std::string_view(argv[i + 1]) == "off")) {
             opts.depth_buffer = std::string_view(argv[++i]) == "on";
@@ -439,6 +447,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--graphics" || arg == "--scaling" ||
                                      arg == "--resolution" || arg == "--skyline" ||
                                      arg == "--depth-buffer" || arg == "--driving" || arg == "--lane-centering" ||
+                                     arg == "--freeway-traffic" ||
                                      arg == "--link-listen" || arg == "--link-connect" || arg == "--link-course" ||
                                      arg == "--link-delay" || arg == "--link-jitter" || arg == "--online-server" ||
                                      arg == "--online-join";
@@ -574,6 +583,7 @@ struct Artwork {
 struct EnhancedView {
     int radius = enhanced::kMapCells;
     bool hills = true;  // Settings::Skyline::Hills: the backdrop without its painted city
+    bool smooth_traffic = true;  // Settings::smooth_traffic: freeway cars fade in and out
     enhanced::Backdrop backdrop;
     enhanced::World world;
     std::unique_ptr<enhanced::SceneBuilder> builder;  // once the world is extracted
@@ -615,6 +625,8 @@ struct EnhancedView {
         // With the depth buffer, all of the city's traffic and pedestrians (nothing pops in); without,
         // only those near the car, where the original draws them (none show through the scenery).
         options.depth = options.replicas = options.far_vehicles = presenter.depth_buffer();
+        options.smooth_traffic = smooth_traffic;
+        options.time_s = static_cast<double>(machine.emulated_ns()) / 1e9;
         presenter.frame_scale(layers.under.width, layers.under.height, options.pixel_w, options.pixel_h);
         if (presenter.original_resolution())
             options.line_width = 1;  // the original's one-pixel lines
@@ -1364,6 +1376,8 @@ int run(int argc, char** argv) {
         if (!settings.manual_check || online.link)  // (an online race's menus are driven: no question then)
             game::install_skip_manual_check(machine.cpu());
         game::install_idle_skip(machine);  // the fast PC spends most cycles waiting for retrace
+        if (settings.smooth_traffic)
+            game::install_far_freeway_spawns(machine.cpu());
         const bool smooth_fps = settings.frame_rate == Settings::FrameRate::Smooth;
         const bool enhanced_view = settings.draw_distance != Settings::DrawDistance::Original;
         std::optional<game::SmoothRenderer> smooth;
@@ -1377,6 +1391,7 @@ int run(int argc, char** argv) {
             if (settings.draw_distance == Settings::DrawDistance::Extended)
                 view->radius = kExtendedRadius;
             view->hills = settings.skyline == Settings::Skyline::Hills;
+            view->smooth_traffic = settings.smooth_traffic;
         }
         SDL_Log("Frame rate: %s; draw distance: %s%s%s; emulated CPU %.0f MHz",
                 smooth_fps ? "smooth (display refresh)" : "original",

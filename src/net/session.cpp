@@ -40,7 +40,11 @@ const char* to_string(LinkState state) {
 }
 
 Session::Session(SessionIo& io, SessionConfig config, std::string join_code)
-    : io_(io), config_(std::move(config)), join_code_(std::move(join_code)), stream_(config_.max_unacked) {
+    : io_(io),
+      config_(std::move(config)),
+      join_code_(std::move(join_code)),
+      peer_({config_.max_payload, config_.max_unacked, config_.ack_delay_us, config_.resend_request_us},
+            [this](std::span<const std::uint8_t> m) { io_.send_binary(m); }) {
     guest_ = !join_code_.empty();
     status_.host = !guest_;
     if (guest_) {
@@ -151,16 +155,13 @@ void Session::welcome(const JsonObject& m, std::int64_t now_us) {
     }
 
     const std::string peer = field(m, "peer");
-    peer_ = peer == "here" ? Peer::Here : peer == "away" ? Peer::Away : Peer::None;
+    friend_ = peer == "here" ? Peer::Here : peer == "away" ? Peer::Away : Peer::None;
+    peer_.set_open(can_send(), now_us);
     if (resumed) {
         // Whatever was in flight when the connection dropped may be lost: resend everything the friend
         // hasn't acknowledged, and tell them where our side is so they do the same.
-        stream_.rewind();
-        if (peer_ == Peer::Here) {
-            send_message(MessageHeader::kAck, 0, {}, now_us);
-        }
+        peer_.resume(now_us);
     }
-    transmit(now_us);
     io_.send_text("ping");
     ping_sent_us_ = last_ping_us_ = now_us;
 }
@@ -168,19 +169,20 @@ void Session::welcome(const JsonObject& m, std::int64_t now_us) {
 void Session::peer_event(const JsonObject& m, std::int64_t now_us) {
     const std::string state = field(m, "state");
     if (state == "joined") {
-        new_stream();  // a new friend: a new cable
-        peer_ = Peer::Here;
+        peer_.reset();  // a new friend: a new cable
+        friend_ = Peer::Here;
         status_.reason.clear();
-        transmit(now_us);
+        peer_.set_open(can_send(), now_us);
     } else if (state == "away") {
-        peer_ = Peer::Away;
+        friend_ = Peer::Away;
+        peer_.set_open(false, now_us);
     } else if (state == "back") {
-        peer_ = Peer::Here;
-        stream_.rewind();
-        send_message(MessageHeader::kAck, 0, {}, now_us);
-        transmit(now_us);
+        friend_ = Peer::Here;
+        peer_.set_open(can_send(), now_us);
+        peer_.resume(now_us);
     } else if (state == "left") {
-        peer_ = Peer::Left;
+        friend_ = Peer::Left;
+        peer_.set_open(false, now_us);
         status_.reason = field(m, "reason");
         if (guest_) {
             finish(LinkState::PeerLeft, status_.reason);  // the host's room closes with them
@@ -188,82 +190,18 @@ void Session::peer_event(const JsonObject& m, std::int64_t now_us) {
     }
 }
 
-void Session::new_stream() {
-    stream_.reset();
-    sent_high_ = 0;
-    received_.clear();
-    have_echo_ = false;
-    peer_ts_at_us_ = -1;
-    ack_due_us_ = resend_requested_us_ = rewound_us_ = -1;
-}
-
 void Session::on_binary(std::span<const std::uint8_t> message, std::int64_t now_us) {
     last_rx_us_ = now_us;
-    const auto h = MessageHeader::decode(message);
-    if (!h || final_) {
-        return;
+    if (!final_) {
+        peer_.on_message(message, now_us);
     }
-    ++status_.messages_received;
-
-    peer_ts_ = h->ts_us;
-    peer_ts_at_us_ = now_us;
-    if (h->echo_hold_us != MessageHeader::kNoEcho && (!have_echo_ || h->echo_ts_us != last_echo_)) {
-        have_echo_ = true;
-        last_echo_ = h->echo_ts_us;
-        const std::uint32_t elapsed = static_cast<std::uint32_t>(now_us) - h->echo_ts_us;
-        if (elapsed >= h->echo_hold_us && elapsed - h->echo_hold_us < 60'000'000u) {
-            const double ms = static_cast<double>(elapsed - h->echo_hold_us) / 1000.0;
-            status_.rtt_last_ms = ms;
-            status_.rtt_ms = status_.rtt_ms < 0 ? ms : status_.rtt_ms * 0.875 + ms * 0.125;
-            ++status_.rtt_samples;
-        }
-    }
-
-    stream_.on_ack(h->ack);
-    if (h->flags & MessageHeader::kResend) {
-        resend(now_us);
-    }
-    if (h->kind == MessageHeader::kData) {
-        std::span<const std::uint8_t> fresh;
-        switch (stream_.receive(h->offset, message.subspan(MessageHeader::kSize), fresh)) {
-        case ReliableStream::Received::Applied:
-            received_.insert(received_.end(), fresh.begin(), fresh.end());
-            status_.bytes_received += fresh.size();
-            [[fallthrough]];
-        case ReliableStream::Received::Duplicate:
-            if (ack_due_us_ < 0) {
-                ack_due_us_ = now_us + config_.ack_delay_us;
-            }
-            break;
-        case ReliableStream::Received::Gap:
-            // Something before this is missing (lost in a drop): ask once for a resend from where we
-            // are, and drop what follows until the resend arrives.
-            if (resend_requested_us_ < 0 || stream_.received() != resend_requested_at_ ||
-                now_us - resend_requested_us_ >= config_.resend_request_us) {
-                resend_requested_us_ = now_us;
-                resend_requested_at_ = stream_.received();
-                send_message(MessageHeader::kAck, MessageHeader::kResend, {}, now_us);
-            }
-            break;
-        }
-    }
-    transmit(now_us);
-}
-
-void Session::resend(std::int64_t now_us) {
-    // The friend sends one request per gap, but more of our messages may have crossed it.
-    if (rewound_us_ >= 0 && now_us - rewound_us_ < config_.resend_request_us) {
-        return;
-    }
-    rewound_us_ = now_us;
-    stream_.rewind();
-    transmit(now_us);
 }
 
 void Session::on_closed(std::string_view why, std::int64_t now_us) {
     conn_ = Conn::Down;
     welcomed_here_ = false;
     ping_sent_us_ = -1;
+    peer_.set_open(false, now_us);
     if (final_) {
         return;
     }
@@ -317,10 +255,7 @@ void Session::tick(std::int64_t now_us) {
             ping_sent_us_ = now_us;
         }
     }
-    transmit(now_us);
-    if (ack_due_us_ >= 0 && now_us >= ack_due_us_ && can_send()) {
-        send_message(MessageHeader::kAck, 0, {}, now_us);
-    }
+    peer_.tick(now_us);
 }
 
 std::int64_t Session::next_timer(std::int64_t now_us) const {
@@ -334,9 +269,7 @@ std::int64_t Session::next_timer(std::int64_t now_us) const {
             if (welcomed_here_) {
                 t = std::min(t, last_ping_us_ + config_.ping_interval_us);
             }
-            if (ack_due_us_ >= 0) {
-                t = std::min(t, ack_due_us_);
-            }
+            t = std::min(t, peer_.next_timer());
         }
     }
     return std::max(t, now_us);
@@ -347,20 +280,26 @@ bool Session::write(std::span<const std::uint8_t> bytes, std::int64_t now_us) {
         return !final_;
     }
     // With nobody at the other end (not joined yet, or gone), the bytes go nowhere, as on a cable.
-    if (peer_ != Peer::Here && peer_ != Peer::Away) {
+    if (friend_ != Peer::Here && friend_ != Peer::Away) {
         return true;
     }
-    if (!stream_.write(bytes)) {
+    if (!peer_.write(bytes, now_us)) {
         finish(LinkState::PeerLeft, "Your friend has been unreachable for too long.");
         return false;
     }
-    transmit(now_us);
     return true;
 }
 
-void Session::take_received(std::vector<std::uint8_t>& out) {
-    out.insert(out.end(), received_.begin(), received_.end());
-    received_.clear();
+void Session::take_received(std::vector<std::uint8_t>& out) { peer_.take_received(out); }
+
+bool Session::send_side(std::string_view text, std::int64_t now_us) {
+    return !final_ && peer_.send_side(text, now_us);
+}
+
+LinkStatus Session::status() const {
+    LinkStatus s = status_;
+    peer_.fill(s);
+    return s;
 }
 
 bool Session::set_race_settings(const RaceSettings& settings, std::int64_t now_us) {
@@ -392,44 +331,9 @@ void Session::leave(std::int64_t now_us) {
     finish(LinkState::Closed, "You left the room.");
 }
 
-void Session::transmit(std::int64_t now_us) {
-    while (can_send() && stream_.unsent() > 0) {
-        const auto chunk = stream_.unsent_bytes(config_.max_payload);
-        const std::uint64_t end = stream_.sent() + chunk.size();
-        if (end > sent_high_) {
-            status_.bytes_sent += end - std::max(sent_high_, stream_.sent());
-            status_.bytes_resent += std::max(sent_high_, stream_.sent()) - stream_.sent();
-            sent_high_ = end;
-        } else {
-            status_.bytes_resent += chunk.size();
-        }
-        send_message(MessageHeader::kData, 0, chunk, now_us);
-        stream_.mark_sent(chunk.size());
-    }
-}
-
-void Session::send_message(MessageHeader::Kind kind, std::uint8_t flags, std::span<const std::uint8_t> payload,
-                           std::int64_t now_us) {
-    MessageHeader h;
-    h.kind = kind;
-    h.flags = flags;
-    h.ts_us = static_cast<std::uint32_t>(now_us);
-    if (peer_ts_at_us_ >= 0) {
-        h.echo_ts_us = peer_ts_;
-        h.echo_hold_us = static_cast<std::uint32_t>(std::min<std::int64_t>(now_us - peer_ts_at_us_, 0xFFFFFFFE));
-    }
-    h.offset = static_cast<std::uint32_t>(stream_.sent());
-    h.ack = static_cast<std::uint32_t>(stream_.received());
-    scratch_.clear();
-    h.append_to(scratch_);
-    scratch_.insert(scratch_.end(), payload.begin(), payload.end());
-    io_.send_binary(scratch_);
-    ++status_.messages_sent;
-    ack_due_us_ = -1;
-}
-
 void Session::finish(LinkState state, std::string reason) {
     final_ = true;
+    peer_.set_open(false, 0);
     status_.state = state;
     status_.reason = std::move(reason);
     reconnect_at_us_ = -1;
@@ -445,7 +349,7 @@ void Session::update_state() {
     } else if (conn_ != Conn::Open || !welcomed_here_) {
         s = LinkState::Reconnecting;
     } else {
-        switch (peer_) {
+        switch (friend_) {
         case Peer::None: s = LinkState::Waiting; break;
         case Peer::Here: s = LinkState::Connected; break;
         case Peer::Away: s = LinkState::PeerAway; break;
@@ -460,6 +364,6 @@ void Session::update_state() {
     status_.state = s;
 }
 
-bool Session::linked() const { return !final_ && welcomed_ && (peer_ == Peer::Here || peer_ == Peer::Away); }
+bool Session::linked() const { return !final_ && welcomed_ && (friend_ == Peer::Here || friend_ == Peer::Away); }
 
 }  // namespace vette::net

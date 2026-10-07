@@ -112,15 +112,22 @@ straight creep left but never right; speeds and race times are unchanged. `--dri
 `--lane-centering on` turn them on for one run.
 
 **Online races.** Two players can race each other over the internet, in the original's two-player
-mode. In the launch menu, choose **Online race**: one player hosts and gets a code like **VETTE-4KQ7**,
-and their friend chooses **Join a race** and types it in. Both games then go straight into the race, on
-the host's course and with the host's Driving setting (Lane centering stays each player's own); jumps
-show on both screens. Both players need the same version of VETTE! 2026 and their own copy of DOS VETTE!
-1.1. The two games meet through a small relay server (`server/`, a Cloudflare Worker: see
-[server/README.md](server/README.md)), whose address goes in Online race > Server. As in the original,
-each game runs its own race: the traffic differs between the two screens, and when both cars cross the
-line within a moment of each other, both players may see themselves win. `--online-host`,
-`--online-join CODE` and `--online-server URL` do the same from the command line.
+mode. In the launch menu, choose **Online race**, then **Host a race**: an invite link goes onto your
+clipboard. Paste it to your friend in any chat; when they click it, their VETTE! 2026 opens and joins,
+and both games go straight into the race. (They can also paste the link or the code, like
+**VETTE-4KQ7**, under **Join a race**.) The race is on the host's course and with the host's Driving
+setting; Lane centering stays each player's own, and jumps show on both screens. Both players need the
+same version of VETTE! 2026 and their own copy of DOS VETTE! 1.1.
+
+The games find each other through a small relay server (`server/`, a Cloudflare Worker: see
+[server/README.md](server/README.md)), and then connect straight to each other when they can; when they
+can't, the race goes through the server. Without a server, the host also gets a **direct code** (like
+7K3M-QX9P-2HDA): the game opens a port on the router itself (UPnP, NAT-PMP or PCP) and the friend
+connects straight to it. Some connections (mobile networks, some internet providers) can't be reached
+that way, and the game says so. The first time you host, Windows asks whether to let the game through its
+firewall. As in the original, each game runs its own race: the traffic differs between the two screens,
+and when both cars cross the line within a moment of each other, both players may see themselves win.
+`--online-host`, `--online-join CODE` and `--online-server URL` do the same from the command line.
 
 **Sound effects and music.** The original only had the PC speaker. VETTE! 2026 can instead play its
 sounds on an emulated **AdLib** card (the Enhanced preset; DOS VETTE! never supported one), or use the
@@ -227,7 +234,7 @@ stay local (`re/ghidra/`, `re/out/`). Findings are written up in [`re/notes/`](r
 | Path | Contents |
 |---|---|
 | `Game/` | Where players put their original game files (not tracked) |
-| `src/` | `host/` (the emulator that runs the original), `game/` (native ports, smooth renderer), `platform/` (SDL3 window, sound, input), `ui/` (launch menu, program icon), `core/` (game files, settings), `enhanced/` (world extraction for the Enhanced renderer), `net/` (online play: rooms on the relay server, the serial link over a WebSocket), `tools/` (`vette_run`, `vette_link`, `vette_fuzz`, `vette_world`, `vette_icon`, `vette_netcheck`) |
+| `src/` | `host/` (the emulator that runs the original), `game/` (native ports, smooth renderer), `platform/` (SDL3 window, sound, input), `ui/` (launch menu, program icon), `core/` (game files, settings), `enhanced/` (world extraction for the Enhanced renderer), `net/` (online play: rooms on the relay server, direct connections between the games, the serial link over either), `tools/` (`vette_run`, `vette_link`, `vette_fuzz`, `vette_world`, `vette_icon`, `vette_netcheck`) |
 | `server/` | The relay server for online two-player races (a Cloudflare Worker); how to deploy it is in [server/README.md](server/README.md) |
 | `docs/` | Plan, porting guide |
 | `re/` | Symbol map, notes, Ghidra scripts and RE tools |

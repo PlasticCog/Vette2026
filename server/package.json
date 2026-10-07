@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node test/relay.test.mjs"
+    "test": "node test/relay.test.mjs && node test/invite.test.mjs"
   },
   "engines": {
     "node": ">=20.3.0"

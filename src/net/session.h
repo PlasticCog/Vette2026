@@ -12,8 +12,8 @@
 #include <string_view>
 #include <vector>
 
+#include "net/peer_stream.h"
 #include "net/protocol.h"
-#include "net/stream.h"
 
 namespace vette::net {
 
@@ -106,6 +106,10 @@ public:
     bool write(std::span<const std::uint8_t> bytes, std::int64_t now_us);
     // Appends the friend's serial bytes that have arrived.
     void take_received(std::vector<std::uint8_t>& out);
+    // Side messages: short texts to the friend's game outside the serial stream, while both are in the
+    // room (false otherwise: dropped). The friend's arrive in take_side().
+    bool send_side(std::string_view text, std::int64_t now_us);
+    void take_side(std::vector<std::string>& out) { peer_.take_side(out); }
 
     // The race settings. Host: replaces its settings; the guest gets them in order with the serial
     // stream (false for a guest, or if the settings are too long). Guest: the host's, from the moment
@@ -116,7 +120,7 @@ public:
     // Leaves the room for good: says goodbye to the server (the driver then closes the connection).
     void leave(std::int64_t now_us);
 
-    const LinkStatus& status() const { return status_; }
+    LinkStatus status() const;
     // The friend is in the room (here, or briefly away) and the serial stream is intact.
     bool linked() const;
     bool finished() const { return final_; }
@@ -130,13 +134,8 @@ private:
     std::string target() const;
     void welcome(const JsonObject& m, std::int64_t now_us);
     void peer_event(const JsonObject& m, std::int64_t now_us);
-    void new_stream();
-    bool can_send() const { return conn_ == Conn::Open && welcomed_here_ && peer_ == Peer::Here; }
-    void transmit(std::int64_t now_us);
-    void send_message(MessageHeader::Kind kind, std::uint8_t flags, std::span<const std::uint8_t> payload,
-                      std::int64_t now_us);
+    bool can_send() const { return conn_ == Conn::Open && welcomed_here_ && friend_ == Peer::Here; }
     void send_settings();
-    void resend(std::int64_t now_us);
     void finish(LinkState state, std::string reason);
     void update_state();
 
@@ -151,13 +150,10 @@ private:
     bool welcomed_here_ = false;  // ...and the current connection has been welcomed
     bool guest_ = false;
     bool final_ = false;
-    Peer peer_ = Peer::None;
+    Peer friend_ = Peer::None;
     LinkStatus status_;
 
-    ReliableStream stream_;
-    std::uint64_t sent_high_ = 0;         // the stream sent so far, resends not counted again
-    std::vector<std::uint8_t> received_;  // for the game
-    std::vector<std::uint8_t> scratch_;   // a message being built
+    PeerStream peer_;  // the serial stream to and from the friend
 
     std::int64_t grace_us_ = 30'000'000;
     std::int64_t last_rx_us_ = 0;          // anything from the server
@@ -167,18 +163,6 @@ private:
     std::int64_t give_up_at_us_ = -1;
     std::int64_t backoff_us_ = 0;
     int failed_attempts_ = 0;
-
-    // Round trip: the friend's newest clock reading and when it arrived; the echo last measured.
-    std::uint32_t peer_ts_ = 0;
-    std::int64_t peer_ts_at_us_ = -1;
-    std::uint32_t last_echo_ = 0;
-    bool have_echo_ = false;
-
-    // Acknowledgements: when we must tell the friend how much has arrived (unless a message does first).
-    std::int64_t ack_due_us_ = -1;
-    std::int64_t resend_requested_us_ = -1;  // when we last asked the friend to resend
-    std::uint64_t resend_requested_at_ = 0;  // ...from this position
-    std::int64_t rewound_us_ = -1;           // when we last resent on the friend's request
 
     std::optional<RaceSettings> settings_;
     std::uint32_t settings_gen_ = 0;  // host: our newest; guest: the newest received

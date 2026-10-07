@@ -172,6 +172,25 @@ void RoomLink::close() {
     waker_->wake();
 }
 
+bool RoomLink::send_side(const std::string& text) {
+    {
+        std::lock_guard lock(state_mutex_);
+        if (!connected_.load() || status_.state != LinkState::Connected) {
+            return false;
+        }
+        side_out_.push_back(text);
+    }
+    waker_->wake();
+    return true;
+}
+
+std::vector<std::string> RoomLink::take_side() {
+    std::lock_guard lock(state_mutex_);
+    std::vector<std::string> out;
+    out.swap(side_in_);
+    return out;
+}
+
 void RoomLink::simulate_drop(int offline_ms) {
     drop_offline_ms_ = offline_ms;
     drop_ = true;
@@ -234,9 +253,11 @@ void RoomLink::run() {
             session.on_closed("The connection was dropped (test).", now_us());
         }
         std::optional<RaceSettings> new_settings;
+        std::vector<std::string> side;
         {
             std::lock_guard lock(state_mutex_);
             new_settings.swap(new_settings_);
+            side.swap(side_out_);
         }
         if (new_settings) {
             session.set_race_settings(*new_settings, now_us());
@@ -256,6 +277,16 @@ void RoomLink::run() {
             if (!open) {
                 session.on_closed(error, now_us());
             }
+        }
+
+        for (const auto& text : side) {
+            session.send_side(text, now_us());
+        }
+        side.clear();
+        session.take_side(side);
+        if (!side.empty()) {
+            std::lock_guard lock(state_mutex_);
+            side_in_.insert(side_in_.end(), side.begin(), side.end());
         }
 
         // The game's bytes, a burst at a time (Batching).

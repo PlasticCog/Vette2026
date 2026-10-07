@@ -306,7 +306,7 @@ void MessageHeader::append_to(std::vector<std::uint8_t>& out) const {
 }
 
 std::optional<MessageHeader> MessageHeader::decode(std::span<const std::uint8_t> message) {
-    if (message.size() < kSize || (message[0] != kData && message[0] != kAck)) {
+    if (message.size() < kSize || (message[0] != kData && message[0] != kAck && message[0] != kSide)) {
         return std::nullopt;
     }
     MessageHeader h;

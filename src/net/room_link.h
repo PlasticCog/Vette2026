@@ -79,6 +79,12 @@ public:
     // Leaves the room for good (a host's room closes; a guest's seat is freed). status(): Closed.
     void close();
 
+    // Side messages: short texts to the friend's game outside the serial stream (net/peer_stream.h), e.g.
+    // the offer of a direct connection (net/online.h). Sent once both are in the room (false before);
+    // lost if a connection drops on the way.
+    bool send_side(const std::string& text);
+    std::vector<std::string> take_side();
+
     // Testing: drops the connection as a network failure would (no goodbye), with the network gone for
     // `offline_ms` more; the link then reconnects.
     void simulate_drop(int offline_ms = 0);
@@ -108,6 +114,7 @@ private:
     LinkStatus status_;
     std::optional<RaceSettings> settings_;
     std::optional<RaceSettings> new_settings_;  // requested by set_race_settings()
+    std::vector<std::string> side_out_, side_in_;
     std::atomic<bool> connected_{false};
     std::atomic<bool> stop_{false};
     std::atomic<bool> drop_{false};

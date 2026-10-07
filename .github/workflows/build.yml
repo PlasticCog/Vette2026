@@ -59,8 +59,12 @@ jobs:
 
       - name: Configure
         shell: bash
+        env:
+          # The online server the game offers by default: a repository variable (Settings > Secrets and
+          # variables > Actions > Variables), e.g. wss://vette2026-relay.<name>.workers.dev; empty if unset.
+          VETTE_DEFAULT_SERVER: ${{ vars.VETTE_DEFAULT_SERVER }}
         run: |
-          extra=()
+          extra=("-DVETTE_DEFAULT_SERVER=${VETTE_DEFAULT_SERVER}")
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             # OpenSSL (online play's TLS) is linked in, so the program doesn't depend on the system's
             # libssl version; the trusted certificates are found at run time.
@@ -68,8 +72,8 @@ jobs:
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
             extra+=("-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0")
           fi
-          # SDL3 and libcurl are always built from source and linked statically: the packages need
-          # nothing installed.
+          # SDL3, libcurl, miniupnpc and libnatpmp are always built from source and linked statically: the
+          # packages need nothing installed.
           cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_DISABLE_FIND_PACKAGE_SDL3=ON "${extra[@]}"
 
       - name: Build
@@ -80,6 +84,8 @@ jobs:
         run: |
           # Tests that need the original game files skip themselves; none are in the repository.
           "$BUILD/vette_tests"
+          # Hosting and joining (net::OnlineLink) over the loopback interface.
+          "$BUILD/vette_online_tests"
 
       - name: Online play TLS check
         shell: bash
@@ -112,6 +118,8 @@ jobs:
           cp "$BUILD/_deps/ymfm-src/LICENSE" "$dist/licenses/ymfm.txt"
           cp "$BUILD/_deps/sdl3-src/LICENSE.txt" "$dist/licenses/SDL3.txt"
           cp "$BUILD/_deps/curl-src/COPYING" "$dist/licenses/curl.txt"
+          cp "$BUILD/_deps/miniupnpc-src/LICENSE" "$dist/licenses/miniupnpc.txt"
+          cp "$BUILD/_deps/natpmp-src/LICENSE" "$dist/licenses/libnatpmp.txt"
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             # OpenSSL is linked in on Linux: its copyright notice and the Apache License 2.0 text.
             { cat /usr/share/doc/libssl3/copyright 2>/dev/null || cat /usr/share/doc/libssl-dev/copyright

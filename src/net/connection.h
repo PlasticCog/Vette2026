@@ -15,27 +15,10 @@
 #include <vector>
 
 #include "net/protocol.h"
+#include "net/socket.h"
 #include "net/websocket.h"
 
 namespace vette::net {
-
-// Wakes a thread waiting in WebSocketConnection::wait() (a socket it can poll alongside the connection).
-class Waker {
-public:
-    Waker();
-    ~Waker();
-    Waker(const Waker&) = delete;
-    Waker& operator=(const Waker&) = delete;
-
-    void wake();
-    void drain();
-    std::uintptr_t handle() const { return read_; }
-    bool ok() const { return ok_; }
-
-private:
-    std::uintptr_t read_ = 0, write_ = 0;
-    bool ok_ = false;
-};
 
 struct ConnectOptions {
     std::string ca_file;  // extra trusted certificates (PEM): a test server's own CA. Normally empty.

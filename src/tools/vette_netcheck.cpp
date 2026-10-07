@@ -1,28 +1,33 @@
-// Online play check: creates or joins a room on the relay server, then sends test packets as a game
-// would and checks that the friend's arrive intact, printing round-trip times.
+// Online play check: hosts a race or joins one (net/online.h), then sends test packets as a game would
+// and checks that the friend's arrive intact, printing the route and round-trip times.
 //
-//   vette_netcheck [options] create            the host: prints the room code
-//   vette_netcheck [options] join VETTE-4KQ7   the guest
+//   vette_netcheck [options] host               a room code (with --server) and a direct code
+//   vette_netcheck [options] join CODE          a room code, a direct code or an invite link
+//   vette_netcheck stun                         this computer's internet address, by STUN
+//   vette_netcheck map [--seconds N]            opens the port on the router, shows what it did, removes it
 //
-// --server URL      the relay server (default ws://127.0.0.1:8787, `wrangler dev`)
-// --app V           VETTE! 2026's version in the hello (default 0.1.6); both sides must match
-// --game B          the original game's build in the hello (default "DOS 1.1"); both sides must match
+// --server URL      the relay server (default ws://127.0.0.1:8787, `wrangler dev`; "" for none)
+// --app V / --game B  versions in the hello (default 0.1.6 / "DOS 1.1"); both sides must match
 // --settings T      host: the race settings, key=value pairs separated by ';' (default improved_driving=1)
 // --set-at S:T      host: change the race settings S seconds after the friend joined
 // --seconds N       how long to send once connected (default 10)
-// --rate HZ         packets per second (default 30)
-// --size N          bytes per packet (default 50)
-// --drop-at S[:O]   drop the connection S seconds after connecting, as a network failure would, with
-//                   the network gone for O more seconds (repeatable); the link reconnects and the
-//                   stream must stay intact
+// --rate HZ / --size N  test packets (default 30 a second, 50 bytes)
+// --drop-at S[:O]   drop the connection S seconds after connecting, offline O more seconds (repeatable)
 // --wait N          host: how long to wait for the friend (default 120 s)
-// --ca FILE         extra trusted CA certificates (PEM), for a server with a self-made certificate
-// --proto N         the protocol version to claim (to see the server refuse it)
-// --code-file F     host: also write the room code to F
+// --no-room         host: no room code          --no-direct   host: no direct code
+// --no-upgrade      don't try going direct through a room (host or guest)
+// --port N          host: the port to listen on (default 26989)
+// --code-address A  host: make the direct code for address A (a LAN address, 127.0.0.1) instead of the
+//                   internet address: no router involved
+// --loopback        host: listen on loopback only
+// --offer A:P       host: offer this address for going direct through a room, instead of its own (repeatable;
+//                   e.g. an unreachable one, to see the fallback to the server)
+// --manual-forward  host: the port is forwarded on the router by hand
+// --ca FILE         extra trusted CA certificates for the server (PEM)
+// --code-file F     host: write the room code (else the direct code) to F;  --direct-code-file F: the direct code
 //
-// Each side's stream is a known sequence (byte i of the host's is a function of i, and the guest's
-// another), so the receiver checks every byte. Exit code: 0 intact, 1 couldn't connect or refused,
-// 2 the stream arrived damaged, 3 bad arguments.
+// Each side's stream is a known sequence, so the receiver checks every byte. Exit code: 0 intact, 1 couldn't
+// connect or was refused, 2 the stream arrived damaged, 3 bad arguments.
 
 #include <algorithm>
 #include <chrono>
@@ -35,16 +40,19 @@
 #include <thread>
 #include <vector>
 
-#include "net/room_link.h"
+#include "net/nat.h"
+#include "net/online.h"
+#include "net/port_mapper.h"
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
 using vette::net::LinkState;
-using vette::net::LinkStatus;
+using vette::net::OnlineLink;
+using vette::net::OnlineOptions;
+using vette::net::OnlineStatus;
 using vette::net::RaceSettings;
-using vette::net::RoomLink;
-using vette::net::RoomOptions;
+using vette::net::RouteStatus;
 
 std::uint8_t stream_byte(bool host_stream, std::uint64_t i) {
     const std::uint64_t x = i * 2654435761u + (host_stream ? 0x5A : 0xA5) + (i >> 9);
@@ -57,7 +65,7 @@ std::optional<RaceSettings> parse_settings(std::string text) {
 }
 
 int usage() {
-    std::fprintf(stderr, "usage: vette_netcheck [options] create | join CODE  (see the source for options)\n");
+    std::fprintf(stderr, "usage: vette_netcheck [options] host | join CODE | stun | map  (options: see the source)\n");
     return 3;
 }
 
@@ -69,19 +77,40 @@ double percentile(std::vector<double> v, double p) {
     return v[std::min(v.size() - 1, static_cast<std::size_t>(p * static_cast<double>(v.size() - 1) + 0.5))];
 }
 
+const char* state_name(RouteStatus::State s) {
+    switch (s) {
+    case RouteStatus::State::Off: return "off";
+    case RouteStatus::State::Starting: return "starting";
+    case RouteStatus::State::Ready: return "ready";
+    case RouteStatus::State::Failed: return "failed";
+    }
+    return "?";
+}
+
+std::string route_text(const char* name, const RouteStatus& r) {
+    std::string t = std::string(name) + " " + state_name(r.state);
+    if (!r.code.empty()) {
+        t += " " + r.code;
+    }
+    if (r.state == RouteStatus::State::Failed) {
+        t += ": " + r.reason + (r.suggestion.empty() ? "" : " [" + r.suggestion + "]");
+    }
+    return t;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    RoomOptions options;
+    OnlineOptions options;
     options.server_url = "ws://127.0.0.1:8787";
     options.app_version = "0.1.6";
     options.game_build = "DOS 1.1";
     std::string settings_text = "improved_driving=1";
     std::vector<std::pair<double, std::string>> set_at;
-    std::vector<std::pair<double, double>> drops;  // when, and how long offline
+    std::vector<std::pair<double, double>> drops;
     double seconds = 10, rate = 30, wait_s = 120;
     int size = 50;
-    std::string mode, code, code_file;
+    std::string mode, code, code_file, direct_code_file;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto value = [&]() -> std::string {
@@ -119,14 +148,30 @@ int main(int argc, char* argv[]) {
                                colon == std::string::npos ? 0.0 : std::atof(v.substr(colon + 1).c_str()));
         } else if (a == "--wait") {
             wait_s = std::atof(value().c_str());
+        } else if (a == "--no-room") {
+            options.room = false;
+        } else if (a == "--no-direct") {
+            options.direct_code = false;
+        } else if (a == "--no-upgrade") {
+            options.go_direct = false;
+        } else if (a == "--port") {
+            options.port = static_cast<std::uint16_t>(std::atoi(value().c_str()));
+        } else if (a == "--code-address") {
+            options.code_address = value();
+        } else if (a == "--offer") {
+            options.offer_endpoints.push_back(value());
+        } else if (a == "--loopback") {
+            options.loopback_only = true;
+        } else if (a == "--manual-forward") {
+            options.manual_port_forward = true;
         } else if (a == "--ca") {
             options.ca_file = value();
-        } else if (a == "--proto") {
-            options.protocol = std::atoi(value().c_str());
         } else if (a == "--code-file") {
             code_file = value();
-        } else if (a == "create" && mode.empty()) {
-            mode = a;
+        } else if (a == "--direct-code-file") {
+            direct_code_file = value();
+        } else if ((a == "host" || a == "create" || a == "stun" || a == "map") && mode.empty()) {
+            mode = a == "create" ? "host" : a;
         } else if (a == "join" && mode.empty()) {
             mode = a;
             code = value();
@@ -137,6 +182,38 @@ int main(int argc, char* argv[]) {
     if (mode.empty()) {
         return usage();
     }
+
+    if (mode == "stun") {
+        const auto ip = vette::net::stun_public_ipv4();
+        std::printf("STUN: %s\n", ip ? vette::net::format_ipv4(*ip).c_str() : "no answer");
+        return ip ? 0 : 1;
+    }
+    if (mode == "map") {
+        std::printf("port mapping %s in this build\n", vette::net::PortMapper::available() ? "available" : "NOT available");
+        auto mapper = std::make_unique<vette::net::PortMapper>(options.port, options.manual_port_forward);
+        std::optional<vette::net::PortMapper::Result> r;
+        while (!(r = mapper->result())) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        std::printf("%s", r->mapping.log.c_str());
+        std::printf("method: %s, router's address: %s, LAN address: %s, external port %u\n",
+                    vette::net::to_string(r->mapping.method),
+                    r->mapping.router_ip ? vette::net::format_ipv4(r->mapping.router_ip).c_str() : "unknown",
+                    r->mapping.lan_ip.c_str(), r->mapping.external_port);
+        std::printf("STUN: %s\n", r->stun_ip ? vette::net::format_ipv4(*r->stun_ip).c_str() : "no answer");
+        if (r->reachability.ok()) {
+            std::printf("reachable at %s:%u\n", vette::net::format_ipv4(r->reachability.public_ip).c_str(),
+                        r->reachability.public_port);
+        } else {
+            std::printf("not reachable: %s\n  suggestion: %s\n", r->reachability.reason.c_str(),
+                        r->reachability.suggestion.c_str());
+        }
+        std::this_thread::sleep_for(std::chrono::duration<double>(std::min(seconds, 60.0)));
+        mapper.reset();
+        std::printf("mapping removed\n");
+        return 0;
+    }
+
     const auto initial = parse_settings(settings_text);
     if (!initial) {
         std::fprintf(stderr, "bad --settings: %s\n", settings_text.c_str());
@@ -146,77 +223,101 @@ int main(int argc, char* argv[]) {
 
     const auto t0 = Clock::now();
     auto since = [&](Clock::time_point t) { return std::chrono::duration<double>(t - t0).count(); };
-    auto log = [&](const char* fmt, auto... args) {
-        std::printf("[%7.3f] ", since(Clock::now()));
-        std::printf(fmt, args...);
-        std::printf("\n");
+    auto log = [&](const std::string& text) {
+        std::printf("[%7.3f] %s\n", since(Clock::now()), text.c_str());
         std::fflush(stdout);
     };
 
-    auto link = mode == "create" ? RoomLink::create_room(options) : RoomLink::join_room(options, code);
-    const bool host = mode == "create";
+    const bool host = mode == "host";
+    auto link = host ? OnlineLink::host(options) : OnlineLink::join(options, code);
 
-    LinkStatus last;
-    last.state = static_cast<LinkState>(-1);
+    std::string last_line, last_room, last_direct, last_invite;
     std::uint32_t last_gen = 0;
     std::uint64_t last_samples = 0;
     std::vector<double> rtts;
     std::uint64_t sent = 0, received = 0, damaged = 0;
-    bool settings_before_stream = false;
     std::optional<Clock::time_point> connected_at;
     Clock::time_point next_packet = Clock::now(), next_report = Clock::now();
     std::size_t next_drop = 0, next_set = 0;
     std::sort(drops.begin(), drops.end());
     std::vector<std::uint8_t> packet(static_cast<std::size_t>(size)), in(4096);
     int exit_code = 0;
+    OnlineStatus st;
 
     for (;;) {
         const auto now = Clock::now();
-        const LinkStatus st = link->status();
-        if (st.state != last.state || st.reason != last.reason) {
-            if (st.state == LinkState::Waiting) {
-                log("waiting for the friend: room %s", st.code.c_str());
-                if (!code_file.empty()) {
-                    std::ofstream(code_file) << st.code << "\n";
-                }
-            } else {
-                log("%s%s%s", vette::net::to_string(st.state), st.reason.empty() ? "" : ": ", st.reason.c_str());
-            }
-            if (st.state == LinkState::Connected && !connected_at) {
-                connected_at = now;
-                next_packet = next_report = now;
+        st = link->status();
+        const std::string line = std::string(vette::net::to_string(st.state)) +
+                                 (st.route != vette::net::Route::None ? std::string(" (") + to_string(st.route) + ")" : "") +
+                                 (st.activity.empty() ? "" : ": " + st.activity) +
+                                 (st.reason.empty() ? "" : " | " + st.reason) +
+                                 (st.suggestion.empty() ? "" : " [" + st.suggestion + "]");
+        if (line != last_line) {
+            log(line);
+            last_line = line;
+        }
+        const std::string room = route_text("room", st.room), direct = route_text("direct", st.direct);
+        if (room != last_room && st.room.state != RouteStatus::State::Off) {
+            log(room);
+            if (!code_file.empty() && st.room.state == RouteStatus::State::Ready) {
+                std::ofstream(code_file) << st.room.code << "\n";
             }
         }
-        if (st.settings_gen != last_gen) {
+        if (direct != last_direct && st.direct.state != RouteStatus::State::Off) {
+            log(direct + (st.direct.detail.empty() ? "" : " (" + st.direct.detail + ")"));
+            if (!st.direct.log.empty() && st.direct.state != RouteStatus::State::Starting) {
+                std::printf("%s", st.direct.log.c_str());
+            }
+            if (st.direct.state == RouteStatus::State::Ready) {
+                if (!direct_code_file.empty()) {
+                    std::ofstream(direct_code_file) << st.direct.code << "\n";
+                }
+                if (!code_file.empty() && st.room.state == RouteStatus::State::Off) {
+                    std::ofstream(code_file) << st.direct.code << "\n";
+                }
+            }
+        }
+        last_room = room;
+        last_direct = direct;
+        if (host) {
+            const std::string invite = link->invite_url();
+            if (invite != last_invite && !invite.empty()) {
+                log("invite: " + invite);
+                last_invite = invite;
+            }
+        }
+        if (st.link.settings_gen != last_gen && st.state == LinkState::Connected) {
             const auto s = link->race_settings();
             std::string text = s ? s->serialize() : "";
             std::replace(text.begin(), text.end(), '\n', ';');
-            log("race settings (generation %u): %s", st.settings_gen, text.c_str());
-            last_gen = st.settings_gen;
+            log("race settings (generation " + std::to_string(st.link.settings_gen) + "): " + text);
+            last_gen = st.link.settings_gen;
         }
-        if (st.rtt_samples > last_samples) {  // the latest measurement (polled every millisecond)
-            last_samples = st.rtt_samples;
-            rtts.push_back(st.rtt_last_ms);
+        if (st.link.rtt_samples > last_samples) {
+            last_samples = st.link.rtt_samples;
+            rtts.push_back(st.link.rtt_last_ms);
         }
-        last = st;
         if (st.state == LinkState::Failed || st.state == LinkState::Closed ||
             (st.state == LinkState::PeerLeft && (!host || connected_at))) {
             exit_code = connected_at ? 0 : 1;
             break;
         }
         if (!connected_at && since(now) > wait_s) {
-            log("nobody joined within %.0f s", wait_s);
+            log("nobody joined in time");
             exit_code = 1;
             break;
         }
-
-        // Receive and check the friend's stream.
-        for (std::size_t n; (n = link->receive(in)) > 0;) {
-            if (received == 0 && !host) {
-                settings_before_stream = link->race_settings().has_value() && st.settings_gen > 0;
-                log("first serial byte; the race settings were there before it: %s",
-                    settings_before_stream ? "yes" : "NO");
+        if (st.state == LinkState::Connected && !connected_at) {
+            connected_at = now;
+            next_packet = next_report = now;
+            if (!host) {
+                const auto s = link->race_settings();
+                log(std::string("race settings before the first serial byte: ") +
+                    (s ? "yes (" + s->serialize() + ")" : "NO"));
             }
+        }
+
+        for (std::size_t n; (n = link->receive(in)) > 0;) {
             for (std::size_t i = 0; i < n; ++i, ++received) {
                 if (in[i] != stream_byte(!host, received)) {
                     ++damaged;
@@ -230,13 +331,13 @@ int main(int argc, char* argv[]) {
                 break;
             }
             if (next_drop < drops.size() && t >= drops[next_drop].first) {
-                log("dropping the connection (test), offline for %.1f s", drops[next_drop].second);
+                log("dropping the connection (test), offline for " + std::to_string(drops[next_drop].second) + " s");
                 link->simulate_drop(static_cast<int>(drops[next_drop].second * 1000));
                 ++next_drop;
             }
             if (host && next_set < set_at.size() && t >= set_at[next_set].first) {
                 if (auto s = parse_settings(set_at[next_set].second)) {
-                    log("host changes the race settings to %s", set_at[next_set].second.c_str());
+                    log("host changes the race settings to " + set_at[next_set].second);
                     link->set_race_settings(*s);
                 }
                 ++next_set;
@@ -252,20 +353,19 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (now >= next_report) {
-                log("sent %llu B, received %llu B%s, rtt %.1f ms (last %.1f), server %.1f ms, messages %llu/%llu, "
-                    "resent %llu B",
-                    static_cast<unsigned long long>(st.bytes_sent), static_cast<unsigned long long>(received),
-                    damaged ? " DAMAGED" : " intact", st.rtt_ms, st.rtt_last_ms, st.server_rtt_ms,
-                    static_cast<unsigned long long>(st.messages_sent),
-                    static_cast<unsigned long long>(st.messages_received),
-                    static_cast<unsigned long long>(st.bytes_resent));
+                char buf[256];
+                std::snprintf(buf, sizeof buf, "sent %llu B, received %llu B%s, rtt %.2f ms (last %.2f), messages %llu/%llu",
+                              static_cast<unsigned long long>(st.link.bytes_sent),
+                              static_cast<unsigned long long>(received), damaged ? " DAMAGED" : " intact", st.rtt_ms,
+                              st.link.rtt_last_ms, static_cast<unsigned long long>(st.link.messages_sent),
+                              static_cast<unsigned long long>(st.link.messages_received));
+                log(buf);
                 next_report += std::chrono::seconds(1);
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    // Let the last bytes arrive, then leave.
     if (connected_at && exit_code == 0) {
         const auto until = Clock::now() + std::chrono::milliseconds(1500);
         while (Clock::now() < until) {
@@ -279,25 +379,23 @@ int main(int argc, char* argv[]) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
-    const LinkStatus st = link->status();
+    st = link->status();
     link->close();
     link.reset();
 
-    std::printf("\nrole %s, room %s, final state: %s%s%s\n", host ? "host" : "guest", st.code.c_str(),
-                vette::net::to_string(st.state), st.reason.empty() ? "" : ": ", st.reason.c_str());
-    std::printf("stream out: %llu bytes in %llu messages (%llu bytes resent); in: %llu bytes, %s\n",
-                static_cast<unsigned long long>(st.bytes_sent), static_cast<unsigned long long>(st.messages_sent),
-                static_cast<unsigned long long>(st.bytes_resent), static_cast<unsigned long long>(received),
+    std::printf("\nrole %s, route %s, final state: %s%s%s\n", host ? "host" : "guest",
+                st.route == vette::net::Route::None ? "none" : to_string(st.route), vette::net::to_string(st.state),
+                st.reason.empty() ? "" : ": ", st.reason.c_str());
+    std::printf("stream out: %llu bytes in %llu messages (%llu resent); in: %llu bytes, %s\n",
+                static_cast<unsigned long long>(st.link.bytes_sent),
+                static_cast<unsigned long long>(st.link.messages_sent),
+                static_cast<unsigned long long>(st.link.bytes_resent), static_cast<unsigned long long>(received),
                 damaged ? "DAMAGED" : "every byte intact and in order");
-    std::printf("reconnects: %d; race settings generation %u\n", st.reconnects, st.settings_gen);
+    std::printf("reconnects: %d; race settings generation %u\n", st.link.reconnects, st.link.settings_gen);
     if (!rtts.empty()) {
-        std::printf("round trip to the friend's client and back through the relay (%zu samples): min %.2f, "
-                    "median %.2f, p95 %.2f, max %.2f ms\n",
+        std::printf("round trip to the friend's game (%zu samples): min %.2f, median %.2f, p95 %.2f, max %.2f ms\n",
                     rtts.size(), *std::min_element(rtts.begin(), rtts.end()), percentile(rtts, 0.5),
                     percentile(rtts, 0.95), *std::max_element(rtts.begin(), rtts.end()));
-    }
-    if (st.server_rtt_ms >= 0) {
-        std::printf("round trip to the server (ping): %.2f ms\n", st.server_rtt_ms);
     }
     if (damaged) {
         return 2;

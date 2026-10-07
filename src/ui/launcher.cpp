@@ -15,6 +15,7 @@
 #include "core/path_utf8.h"
 #include "platform/gamepad.h"
 #include "platform/presenter.h"
+#include "platform/url_scheme.h"
 #include "ui/canvas.h"
 #include "ui/online.h"
 #include "ui/text.h"
@@ -478,6 +479,13 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
                 if (e.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH)
                     done = activate(selected, 1);
+                break;
+            case SDL_EVENT_DROP_FILE:  // macOS: an invite link opened while the menu is up
+                if (e.drop.data && is_invite_link(e.drop.data) && game && online && online_available() &&
+                    run_online(presenter, gamepad, s, *game, *online, e.drop.data)) {
+                    choice = LaunchChoice::Online;
+                    done = true;
+                }
                 break;
             default:
                 break;

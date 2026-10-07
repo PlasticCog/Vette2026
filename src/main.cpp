@@ -34,8 +34,9 @@
 #include "sound/sfx_bank.h"
 #include "ui/launcher.h"
 #include "ui/online.h"
+#include "platform/url_scheme.h"
 #ifdef VETTE_ONLINE
-#include "net/room_link.h"
+#include "net/online.h"
 #endif
 
 #include <SDL3/SDL.h>
@@ -191,6 +192,7 @@ struct Options {
     std::optional<std::string> online_server;
     bool online_host = false;
     std::optional<std::string> online_join;  // the code
+    std::optional<std::string> invite;       // a vette2026:// link the game was opened with
     // The development link (--link-*).
     std::optional<std::uint16_t> link_listen;
     std::optional<std::string> link_connect;  // host:port
@@ -199,6 +201,8 @@ struct Options {
     bool link_manual = false;
 
     void apply_to(Settings& s) const {
+        if (online_server)
+            s.online_server = *online_server;
         if (frame_rate)
             s.frame_rate = *frame_rate;
         if (pc)
@@ -242,6 +246,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
             opts.joystick = arg == "--joystick";
         } else if (arg == "--manual-check") {
             opts.manual_check = true;
+        } else if (is_invite_link(arg)) {  // opened from an invite link (Windows, Linux)
+            opts.invite = std::string(arg);
         } else if (arg == "--online-server" && has_value) {
             opts.online_server = argv[++i];
         } else if (arg == "--online-host") {
@@ -870,15 +876,15 @@ struct OnlineRace final : TwoPlayerLink {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Online race: %s", start->error().c_str());
 #ifdef VETTE_ONLINE
         const std::uint64_t now = SDL_GetTicksNS();
-        if (window && session.room && now >= next_title_ns) {
+        if (window && session.online && now >= next_title_ns) {
             next_title_ns = now + 1'000'000'000;
-            const net::LinkStatus st = session.room->status();
-            std::string title = std::string(kAppName) + " - online race " + st.code + ": ";
+            const net::OnlineStatus st = session.online->status();
+            std::string title = std::string(kAppName) + " - online race: ";
             switch (st.state) {
             case net::LinkState::Connected:
-                title += "racing your friend";
+                title += std::string("racing your friend, ") + net::to_string(st.route);
                 if (st.rtt_ms >= 0)
-                    title += " (" + std::to_string(static_cast<int>(st.rtt_ms + 0.5)) + " ms)";
+                    title += ", " + std::to_string(static_cast<int>(st.rtt_ms + 0.5)) + " ms";
                 break;
             case net::LinkState::Reconnecting: title += "reconnecting..."; break;
             case net::LinkState::PeerAway: title += "your friend's connection dropped"; break;
@@ -1120,9 +1126,31 @@ int run(int argc, char** argv) {
         presenter.set_depth_buffer(settings.depth_buffer);
         Gamepad gamepad;
 
-        // The launch menu: when it's switched on, or to let the player find the game files.
+        // An invite link: on macOS it comes as an event shortly after the start (SDL: a dropped "file").
+        std::optional<std::string> invite = opts->invite;
+#ifdef __APPLE__
+        for (const std::uint64_t until = SDL_GetTicksNS() + 500'000'000; !invite && SDL_GetTicksNS() < until;) {
+            SDL_Event e;
+            while (SDL_PollEvent(&e)) {
+                if (e.type == SDL_EVENT_DROP_FILE && e.drop.data && is_invite_link(e.drop.data))
+                    invite = std::string(e.drop.data);
+                else if (e.type == SDL_EVENT_QUIT)
+                    return 0;
+            }
+            SDL_Delay(10);
+        }
+#endif
+        // The launch menu: when it's switched on, or to let the player find the game files. Opened with
+        // an invite link, the game goes straight to joining that race (and to the menu if that's cancelled).
         ui::OnlineSession online;  // set when the player chose an online race
-        if (opts->launcher.value_or(settings.show_launcher) || !game) {
+        if (invite && game && ui::online_available()) {
+            SDL_Log("Invite: %s", invite->c_str());
+            if (!ui::run_online(presenter, gamepad, settings, *game, online, *invite) && !online.link &&
+                ui::run_launcher(presenter, gamepad, settings, game, search, &online) == ui::LaunchChoice::Quit)
+                return 0;
+            if (!save_settings(settings_file, settings))
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't save %s", path_to_utf8(settings_file).c_str());
+        } else if (opts->launcher.value_or(settings.show_launcher) || !game) {
             if (ui::run_launcher(presenter, gamepad, settings, game, search, &online) == ui::LaunchChoice::Quit)
                 return 0;
             if (!save_settings(settings_file, settings))

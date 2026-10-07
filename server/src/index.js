@@ -12,8 +12,11 @@
 // messages are relayed to the other player unchanged and in order; the server never looks inside
 // them. Text "ping" is answered "pong" by the runtime without waking the room. The full protocol is
 // in README.md. A room keeps its state only while it's open: closing it deletes everything.
+//
+// It also serves invite links, /join/<CODE> and /direct/<CODE>: a page that opens the game (invite.js).
 
 import { DurableObject } from "cloudflare:workers";
+import { invitePage } from "./invite.js";
 
 const PROTOCOL = 1;
 
@@ -120,8 +123,12 @@ export default {
       return await handle(request, env);
     } catch {
       // A Durable Object call failed: most likely the free plan's daily allowance is used up.
-      return refuse("busy", "The online server can't take the connection right now (it may have used " +
-                            "up today's free allowance, which resets at midnight UTC). Try again later.");
+      const why = "The online server can't take the connection right now (it may have used up today's " +
+                  "free allowance, which resets at midnight UTC). Try again later.";
+      if ((request.headers.get("Upgrade") ?? "").toLowerCase() === "websocket") {
+        return refuse("busy", why);
+      }
+      return new Response(`${why}\n`, { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } });
     }
   },
 };
@@ -133,6 +140,16 @@ async function handle(request, env) {
   if (parts.length === 0) {
     return new Response(`VETTE! 2026 relay server, protocol ${PROTOCOL}.\n`,
                         { headers: { "content-type": "text/plain; charset=utf-8" } });
+  }
+  if ((parts[0] === "join" || parts[0] === "direct") && parts.length === 2 &&
+      (request.method === "GET" || request.method === "HEAD")) {
+    let code = parts[1];
+    try {
+      code = decodeURIComponent(code);
+    } catch {
+      // not a valid escape: the page says the link doesn't work
+    }
+    return invitePage(parts[0], code);
   }
   const op = parts[1];
   if (parts[0] !== "v1" || !["create", "join", "resume"].includes(op) ||

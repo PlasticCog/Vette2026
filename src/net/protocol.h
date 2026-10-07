@@ -55,7 +55,8 @@ private:
 };
 
 // --- The header on every binary message between the two games --------------------------------------
-// Little-endian, 24 bytes, then (for data) the serial bytes. The server relays these unchanged.
+// Little-endian, 24 bytes, then (for data) the serial bytes. The server relays these unchanged; a
+// direct connection carries the same messages (net/direct.h).
 //
 // Each game's serial output is one byte stream; `offset` places a data message's bytes in it and `ack`
 // tells the other game how much of its stream has arrived. After a reconnect, each side resends what
@@ -65,7 +66,9 @@ private:
 // `ts_us` it has received from the other game (`echo_ts_us`), and how long ago that arrived
 // (`echo_hold_us`). The other game's RTT is then its clock now, minus `echo_ts_us`, minus the hold.
 struct MessageHeader {
-    enum Kind : std::uint8_t { kData = 1, kAck = 2 };
+    // Data: serial bytes at `offset`. Ack: no payload (acknowledges, asks for a resend). Side: a short
+    // text outside the stream (net/peer_stream.h).
+    enum Kind : std::uint8_t { kData = 1, kAck = 2, kSide = 3 };
     static constexpr std::size_t kSize = 24;
     static constexpr std::uint8_t kResend = 1;  // flag: data from `ack` on is missing; send it again
     static constexpr std::uint32_t kNoEcho = 0xFFFFFFFF;

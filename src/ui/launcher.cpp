@@ -31,7 +31,7 @@ namespace vette::ui {
 namespace {
 
 enum Row {
-    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kDriving, kLaneCentering, kTraffic, kMap, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
+    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kDriving, kLaneCentering, kTraffic, kFreeways, kMap, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
     kPlay, kOnline, kQuit, kRows
 };
 
@@ -57,6 +57,7 @@ const char* label(int row) {
     case kDriving: return "Driving";
     case kLaneCentering: return "Lane centering";
     case kTraffic: return "Freeway traffic";
+    case kFreeways: return "Freeways";
     case kMap: return "Map";
     case kGraphics: return "Graphics";
     case kEffects: return "Sound effects";
@@ -115,6 +116,7 @@ std::string value(int row, const Settings& s, const GameDirSearch& search, const
     case kDriving: return s.improved_driving ? "Improved (drifts, jumps)" : "Original";
     case kLaneCentering: return s.lane_centering ? "On (slight)" : "Off";
     case kTraffic: return s.smooth_traffic ? "Smooth (no pop-in)" : "Original";
+    case kFreeways: return s.freeways ? "On (original)" : "Off (one connected city)";
     case kMap: return s.map_name.empty() ? "Original" : s.map_name;
     case kDepthBuffer:
         return !s.depth_buffer ? "Off (original order)" : x.depth_buffer ? "On" : "On - not available here";
@@ -184,6 +186,11 @@ std::string_view help(int row, const Settings& s) {
                    ? "Your car drifts a little through fast corners, and flies over the crest of a hill when "
                      "it's going fast enough."
                    : "The original's driving.";
+    case kFreeways:
+        return s.freeways ? "The original's freeways, the only way between the city's parts: drive onto an on-ramp "
+                            "and you're on one."
+                          : "No freeways: roads join the city's parts instead, and you (and the computer's car) drive "
+                            "the whole city on its streets.";
     case kMap:
         return "The city you race in: the original, or a map made in the map editor. Enter opens the map "
                "editor on the map shown here.";
@@ -255,17 +262,26 @@ std::string_view help(int row, const Settings& s) {
 // Where everything goes on a canvas of the given size.
 struct Layout {
     int margin, pitch, list_y, actions_y, status_y, rule_y, help_y, hints_y;
+    int status_lines = 3;  // the versions found: a line each, or all on one when the height is short
 
     explicit Layout(int height) {
         margin = 16;
         list_y = 56;
+        // Short of room for the rows at their closest: the versions on one line, then the list higher.
+        const auto fits = [&](int lines, int top) {
+            return top + (kRows + 1) * 9 + lines * kStatusPitch + 2 + 8 + 3 * 12 + 20 <= height;
+        };
+        if (!fits(3, list_y)) {
+            status_lines = 1;
+            if (!fits(1, list_y)) list_y = 44;
+        }
         // Rows as far apart as the height allows (9 to 14 pixels), with room below them for the
         // versions found, the help (3 lines) and the key hints.
-        const int below = 3 * kStatusPitch + 2 + 8 + 3 * 12 + 20;
+        const int below = status_lines * kStatusPitch + 2 + 8 + 3 * 12 + 20;
         pitch = std::clamp((height - list_y - below) / (kRows + 1), 9, 14);
         actions_y = list_y + kPlay * pitch + pitch / 2;
         status_y = actions_y + (kRows - kPlay) * pitch + pitch / 2;
-        rule_y = status_y + 3 * kStatusPitch + 2;  // a line per version
+        rule_y = status_y + status_lines * kStatusPitch + 2;
         help_y = rule_y + 8;
         hints_y = height - 14;
     }
@@ -360,6 +376,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
         case kDriving: s.improved_driving = !s.improved_driving; break;
         case kLaneCentering: s.lane_centering = !s.lane_centering; break;
         case kTraffic: s.smooth_traffic = !s.smooth_traffic; break;
+        case kFreeways: s.freeways = !s.freeways; break;
         case kMap: {
             // The original, then the maps saved, in a ring.
             std::vector<std::string> maps = list_maps(maps_dir);
@@ -600,12 +617,26 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
             else
                 canvas.text(m + label_w * kGlyph, y, "not found", kDim);
         };
-        if (!status.empty())
+        if (!status.empty()) {
             canvas.text(m, lay.status_y, fit_left(status, line_chars), kBad);
-        else
+        } else if (lay.status_lines == 1) {
+            // All on one line: which versions are there.
+            std::string found = std::string(game ? "DOS" : "");
+            const auto add = [&](bool there, const char* name) {
+                if (there) found += (found.empty() ? "" : ", ") + std::string(name);
+            };
+            add(search.versions.pc98.has_value(), "PC-98");
+            add(search.versions.mac.has_value(), "Macintosh");
+            canvas.text(m, lay.status_y, "Versions", kLabel);
+            canvas.text(m + label_w * kGlyph, lay.status_y, fit_left(found.empty() ? "none" : found, line_chars - label_w),
+                        found.empty() ? kDim : kGood);
+        }
+        if (status.empty() && lay.status_lines == 3)
             version_line(0, "DOS", game ? std::optional{game->root()} : std::nullopt, "");
-        version_line(1, "PC-98", search.versions.pc98, search.versions.pc98_what);
-        version_line(2, "Macintosh", search.versions.mac, search.versions.mac_what);
+        if (lay.status_lines == 3) {
+            version_line(1, "PC-98", search.versions.pc98, search.versions.pc98_what);
+            version_line(2, "Macintosh", search.versions.mac, search.versions.mac_what);
+        }
         canvas.fill_rect(m, lay.rule_y, canvas.width - 2 * m, 1, kRule);
         const std::vector<std::string> lines = wrap(help(selected, s), line_chars);
         for (size_t i = 0; i < lines.size() && i < 3; ++i)

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(vette2026 VERSION 0.2.0 LANGUAGES C CXX)
+project(vette2026 VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -330,7 +330,7 @@ vette_tool(vette_link vette_game)
 # Differential fuzzer: calls each native port with random inputs under Verify mode.
 vette_tool(vette_fuzz vette_game)
 # World extraction tool: dumps the Enhanced world model and validates it against the original.
-vette_tool(vette_world vette_enhanced vette_core)
+vette_tool(vette_world vette_enhanced vette_game vette_core)
 # The other versions' files: Mac resources and sounds, PC-98 disk files and FM sound, art.
 vette_tool(vette_mac vette_sound)
 vette_tool(vette_pc98 vette_sound)

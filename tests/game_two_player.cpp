@@ -41,7 +41,11 @@ TEST(two_player_setup_text) {
     const auto back = TwoPlayerSetup::decode(s.encode());
     CHECK(back && back->course == 3 && back->improved_driving);
     const auto later = TwoPlayerSetup::decode("vette2p/1 improved=0 course=2 weather=7");  // unknown keys: ignored
-    CHECK(later && later->course == 2 && !later->improved_driving);
+    CHECK(later && later->course == 2 && !later->improved_driving && later->freeways);
+    s.freeways = false;
+    CHECK(s.encode() == "vette2p/1 course=3 improved=1 freeways=0");
+    const auto no_freeways = TwoPlayerSetup::decode(s.encode());
+    CHECK(no_freeways && !no_freeways->freeways);
     CHECK(!TwoPlayerSetup::decode("vette2p/2 course=1"));
     CHECK(!TwoPlayerSetup::decode("vette2p/1 course=9"));
     CHECK(!TwoPlayerSetup::decode("vette2p/1 improved=1"));

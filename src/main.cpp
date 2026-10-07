@@ -12,6 +12,7 @@
 #include "game/driving.h"
 #include "game/options.h"
 #include "game/city_map.h"
+#include "game/no_freeways.h"
 #include "game/smooth.h"
 #include "game/two_player.h"
 #include "game/x86.h"
@@ -110,6 +111,7 @@ constexpr const char* kUsage =
     "  --freeway-traffic smooth   (default) new freeway cars come at the far end of the road and fade in\n"
     "                       and out; original: they appear a few hundred yards ahead and vanish far off\n"
     "  --map NAME           play a map made in the map editor (original: the original's city)\n"
+    "  --freeways off       no freeways: roads join the city's parts, driven as one city (default on)\n"
     "  --scaling sharp      (default) the pictures simply enlarged, every pixel a solid block; smooth:\n"
     "                       the edges between pixels softened\n"
     "  --graphics dos       (default) the DOS screens; pc98 or mac: that version's art in their place\n"
@@ -215,6 +217,7 @@ struct Options {
     std::optional<bool> lane_centering;
     std::optional<bool> smooth_traffic;
     std::optional<std::string> map_name;
+    std::optional<bool> freeways;
     std::vector<ScriptedKey> keys;
     std::vector<ScriptedPress> presses;  // sorted by time
     std::vector<ScriptedPoke> pokes;     // sorted by time
@@ -270,6 +273,8 @@ struct Options {
             s.smooth_traffic = *smooth_traffic;
         if (map_name)
             s.map_name = *map_name == "original" ? std::string() : *map_name;
+        if (freeways)
+            s.freeways = *freeways;
     }
 };
 
@@ -338,6 +343,9 @@ std::optional<Options> parse_args(int argc, char** argv) {
         } else if (arg == "--lane-centering" && has_value && (std::string_view(argv[i + 1]) == "on" ||
                                                              std::string_view(argv[i + 1]) == "off")) {
             opts.lane_centering = std::string_view(argv[++i]) == "on";
+        } else if (arg == "--freeways" && has_value && (std::string_view(argv[i + 1]) == "on" ||
+                                                       std::string_view(argv[i + 1]) == "off")) {
+            opts.freeways = std::string_view(argv[++i]) == "on";
         } else if (arg == "--map" && has_value) {
             opts.map_name = argv[++i];
         } else if (arg == "--freeway-traffic" && has_value && (std::string_view(argv[i + 1]) == "smooth" ||
@@ -455,7 +463,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--graphics" || arg == "--scaling" ||
                                      arg == "--resolution" || arg == "--skyline" ||
                                      arg == "--depth-buffer" || arg == "--driving" || arg == "--lane-centering" ||
-                                     arg == "--freeway-traffic" || arg == "--map" ||
+                                     arg == "--freeway-traffic" || arg == "--map" || arg == "--freeways" ||
                                      arg == "--link-listen" || arg == "--link-connect" || arg == "--link-course" ||
                                      arg == "--link-delay" || arg == "--link-jitter" || arg == "--online-server" ||
                                      arg == "--online-join";
@@ -1394,6 +1402,11 @@ int run(int argc, char** argv) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Map %s: %s; the original instead",
                             settings.map_name.c_str(), error.c_str());
             }
+        }
+        // Without the freeways (after the map, which their roads go into); an online race as its host chose.
+        if (!(online.link ? online.setup.freeways : settings.freeways)) {
+            game::install_no_freeways(machine);
+            SDL_Log("Freeways: off (one connected city)");
         }
         SDL_Log("Saves: %s", path_to_utf8(config.save_dir).c_str());
         if (!settings.manual_check || online.link)  // (an online race's menus are driven: no question then)

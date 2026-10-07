@@ -222,7 +222,8 @@ size_t LinkPacer::receive(std::span<uint8_t> out) {
 // --- Setup ---------------------------------------------------------------------------------------------
 
 std::string TwoPlayerSetup::encode() const {
-    return "vette2p/1 course=" + std::to_string(course) + " improved=" + (improved_driving ? "1" : "0");
+    return "vette2p/1 course=" + std::to_string(course) + " improved=" + (improved_driving ? "1" : "0") +
+           (freeways ? "" : " freeways=0");
 }
 
 std::optional<TwoPlayerSetup> TwoPlayerSetup::decode(std::string_view text) {
@@ -251,6 +252,8 @@ std::optional<TwoPlayerSetup> TwoPlayerSetup::decode(std::string_view text) {
             course = true;
         } else if (key == "improved") {
             s.improved_driving = v != 0;
+        } else if (key == "freeways") {
+            s.freeways = v != 0;
         }  // other keys: from a later version, ignored
     }
     if (!course) {

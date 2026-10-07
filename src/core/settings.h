@@ -54,6 +54,9 @@ struct Settings {
     // shows (not out of nowhere a few hundred yards ahead), and with the long draw distance they fade in
     // and out. Off: the original's.
     bool smooth_traffic = true;
+    // The original's freeways; off: roads join the city's parts instead, and it's driven as one
+    // (game/no_freeways.h). Classic turns them back on.
+    bool freeways = true;
     // The city played: a map made in the map editor (ui/map_editor.h), by name; empty: the original.
     std::string map_name;
     Effects effects = Effects::AdLib;

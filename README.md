@@ -120,6 +120,16 @@ slow) and, in the Enhanced view, fades them in, and fades out a car the original
 on along the road. The traffic itself (speeds, lanes, how often cars come, collisions) is the original's.
 `--freeway-traffic original` turns it off for one run.
 
+**Freeways.** The original's city is in parts that only its freeways join: the Zoo and the Sunset, the
+central city, the Marina, the Bay Bridge's end of town and the Golden Gate (every course takes at least one
+freeway). With **Freeways: Off** the city is one: roads made of the original's own cells join the parts (a
+causeway up the coast from the Great Highway to the Golden Gate, the Golden Gate's deck carried on to the
+Marina, Golden Gate Park and the Marina opened into the central city, and the diagonal barrier before the
+Bay Bridge made a street), the on-ramps lead nowhere, and the computer opponent drives streets where its
+route took a freeway. Every course can be raced on the city's streets, and the opponent finishes each one
+(it's quicker than with the freeways). An online race uses the host's choice. `--freeways off` turns them
+off for one run; `vette_world --drivable [--no-freeways]` shows which parts of the city connect.
+
 **Map editor.** The launch menu's **Map** row picks the city you race in: the original, or a map of your
 own. Enter on it opens the map editor, which shows the whole city from above and lets you change it cell
 by cell with the original's own 161 cell types (streets, city blocks, parks, water, bridge pieces):

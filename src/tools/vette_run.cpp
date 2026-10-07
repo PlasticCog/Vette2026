@@ -39,6 +39,7 @@
 #include "game/driving.h"
 #include "game/natives.h"
 #include "game/x86.h"
+#include "game/no_freeways.h"
 #include "game/options.h"
 #include "game/smooth.h"
 #include "game/sound_events.h"
@@ -132,6 +133,9 @@ int main(int argc, char* argv[]) {
     bool sound_log = false;     // print the sound events
     bool improved_driving = false;
     bool driving_log = false;   // print the player's car every race frame
+    bool no_freeways = false;   // --freeways off (game/no_freeways.h)
+    bool opponent_log = false;  // print the computer opponent's place every second
+    uint64_t opponent_log_from_ms = 0;  // --opponent-log-from T: and every 0.1 s for 30 s from second T
     vette::game::DrivingTuning tuning;
 
     for (int i = 1; i < argc; ++i) {
@@ -207,6 +211,13 @@ int main(int argc, char* argv[]) {
             improved_driving = v == "improved";
         } else if (a == "--driving-log") {
             driving_log = true;
+        } else if (a == "--freeways" && has_value) {
+            no_freeways = std::string(argv[++i]) == "off";
+        } else if (a == "--opponent-log") {
+            opponent_log = true;
+        } else if (a == "--opponent-log-from" && has_value) {
+            opponent_log = true;
+            opponent_log_from_ms = static_cast<uint64_t>(std::atof(argv[++i]) * 1000);
         } else if (a == "--tune" && has_value) {
             const std::string v = argv[++i];
             const size_t eq = v.find('=');
@@ -242,6 +253,9 @@ int main(int argc, char* argv[]) {
     }
     if (idle_skip) {
         vette::game::install_idle_skip(machine);
+    }
+    if (no_freeways) {
+        vette::game::install_no_freeways(machine);
     }
     NativeRunner runner(machine);
     runner.set_report([](const std::string& msg) { std::printf("%s\n", msg.c_str()); });
@@ -316,6 +330,27 @@ int main(int argc, char* argv[]) {
         }
         machine.run_for(kNsPerMs);
         runner.poll();
+        if (opponent_log && ((ms + 1) % 1000 == 0 || (opponent_log_from_ms && ms >= opponent_log_from_ms &&
+                                                        ms < opponent_log_from_ms + 30000 && (ms + 1) % 100 == 0))) {
+            // The opponent (DS:2F09): its cell, speed and heading; on a freeway (DS:842B); the player's freeway
+            // state (DS:2AD4); the race's end (cs:3).
+            vette::host::Memory& m = machine.memory();
+            const auto w = [&m](uint16_t off) { return static_cast<int16_t>(vette::game::rd16(m, vette::game::kDataSeg, off)); };
+            const long x = static_cast<long>(w(0x2F2B)) * 0x8000 + static_cast<uint16_t>(w(0x2F09));
+            const long y = static_cast<long>(w(0x2F2D)) * 0x8000 + static_cast<uint16_t>(w(0x2F0B));
+            std::printf("opponent t=%4.0fs cell %5.1f,%5.1f speed %4d heading %3d freeway %s | player cell %5.1f,%5.1f "
+                        "freeway %d | waypoints %04X\n",
+                        static_cast<double>(machine.emulated_ns()) / 1e9, x / 2048.0, y / 2048.0, w(0x2F17), w(0x2F0F),
+                        vette::game::rd8(m, vette::game::kDataSeg, 0x842B) ? "yes" : "no",
+                        (static_cast<long>(w(0x2D57)) * 0x8000 + static_cast<uint16_t>(w(0x2D35))) / 2048.0,
+                        (static_cast<long>(w(0x2D59)) * 0x8000 + static_cast<uint16_t>(w(0x2D37))) / 2048.0,
+                        vette::game::rd8(m, vette::game::kDataSeg, 0x2AD4), static_cast<uint16_t>(w(0xFA22)));
+            if (opponent_log_from_ms)  // the route's state: the raw waypoint, the targets, the opponent's tile
+                std::printf("   tile %d,%d local %u,%u raw %u,%u target %u,%u next %u,%u\n", w(0x2F2B), w(0x2F2D),
+                            static_cast<uint16_t>(w(0x2F09)), static_cast<uint16_t>(w(0x2F0B)), static_cast<uint16_t>(w(0xFA24)),
+                            static_cast<uint16_t>(w(0xFA26)), static_cast<uint16_t>(w(0xFA2C)), static_cast<uint16_t>(w(0xFA2E)),
+                            static_cast<uint16_t>(w(0xFA34)), static_cast<uint16_t>(w(0xFA36)));
+        }
         if (sound) {
             sound_events.clear();
             sound->take(sound_events);

@@ -79,6 +79,7 @@ void Settings::apply(Preset p) {
         improved_driving = false;
         lane_centering = false;
         smooth_traffic = false;
+        freeways = true;
     } else if (p == Preset::Enhanced) {
         frame_rate = FrameRate::Smooth;
         pc = Pc::Fast;
@@ -106,6 +107,7 @@ std::string Settings::serialize() const {
     out << "improved_driving = " << kOnOff[improved_driving] << "\n";
     out << "lane_centering = " << kOnOff[lane_centering] << "\n";
     out << "smooth_traffic = " << kOnOff[smooth_traffic] << "\n";
+    out << "freeways = " << kOnOff[freeways] << "\n";
     out << "map = " << map_name << "\n";
     out << kEffects.key << " = " << kEffects.names[static_cast<size_t>(effects)] << "\n";
     out << kMusic.key << " = " << kMusic.names[static_cast<size_t>(music)] << "\n";
@@ -142,6 +144,7 @@ Settings Settings::parse(const std::string& text) {
         read_bool("improved_driving", kOnOff, key, value, s.improved_driving);
         read_bool("lane_centering", kOnOff, key, value, s.lane_centering);
         read_bool("smooth_traffic", kOnOff, key, value, s.smooth_traffic);
+        read_bool("freeways", kOnOff, key, value, s.freeways);
         if (key == "map")
             s.map_name = std::string(value);
         read(kEffects, key, value, s.effects);

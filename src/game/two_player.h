@@ -115,8 +115,10 @@ private:
 struct TwoPlayerSetup {
     int course = 1;                 // 1-3, or 4: the three in a row
     bool improved_driving = false;  // both games drive with the host's physics (game/driving.h)
+    bool freeways = true;           // false: the city as one, without them (game/no_freeways.h)
 
-    // "vette2p/1 course=1 improved=0": short, printable, versioned. decode() refuses other versions.
+    // "vette2p/1 course=1 improved=0", and " freeways=0" without them: short, printable, versioned.
+    // decode() refuses other versions.
     std::string encode() const;
     static std::optional<TwoPlayerSetup> decode(std::string_view text);
 };

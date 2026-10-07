@@ -47,6 +47,11 @@
 //                      prints the share it doesn't explain and writes the worst views per bridge
 // --bridge-view x,y,z,yaw,pitch   ... only that view of the sweep
 // --freeway-boxes      list the on-ramp collision boxes (3009:1A12-1AD8) and their cells
+// --drivable           where a car can drive and what connects (game/drivable.h): the regions, which
+//                      hold the courses' starts and finishes and the freeways' ramps and exits, and
+//                      drivable.png (each region in its colour over the map)
+// --no-freeways        with --drivable: the city with the no-freeway roads (game/no_freeways.h), and
+//                      the opponent's new roads walked: where they're blocked, which regions they cross
 // --poke T:OFF:VAL     write DS:OFF at second T (two hex digits: a byte, else a word), e.g. a freeway
 //                      route: --poke 39:2AD4:03 --poke 39:8156:0003
 // --shot T             save the displayed frame at second T (<label>_frame_T.png)
@@ -100,6 +105,9 @@
 #include "assets/png.h"
 #include "enhanced/backdrop.h"
 #include "enhanced/topdown.h"
+#include "game/city_map.h"
+#include "game/drivable.h"
+#include "game/no_freeways.h"
 #include "enhanced/world.h"
 #include "enhanced/world_probe.h"
 #include "enhanced/world_reference.h"
@@ -1638,6 +1646,7 @@ int main(int argc, char* argv[]) {
     config.start_time = vette::host::RealTime{1989, 10, 23, 12, 0, 0, 0};
     std::filesystem::path out_dir = "re/out/world";
     bool catalogue = false, map = false, manual_check = false, freeway_boxes = false, bridge_check = false;
+    bool drivable = false, no_freeways = false;
     double val_from = -1, val_to = -1, seconds = -1;
     int png_every = 0, dump_calls = -1;
     double png_over = 2.0;
@@ -1681,6 +1690,10 @@ int main(int argc, char* argv[]) {
             map = true;
         } else if (a == "--freeway-boxes") {
             freeway_boxes = true;
+        } else if (a == "--drivable") {
+            drivable = true;
+        } else if (a == "--no-freeways") {
+            no_freeways = true;
         } else if (a == "--bridge-check") {
             bridge_check = true;
         } else if (a == "--sky-views") {
@@ -1938,6 +1951,198 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+    }
+    if (drivable) {
+        std::string map_error;
+        auto city = vette::game::CityMap::read(machine.memory(), map_error);
+        if (!city) {
+            std::fprintf(stderr, "map: %s\n", map_error.c_str());
+            return 1;
+        }
+        if (no_freeways) {
+            vette::game::add_no_freeway_roads(*city);
+            // The picture and the cell list show the new cells too.
+            for (int cx = 0; cx < world.cells_x(); ++cx) {
+                for (int cy = 0; cy < world.cells_y(); ++cy) world.cells[static_cast<size_t>(cx * world.cells_y() + cy)] = {city->cell(cx, cy).type, city->cell(cx, cy).elevation};
+            }
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        const vette::game::DrivableMap dm = vette::game::find_drivable(machine.memory(), *city);
+        std::printf("drivable: %zu regions (%.0f ms)\n", dm.region_size.size(),
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        // Places of note: the courses' starts and finishes, the on-ramps, the freeways' exits (DS:75B4).
+        struct Place {
+            std::string what;
+            int32_t x, y;
+        };
+        std::vector<Place> places = {{"course 1 start (Zoo)", 4064, 4480},
+                                     {"course 1 finish (Vista Point)", 65 * 2048 + 1024, 2 * 2048 + 1024},
+                                     {"course 2 start (Vista Point)", 4 * 32768 + 4064, 4552},
+                                     {"course 2 finish (Bay Bridge east)", 18 * 2048 + 1024, 75 * 2048 + 1024},
+                                     {"course 3 start (Bay Bridge east)", 32768 + 6048, 4 * 32768 + 22912}};
+        auto& mem = machine.memory();
+        const auto d16 = [&](uint16_t off) { return static_cast<int16_t>(mem.read16(Cpu::linear(kData, off))); };
+        static const char* kRoutes[9] = {"doyle dr. m", "480", "280", "presidio", "central skyway", "embarcadero fwy",
+                                         "hwy 1", "doyle dr. l", "80"};
+        for (const vette::game::PlacedBox& b : vette::game::collision_boxes(mem, *city)) {
+            const int route = vette::game::freeway_ramp_route(b.box);
+            if (route >= 0)
+                places.push_back({std::string("on-ramp ") + kRoutes[route] + " (cell " + std::to_string(b.cx) + "," +
+                                      std::to_string(b.cy) + ")",
+                                  (b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2});
+        }
+        for (int route = 0; route < 9; ++route) {
+            const auto rec = static_cast<uint16_t>(d16(static_cast<uint16_t>(0x75B4 + 2 * route)));
+            const int32_t x = d16(static_cast<uint16_t>(rec + 6)) * 32768 + static_cast<uint16_t>(d16(rec));
+            const int32_t y = d16(static_cast<uint16_t>(rec + 8)) * 32768 + static_cast<uint16_t>(d16(static_cast<uint16_t>(rec + 2)));
+            places.push_back({std::string("exit ") + kRoutes[route] + " (cell " + std::to_string(x / 2048) + "," +
+                                  std::to_string(y / 2048) + ")",
+                              x, y});
+        }
+        if (no_freeways) {
+            // The opponent's roads: every 32 units along each, its region (-1: blocked).
+            int leg = 0;
+            for (const auto& road : vette::game::no_freeway_opponent_roads()) {
+                std::printf("opponent road %d:", leg++);
+                std::vector<int> seen;
+                int blocked = 0;
+                for (size_t k = 0; k + 1 < road.size(); ++k) {
+                    const auto [x0, y0] = road[k];
+                    const auto [x1, y1] = road[k + 1];
+                    const int n = std::max(1, static_cast<int>(std::max(std::abs(x1 - x0), std::abs(y1 - y0)) / 32));
+                    for (int i = 0; i <= n; ++i) {
+                        const int32_t x = x0 + (x1 - x0) * i / n, y = y0 + (y1 - y0) * i / n;
+                        const int g = dm.region_at(x, y);
+                        if (g < 0) {
+                            if (blocked++ < 6) std::printf(" BLOCKED at %d,%d (cell %d,%d)", x, y, x / 2048, y / 2048);
+                        } else if (std::find(seen.begin(), seen.end(), g) == seen.end()) {
+                            seen.push_back(g);
+                        }
+                    }
+                }
+                std::printf(" %d blocked samples; regions", blocked);
+                for (const int g : seen) std::printf(" %d", g);
+                std::printf("\n");
+            }
+        }
+        // A place's region: the nearest drivable sample within a cell.
+        const auto region_near = [&](int32_t x, int32_t y) {
+            for (int r = 0; r <= 2048; r += 32) {
+                for (int dx = -r; dx <= r; dx += 32) {
+                    for (const int dy : {-r, r}) {
+                        if (const int g = dm.region_at(x + dx, y + dy); g >= 0) return g;
+                        if (const int g = dm.region_at(x + dy, y + dx); g >= 0) return g;
+                    }
+                }
+            }
+            return -1;
+        };
+        for (size_t g = 0; g < dm.region_size.size() && g < 16; ++g) {
+            std::printf("region %zu: %.1f cells' worth\n", g, dm.region_size[g] * 32.0 * 32.0 / (2048.0 * 2048.0));
+            for (const Place& p : places) {
+                if (region_near(p.x, p.y) == static_cast<int>(g)) std::printf("    %s\n", p.what.c_str());
+            }
+        }
+        // The picture: the map, each region tinted, the boxes outlined (walls red, triggers yellow).
+        constexpr int kPpc = 32;  // pixels per cell
+        constexpr int kUnits = 2048 / kPpc;
+        en::TopDown td(world, kPpc);
+        td.render();
+        std::vector<uint32_t> img = td.pixels();
+        static constexpr uint32_t kTint[10] = {0x00FF00, 0xFF8000, 0x00C0FF, 0xFF00C0, 0xFFFF00,
+                                               0x8040FF, 0x00FFA0, 0xFF4040, 0x80FF00, 0x4080FF};
+        for (int v = 0; v < td.height(); ++v) {
+            for (int u = 0; u < td.width(); ++u) {
+                const int32_t x = (td.height() - 1 - v) * kUnits + kUnits / 2, y = u * kUnits + kUnits / 2;
+                const int g = dm.region_at(x, y);
+                uint32_t& px = img[static_cast<size_t>(v * td.width() + u)];
+                const uint32_t tint = g < 0 ? 0x000000 : g < 10 ? kTint[g] : 0x808080;
+                px = ((px >> 1) & 0x7F7F7F) + ((tint >> 1) & 0x7F7F7F);
+            }
+        }
+        const auto boxes = vette::game::collision_boxes(mem, *city);
+        for (const vette::game::PlacedBox& b : boxes) {
+            const uint32_t c = vette::game::collision_box_passable(b.box) ? 0xFFFF00 : 0xFF2020;
+            const int u0 = b.y0 / kUnits, u1 = b.y1 / kUnits, v0 = td.height() - 1 - b.x1 / kUnits,
+                      v1 = td.height() - 1 - b.x0 / kUnits;
+            const auto put = [&](int u, int v) {
+                if (u >= 0 && v >= 0 && u < td.width() && v < td.height()) img[static_cast<size_t>(v * td.width() + u)] = c;
+            };
+            for (int u = u0; u <= u1; ++u) {
+                put(u, v0);
+                put(u, v1);
+            }
+            for (int v = v0; v <= v1; ++v) {
+                put(u0, v);
+                put(u1, v);
+            }
+        }
+        {
+            std::ofstream cells(out_dir / "drivable_cells.txt");
+            cells << "cell types (hex) by cell, x 79 (north) down to 0, y 0..79 west to east; '.' after: a wall box\n";
+            cells << "      ";
+            for (int cy = 0; cy < 80; ++cy) cells << (cy % 10 == 0 ? std::to_string(cy / 10) : std::string(" ")) << "  ";
+            cells << "\n";
+            std::vector<std::vector<bool>> walled(80, std::vector<bool>(80, false));
+            for (const auto& b : boxes) {
+                if (!vette::game::collision_box_passable(b.box)) walled[static_cast<size_t>(b.cx)][static_cast<size_t>(b.cy)] = true;
+            }
+            for (int cx = 79; cx >= 0; --cx) {
+                char head[8];
+                std::snprintf(head, sizeof head, "%2d:   ", cx);
+                cells << head;
+                for (int cy = 0; cy < 80; ++cy) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof buf, "%02X%c", city->cell(cx, cy).type, walled[static_cast<size_t>(cx)][static_cast<size_t>(cy)] ? '.' : ' ');
+                    cells << buf;
+                }
+                cells << "\n";
+            }
+            cells << "\nboxes by type (cell-local x0,y0..x1,y1; x north, y east; * = trigger)\n";
+            std::vector<bool> done(256, false);
+            for (int cx = 0; cx < 80; ++cx) {
+                for (int cy = 0; cy < 80; ++cy) {
+                    const int t = city->cell(cx, cy).type;
+                    if (done[static_cast<size_t>(t)]) continue;
+                    done[static_cast<size_t>(t)] = true;
+                    char buf[32];
+                    std::snprintf(buf, sizeof buf, "%02X:", t);
+                    cells << buf;
+                    // What it draws: the ground layer's and the sortables' routines.
+                    const en::CellType& ct = world.types[static_cast<size_t>(t)];
+                    cells << " [ground";
+                    for (const auto& e : ct.list1) {
+                        std::snprintf(buf, sizeof buf, " %04X", e.routine);
+                        cells << buf;
+                    }
+                    cells << " | objects";
+                    for (const auto& e : ct.list2) {
+                        std::snprintf(buf, sizeof buf, " %04X", e.routine);
+                        cells << buf;
+                    }
+                    cells << "] boxes";
+                    for (const auto& b : boxes) {
+                        if (b.cx != cx || b.cy != cy) continue;
+                        std::snprintf(buf, sizeof buf, " %d,%d..%d,%d%s", b.x0 - cx * 2048, b.y0 - cy * 2048, b.x1 - cx * 2048,
+                                      b.y1 - cy * 2048, vette::game::collision_box_passable(b.box) ? "*" : "");
+                        cells << buf;
+                    }
+                    cells << "\n";
+                }
+            }
+        }
+        for (const Place& p : places) {
+            const int u = p.y / kUnits, v = td.height() - 1 - p.x / kUnits;
+            const uint32_t c = p.what.rfind("on-ramp", 0) == 0 ? 0xFF00FF : p.what.rfind("exit", 0) == 0 ? 0x00FFFF : 0xFFFFFF;
+            for (int a = -4; a <= 4; ++a) {
+                for (int b = -4; b <= 4; ++b) {
+                    if ((std::abs(a) == 4 || std::abs(b) == 4) && u + a >= 0 && v + b >= 0 && u + a < td.width() && v + b < td.height())
+                        img[static_cast<size_t>((v + b) * td.width() + u + a)] = c;
+                }
+            }
+        }
+        write_png(out_dir / "drivable.png", td.width(), td.height(), img);
+        std::printf("drivable.png written\n");
     }
     if (catalogue) {
         for (const auto& r : world.routines) {

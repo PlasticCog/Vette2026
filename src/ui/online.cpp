@@ -109,6 +109,7 @@ game::TwoPlayerSetup host_setup(const Settings& s) {
     game::TwoPlayerSetup setup;
     setup.course = std::clamp(s.online_course, 1, 4);
     setup.improved_driving = s.improved_driving;
+    setup.freeways = s.freeways;
     return setup;
 }
 

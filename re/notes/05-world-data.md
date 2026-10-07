@@ -255,6 +255,23 @@ renderer entry points hooked. Every routine finished without error. Main groups:
 - The DOS code-drawn objects (§5) were not matched to Mac OBJS. **TBD**: the Mac draws ground pieces by
   QUAD object id.
 
+## 9. Connectivity (game/drivable.h, `vette_world --drivable [--no-freeways]`)
+Drivable = not inside a collision box that isn't a trigger (the finishes, on-ramps, toll speed limits,
+bridge-deck camera boxes, C210/C3BC/C358), less the car's smallest half-size (12; DS:2BC9/2BD9 give 12-24 by
+octant), sampled every 32 units. The original city is in parts that only the freeways join (**confirmed**):
+the central city (about 390 cells' worth, with the 480, 80, Central Skyway and Embarcadero on-ramps and both
+Doyle Drive exits); the Sunset and Zoo (170: course 1's start, the Hwy 1 and Presidio on-ramps, 280's exit);
+the Marina (66, no course or freeway point); the Bay Bridge with its end of town (course 2's finish, course 3's
+start, the 280 on-ramp and the four freeways' exit at 18,49); the Golden Gate and Vista Point (course 1's
+finish, course 2's start, the Doyle Drive on-ramps and the Presidio/Hwy 1 exit at 45,2). Their borders: the F7
+barrier column at cell y 15 (Sunset / central) and y 9 (Marina / central), the FF diagonal from 16,37 to
+23,44 (the Bay Bridge's end of town), water between the Great Highway's end (27,2) and the Marina, and between
+the Golden Gate approach's end (43,2) and the Marina's street (38,*). The cell types: 01 water (the race
+ends), 00, 0F, 10, E0, E1, F6-FA, FF full or near-full walls (F6-FA, FF: a yellow-topped barrier and its
+posts), 29 the Golden Gate approach's deck, 2B/2D/2E open street cells (2B draws nothing: the big tile's
+ground shows, water in the Marina), 3E park (a trigger box, posts), C1 diagonal street, city blocks
+(CE/CF/D7/D8, 64-66...) a building box in the middle and streets round it.
+
 ## Open questions
 1. World-unit scale (≈3 in?) should be confirmed against the speed or odometer constants.
 2. Meaning of the slope code BX from 4160:0515 (pitch/roll of the car?), and the classes 1/7 v-axis codes.

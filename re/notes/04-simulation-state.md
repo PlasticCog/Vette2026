@@ -203,6 +203,17 @@ Route data (**confirmed** 1FB7–1FD8, 10B3–10F5, 4021:0AB4):
   Coordinates are 16-bit, relative to the opponent's current big tile modulo 0x10000.
 - Start positions: DS:2D69[course−1] → `{player x,y,z, opponent x,y,z, heading, bt_x, bt_y}` (1FE3–202C; e.g. DS:2D71 = (FE0,11C8,C), (FA0,11C8,C), 270°, bt (4,0)).
 - Finish: 11FF sets DS:FA45=FF and stores the time (703F) in cs:C9D4..C9D7.
+- The route list advances at a list's end on two paths (**confirmed**, game/no_freeways): the opponent at its
+  last raw point (10B3) or its target there (112A). Each reads the highway id: FFFF ends the course (unless
+  course 4 chains: 10DB / 116B, the second also `INC [2D31]`); any other id enters the highway (10C3 / 1153 →
+  4021:01B7). The route lists of the levels overlap (course 1: F7DC, F7E4, F7EC, 8 bytes apart in one array of
+  pairs), so pairs can't be inserted. A list's points are relative to the tile the opponent is in when it reads
+  them: a point past the tile's edge is still in the old tile's terms, the ones after it in the new tile's. The
+  raw point advances once the **target** (D150 lays them ~256-2000 apart, up to ~2300 ahead of the car) nears
+  it (`dist(FA24, FA2C) < 100h`), so a point only a little past an edge can be passed before the car crosses,
+  and the next is then read in the old tile's terms (off by a tile). The original's F9A2 does that (2176 past
+  the 3/2 edge) just before Doyle Drive, where the highway entry makes it harmless. Waypoints lie on the
+  street strips about 128 from a cell's edge; down a cell's middle, D150 zigzags at every cell boundary.
 
 ## 6. Police
 

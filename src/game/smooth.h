@@ -71,6 +71,9 @@ public:
 
     // Off: always show the latest game frame as it is (the Original frame rate), no blending.
     void set_interpolation(bool on) { interpolation_ = on; }
+    // The CPU the replays run on, for watches that change how the game draws (e.g.
+    // install_no_freeway_drawing): the replays draw as the game does.
+    host::Cpu& replay_cpu() { return *scratch_cpu_; }
 
     // World layers: whether the renderer draws the rear-view mirror's view (Layers::mirror). Off (e.g.
     // while another version's art is composited over the frame): the mirror stays as the game drew it.

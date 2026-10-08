@@ -255,6 +255,19 @@ renderer entry points hooked. Every routine finished without error. Main groups:
 - The DOS code-drawn objects (§5) were not matched to Mac OBJS. **TBD**: the Mac draws ground pieces by
   QUAD object id.
 
+## 8a. The city's pieces (**confirmed**, `vette_world --dump-routine`)
+A city block (CE/CF/D7/D8...) is list 1 `276A(0,256) 7270(0,0) 7318(1792,256) 7238(1792,0)` and a building in
+list 2: 7270 the north-south street along the west edge (1792 x 256, colour 8, white lines at y 64, 128,
+192), 7318 the east-west one along the north edge (256 x 1792), 7238 their corner (256 x 256, plain), 276A the
+block (1792 x 1792, colour 7). Others: 2655 (1792 x 320 road, lines at 64 and 256: the Marina car parks'
+lane), 2668 (1792 x 64 green), 2724 (the park, 2048 x 2048 green), 26F6 (water, 2048 x 2048 colour 9), 724C
+and 7246 (land strips, colour 7). Type 29 (the Golden Gate approach's cells) draws only 276A(0,128) and two
+posts: the approach's road is the compound's. 2B draws nothing, so the Marina's row 38 shows the big tile's
+ground (DS:8556: 9, water, for big tile 10; 7, land, for the city's). Collision classes 1D and 2C have no
+boxes. Freeways off adds types 50 (the coast road: 2655 with 7270's lines over it, five lanes of 64 for the
+Golden Gate's cars), 54 (it crossed by Marina Boulevard), 55 and 56 (Marina Boulevard, on pavement and
+through the park), in records at DS:7970.
+
 ## 9. Connectivity (game/drivable.h, `vette_world --drivable [--no-freeways]`)
 Drivable = not inside a collision box that isn't a trigger (the finishes, on-ramps, toll speed limits,
 bridge-deck camera boxes, C210/C3BC/C358), less the car's smallest half-size (12; DS:2BC9/2BD9 give 12-24 by

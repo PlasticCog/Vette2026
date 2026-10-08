@@ -45,4 +45,8 @@ struct PlacedBox {
 };
 std::vector<PlacedBox> collision_boxes(host::Memory& memory, const CityMap& map);
 
+// Whether a car `margin` wide either side of x, y clears every box but the passable ones, exactly (the
+// DrivableMap's 32-unit samples can't tell a line that passes a post by a few units).
+bool point_clear(const std::vector<PlacedBox>& boxes, int32_t x, int32_t y, int margin);
+
 }  // namespace vette::game

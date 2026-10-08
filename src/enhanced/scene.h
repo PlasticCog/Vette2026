@@ -11,10 +11,12 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
 #include "enhanced/world.h"
+#include "game/no_freeways.h"
 
 namespace vette::enhanced {
 
@@ -103,6 +105,9 @@ struct SceneOptions {
     // window's cells as the original binds them: the city populated, without cars on the water, off their
     // road or against their lane. The choice doesn't depend on the camera, so copies don't pop as it moves.
     bool replicas = false;
+    // Where a traffic car or pedestrian may be drawn beyond the original's rules (in the window and as a
+    // copy): game::no_freeway_placement with the freeways off. Empty: the original's.
+    std::function<game::Placement(uint16_t entity, int gx, int gy, uint8_t type)> placement;
     // Off: traffic and pedestrians only in the original's window, where the original draws them (they
     // appear as the camera nears). Without a depth buffer, far ones could show through the scenery.
     bool far_vehicles = true;

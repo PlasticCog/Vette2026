@@ -89,4 +89,8 @@ struct Settings {
 Settings load_settings(const std::filesystem::path& file);
 bool save_settings(const std::filesystem::path& file, const Settings& settings);
 
+// What's kept for next time: `saved` (the file's) with the changes made between `before` and `after`
+// (the player's, in the launch menu or with Alt+Enter), so a run's command-line overrides stay out of it.
+Settings with_changes(const Settings& saved, const Settings& before, const Settings& after);
+
 }  // namespace vette

@@ -275,8 +275,26 @@ vehicle stops the player), `+6..+C` accel per stage (4,3,2,1 per frame), `+E..+1
 (50,100,150,224). All **confirmed** from data and the cited code. Per frame: accelerate (BDAC), `d = speed/fr`,
 follow targets (BE86: reach → shift next→current, new next from route via D150), heading = atan2 to target,
 turn decision per intersection (BF10 → C0E0 reads a byte map DS:D2AE[bt] + cell, dispatched by heading quadrant
-via DS:EF52 → BF61/BFB5/C00C/C05E; **likely** intersection rules), move with cell carry (BDDE: cell nibbles ±1 mod
-16, target points ∓0x800).
+via DS:EF52 → BF61/BFB5/C00C/C05E), move with cell carry (BDDE: cell nibbles ±1 mod 16, target points ∓0x800).
+
+**The cell rules** (DS:D2AE[bt] → 256 bytes, `x*16+y`; **confirmed** from BF10-C0B7; the bridges' lists F0B0 and
+F0E6 skip them). The byte is read at the list entry's cell (the renderer's last binding): 0 hides the car (+1C =
+0, which the gathers 33A3/3483 skip: no drawing, no collision; water, parks); otherwise bits 0-1 rule a car
+heading north or south (quadrant by the path record's heading +4) and bits 4-5 one heading east or west:
+1 = north only (west only), 2 = south only (east only), 3 = both, keeping right (north on the target's y ≥ 80h
+side, east on x < 780h). A car the rule forbids turns round: its target x (y) is set to 700h/0 (100h/800h),
+its heading reversed, and D150 plans the next target from the route. Bits 2-3 and 6-7 aren't read here: with
+bits 0-1 and 4-5 they choose the dashboard's one-way and turn signs (3009:65E9, with DS:DAE0's maps). E.g. the
+city's blocks B7 (both ways), the Great Highway's column AB (north/south, east only: never into the ocean).
+
+**The opponent's look ahead** (3009:D8FD from D8B7, called from 1198): it runs while DS:312E ≠ 0, which the
+gathers set when they draw the opponent and nothing clears, so from the race's start on. It takes the
+cars of the opponent's big tile's list (DS:2B70) in its pattern cell (D94C: `cell & 33h`, whether drawn or
+hidden), in 64-unit columns/rows of their cell (D96F), and for one within 6 of them ahead in its own column
+moves its target (FA2C/FA2E) 64 to the side (DA40-DAAF: west going north, unless within 2 of the west edge),
+and 100h on. At a corner the planner then takes the side street round the block. **Confirmed** (freeways off,
+game/no_freeways.h: cars turning back at a corner sent it round, as did a sidestep across the Golden Gate's
+lanes).
 
 **Pedestrian entity (0x20 bytes, `BB72`)**: +02/+04 x,y in cell, +08 heading, +0A pitch (90 = knocked over),
 +0E state profile (EAE8 walking, EAEA hit), +10 reset profile, +12 → route (square of 0x11A sides, DS:EB00),

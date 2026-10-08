@@ -603,6 +603,7 @@ struct EnhancedView {
     int radius = enhanced::kMapCells;
     bool hills = true;  // Settings::Skyline::Hills: the backdrop without its painted city
     bool smooth_traffic = true;  // Settings::smooth_traffic: freeway cars fade in and out
+    bool no_freeways = false;    // Settings::freeways off: traffic and pedestrians where game::no_freeway_placement puts them
     enhanced::Backdrop backdrop;
     enhanced::World world;
     std::unique_ptr<enhanced::SceneBuilder> builder;  // once the world is extracted
@@ -645,6 +646,8 @@ struct EnhancedView {
         // only those near the car, where the original draws them (none show through the scenery).
         options.depth = options.replicas = options.far_vehicles = presenter.depth_buffer();
         options.smooth_traffic = smooth_traffic;
+        if (no_freeways)
+            options.placement = game::no_freeway_placement;
         options.time_s = static_cast<double>(machine.emulated_ns()) / 1e9;
         presenter.frame_scale(layers.under.width, layers.under.height, options.pixel_w, options.pixel_h);
         if (presenter.original_resolution())
@@ -1285,8 +1288,17 @@ int run(int argc, char** argv) {
 
         // Saved settings, then this run's command-line overrides.
         const std::filesystem::path settings_file = settings_dir() / "settings.ini";
-        Settings settings = load_settings(settings_file);
+        const Settings saved = load_settings(settings_file);
+        Settings settings = saved;
         opts->apply_to(settings);
+        const Settings launched = settings;
+        // The player's choices are kept for next time, whether they play or quit: what they changed in the
+        // launch menu, and full screen or the window as they left it. This run's overrides aren't.
+        const auto keep_settings = [&](const Presenter& presenter) {
+            settings.fullscreen = presenter.fullscreen();
+            if (!save_settings(settings_file, with_changes(saved, launched, settings)))
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't save %s", path_to_utf8(settings_file).c_str());
+        };
 
         // The game folder: --game, else the one chosen in the launch menu, else Game/ near the program.
         GameDirSearch search;
@@ -1333,16 +1345,18 @@ int run(int argc, char** argv) {
         ui::OnlineSession online;  // set when the player chose an online race
         if (invite && game && ui::online_available()) {
             SDL_Log("Invite: %s", invite->c_str());
-            if (!ui::run_online(presenter, gamepad, settings, *game, online, *invite) && !online.link &&
-                ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir()) == ui::LaunchChoice::Quit)
+            const bool quit =
+                !ui::run_online(presenter, gamepad, settings, *game, online, *invite) && !online.link &&
+                ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir()) == ui::LaunchChoice::Quit;
+            keep_settings(presenter);
+            if (quit)
                 return 0;
-            if (!save_settings(settings_file, settings))
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't save %s", path_to_utf8(settings_file).c_str());
         } else if (opts->launcher.value_or(settings.show_launcher) || !game) {
-            if (ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir()) == ui::LaunchChoice::Quit)
+            const bool quit =
+                ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir()) == ui::LaunchChoice::Quit;
+            keep_settings(presenter);
+            if (quit)
                 return 0;
-            if (!save_settings(settings_file, settings))
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Couldn't save %s", path_to_utf8(settings_file).c_str());
         }
         // An online race from the command line (testing): the room first, then the game.
         if (!online.link && (opts->online_host || opts->online_join)) {
@@ -1404,7 +1418,8 @@ int run(int argc, char** argv) {
             }
         }
         // Without the freeways (after the map, which their roads go into); an online race as its host chose.
-        if (!(online.link ? online.setup.freeways : settings.freeways)) {
+        const bool no_freeways = !(online.link ? online.setup.freeways : settings.freeways);
+        if (no_freeways) {
             game::install_no_freeways(machine);
             SDL_Log("Freeways: off (one connected city)");
         }
@@ -1421,6 +1436,8 @@ int run(int argc, char** argv) {
         if (smooth_fps || enhanced_view) {
             smooth.emplace(machine, enhanced_view);
             smooth->set_interpolation(smooth_fps);
+            if (no_freeways)
+                game::install_no_freeway_drawing(smooth->replay_cpu());
         }
         if (enhanced_view) {
             view = std::make_unique<EnhancedView>();
@@ -1428,6 +1445,7 @@ int run(int argc, char** argv) {
                 view->radius = kExtendedRadius;
             view->hills = settings.skyline == Settings::Skyline::Hills;
             view->smooth_traffic = settings.smooth_traffic;
+            view->no_freeways = no_freeways;
         }
         SDL_Log("Frame rate: %s; draw distance: %s%s%s; emulated CPU %.0f MHz",
                 smooth_fps ? "smooth (display refresh)" : "original",
@@ -1503,6 +1521,7 @@ int run(int argc, char** argv) {
             link = make_dev_link(*opts, settings, machine);
         main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad, smooth ? &*smooth : nullptr, view.get(),
                   game_sound.get(), art.get(), driving.get(), *opts, link.get());
+        keep_settings(presenter);  // (Alt+Enter in the game)
         if (art && art->frames)
             SDL_Log("Graphics: %.2f ms per frame to compose", art->compose_ms / static_cast<double>(art->frames));
         if (smooth && smooth->stats().replays)

@@ -15,9 +15,12 @@ constexpr uint16_t kBoxLists = 0xC0A6;    // collision class -> box list
 constexpr int kCellSize = 0x800;
 
 // The on-ramps' boxes and their routes (3009:1A12-1AD8).
-constexpr std::array<std::pair<uint16_t, int>, 9> kRamps = {{{0xC294, 0}, {0xC278, 1}, {0xC2BE, 2}, {0xC554, 3},
-                                                             {0xC5F4, 4}, {0xC5E2, 5}, {0xC610, 6}, {0xC62C, 7},
-                                                             {0xC64E, 8}}};
+struct Ramp {
+    uint16_t box;
+    int route;
+};
+constexpr std::array<Ramp, 9> kRamps = {{{0xC294, 0}, {0xC278, 1}, {0xC2BE, 2}, {0xC554, 3}, {0xC5F4, 4}, {0xC5E2, 5},
+                                         {0xC610, 6}, {0xC62C, 7}, {0xC64E, 8}}};
 // The other triggers (3009:1984-1B6E): finishes, toll booths, bridge decks, and two of unknown use.
 constexpr std::array<uint16_t, 12> kTriggers = {0xC5AC, 0xC28A, 0xC5B6, 0xC29C, 0xC2A4, 0xC2AC,
                                                 0xC63C, 0xC67C, 0xC66A, 0xC210, 0xC3BC, 0xC358};
@@ -50,6 +53,14 @@ std::vector<PlacedBox> collision_boxes(host::Memory& m, const CityMap& map) {
         }
     }
     return out;
+}
+
+bool point_clear(const std::vector<PlacedBox>& boxes, int32_t x, int32_t y, int margin) {
+    for (const PlacedBox& b : boxes) {
+        if (x > b.x0 - margin && x < b.x1 + margin && y > b.y0 - margin && y < b.y1 + margin && !collision_box_passable(b.box))
+            return false;
+    }
+    return true;
 }
 
 DrivableMap find_drivable(host::Memory& m, const CityMap& map, int margin) {

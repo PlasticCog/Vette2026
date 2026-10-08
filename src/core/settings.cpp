@@ -7,6 +7,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace vette {
 namespace {
@@ -189,6 +190,24 @@ bool save_settings(const std::filesystem::path& file, const Settings& settings) 
     std::ofstream out(file, std::ios::trunc);
     out << settings.serialize();
     return static_cast<bool>(out);
+}
+
+Settings with_changes(const Settings& saved, const Settings& before, const Settings& after) {
+    // Line by line in the file's form (serialize writes every key, always in the same order): a line
+    // that changed between before and after is the player's; any other line is the saved one.
+    const auto lines = [](const Settings& s) {
+        std::vector<std::string> out;
+        std::istringstream in(s.serialize());
+        for (std::string line; std::getline(in, line);) out.push_back(line);
+        return out;
+    };
+    const std::vector<std::string> kept = lines(saved), was = lines(before), now = lines(after);
+    std::string text;
+    for (size_t i = 0; i < now.size(); ++i) {
+        const bool changed = i >= was.size() || now[i] != was[i];
+        text += (changed || i >= kept.size() ? now[i] : kept[i]) + "\n";
+    }
+    return Settings::parse(text);
 }
 
 }  // namespace vette

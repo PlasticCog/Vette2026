@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "game/city_map.h"
 #include "game/drivable.h"
@@ -93,12 +94,14 @@ TEST(no_freeways_join_the_city) {
     const auto before = vette::game::find_drivable(m->memory(), *map);
     CHECK(region_near(before, kPlaces[0]) != region_near(before, kPlaces[1]));
     // With the roads: every start and finish in one region.
+    vette::game::add_no_freeway_cell_types(m->memory());
     vette::game::add_no_freeway_roads(*map);
     const auto after = vette::game::find_drivable(m->memory(), *map);
     const int g = region_near(after, kPlaces[0]);
     CHECK(g >= 0);
     for (const Place& p : kPlaces) CHECK_EQ(region_near(after, p), g);
     // And the opponent's new roads run on it, clear of every wall.
+    const auto boxes = vette::game::collision_boxes(m->memory(), *map);
     for (const auto& road : vette::game::no_freeway_opponent_roads()) {
         for (size_t k = 0; k + 1 < road.size(); ++k) {
             const int n = std::max(1, std::max(std::abs(road[k + 1].first - road[k].first), std::abs(road[k + 1].second - road[k].second)) / 32);
@@ -106,7 +109,8 @@ TEST(no_freeways_join_the_city) {
             for (int i = 0; i <= n; ++i) {
                 const int32_t x = road[k].first + (road[k + 1].first - road[k].first) * i / n;
                 const int32_t y = road[k].second + (road[k + 1].second - road[k].second) * i / n;
-                clear = clear && after.region_at(x, y) == g;
+                const int at = after.region_at(x, y);
+                clear = clear && (at == g || at < 0) && vette::game::point_clear(boxes, x, y, 12);
             }
             CHECK(clear);
         }
@@ -157,4 +161,81 @@ TEST(no_freeways_opponent_drives_course_1) {
                 freeway ? "on a freeway at times" : "never on a freeway");
     CHECK(finish_at > 0);
     CHECK(!freeway);
+}
+
+TEST(no_freeways_placement) {
+    using vette::game::Placement;
+    using vette::game::no_freeway_placement;
+    constexpr uint16_t kBridgeCar = 0xEB84, kCityCar = 0xE194, kPedestrian = 0xE8E8;
+    // The Golden Gate's cars: the whole coast road, from the Zoo to the approach, where the original's rules
+    // take over; nowhere else in the city or the Marina.
+    CHECK(no_freeway_placement(kBridgeCar, 1, 2, 0xD0) == Placement::Allow);
+    CHECK(no_freeway_placement(kBridgeCar, 29, 2, 0x50) == Placement::Allow);
+    CHECK(no_freeway_placement(kBridgeCar, 50, 2, 0x29) == Placement::Default);
+    CHECK(no_freeway_placement(kBridgeCar, 0, 2, 0xF8) == Placement::Deny);
+    CHECK(no_freeway_placement(kBridgeCar, 10, 6, 0xCF) == Placement::Deny);
+    CHECK(no_freeway_placement(kBridgeCar, 35, 6, 0x34) == Placement::Deny);
+    // The city's cars keep the original's rules; pedestrians keep off the water and the coast road.
+    CHECK(no_freeway_placement(kCityCar, 29, 2, 0x50) == Placement::Default);
+    CHECK(no_freeway_placement(kPedestrian, 10, 1, 0x01) == Placement::Deny);
+    CHECK(no_freeway_placement(kPedestrian, 29, 2, 0x50) == Placement::Deny);
+    CHECK(no_freeway_placement(kPedestrian, 35, 4, 0x34) == Placement::Default);
+}
+
+TEST(no_freeways_coast_traffic) {
+    const fs::path dir = game_dir();
+    if (!fs::exists(dir / "VETTE.EXE")) {
+        std::printf("  SKIPPED: no VETTE.EXE in %s\n", dir.string().c_str());
+        return;
+    }
+    auto m = boot(dir, true);
+    CHECK(m != nullptr);
+    if (!m) return;
+    const auto press = [&](uint8_t sc) {
+        m->key(sc);
+        m->run_for(100 * kMs);
+        m->key(static_cast<uint8_t>(sc | 0x80));
+    };
+    const auto until = [&](double seconds) {
+        while (m->emulated_ns() < static_cast<uint64_t>(seconds * 1e9)) m->run_for(10 * kMs);
+    };
+    until(13);
+    press(0x39);
+    until(17);
+    press(0x1C);
+    until(21.2);
+    press(0x1C);
+    until(25);
+    press(0x1C);
+    until(30.5);
+    press(0x1C);
+    until(40);
+    auto& mem = m->memory();
+    const auto w = [&](uint16_t off) { return vette::game::rd16(mem, vette::game::kDataSeg, off); };
+    // The city's big tiles share a list with the Golden Gate's 9 cars in it, and the Marina's has pedestrians.
+    const uint16_t city = w(0xEF5A);  // big tile 0, the Zoo's
+    CHECK(city != 0xF01E);
+    for (const int bt : {5, 6, 7, 11, 12}) CHECK_EQ(w(static_cast<uint16_t>(0xEF5A + 2 * bt)), city);
+    CHECK_EQ(w(0xEF8C + 2 * 10), 0xEFC0);
+    // The new road types are in the cell type table, with no collision boxes.
+    CHECK_EQ(w(w(0x9D73 + 2 * 0x50)), 0x2C00);
+    std::vector<uint16_t> bridge;
+    for (uint16_t p = city; w(p) != 0xFFFF; p = static_cast<uint16_t>(p + 4)) {
+        if (w(p) >= 0xEB56 && w(p) < 0xECF4) bridge.push_back(p);
+    }
+    CHECK_EQ(bridge.size(), size_t{9});
+    // With the camera at the Zoo (not the bridge's tile), they move all the same, and both lists agree on
+    // their cells.
+    std::vector<uint16_t> before;
+    for (const uint16_t p : bridge) before.push_back(w(static_cast<uint16_t>(w(p) + 2)));
+    until(45);
+    CHECK_EQ(w(0x843A), 0);
+    int moved = 0;
+    for (size_t i = 0; i < bridge.size(); ++i) {
+        moved += w(static_cast<uint16_t>(w(bridge[i]) + 2)) != before[i];
+        for (uint16_t q = 0xF0B0; w(q) != 0xFFFF; q = static_cast<uint16_t>(q + 4)) {
+            if (w(q) == w(bridge[i])) CHECK_EQ(w(static_cast<uint16_t>(q + 2)), w(static_cast<uint16_t>(bridge[i] + 2)));
+        }
+    }
+    CHECK_EQ(moved, 9);
 }

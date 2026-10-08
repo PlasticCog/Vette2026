@@ -292,6 +292,12 @@ struct SceneBuilder::Impl {
         opt->observer->copy({e, cell, x, y, v.x, v.y, v.z, true, true});
     }
 
+    // SceneOptions::placement for an entity in map cell gx, gy.
+    game::Placement placement_of(uint16_t e, int gx, int gy) const {
+        if (!opt->placement || gx < 0 || gy < 0 || gx >= world.cells_x() || gy >= world.cells_y()) return game::Placement::Default;
+        return opt->placement(e, gx, gy, world.cell(gx, gy).type);
+    }
+
     // Replicas (SceneOptions::replicas). The traffic AI drives its lanes as if every cell had the same
     // roads (two-way, along the cell's edges, notes 04 section 7), and a pedestrian walks its square as if on
     // the same pavement; the original's window shows them wherever it looks. A copy is kept only in a cell
@@ -329,7 +335,7 @@ struct SceneBuilder::Impl {
         uint64_t state = 0;
         std::array<uint16_t, 25> keep{};  // per big tile, a bit per class cell (i * 4 + j: cell (c + 4i, c + 4j))
     };
-    std::unordered_map<uint16_t, ReplicaChoice> replica_choices;
+    std::unordered_map<uint32_t, ReplicaChoice> replica_choices;  // by entity and list (an entity can be in two)
     std::vector<std::array<int32_t, 2>> samples;
     struct PatternCell {
         uint64_t signature = 0;  // what lies under the way, in order
@@ -2110,7 +2116,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
             } else {
                 match = (ec & 0x33) == (ci & 0x33) && ram.d16(static_cast<uint16_t>(e + 0x1C)) != 0;
             }
-            if (!match) continue;
+            if (!match || (slot >= 3 && placement_of(e, gx, gy) == game::Placement::Deny)) continue;
             seen_entities.push_back(e);
             int32_t x, y;
             int16_t z;
@@ -2126,7 +2132,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
             const uint16_t e = ram.d16(at);
             if (e == 0xFFFF) break;
             const uint16_t ec = ram.d16(static_cast<uint16_t>(at + 2));
-            if ((ec & 0x33) != (ci & 0x33)) continue;
+            if ((ec & 0x33) != (ci & 0x33) || placement_of(e, gx, gy) == game::Placement::Deny) continue;
             seen_entities.push_back(e);
             int32_t x, y;
             int16_t z;
@@ -2151,7 +2157,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
     }
     // A replica isn't placed in the window's cells: there, the original's own binding (above) has drawn
     // the cell's traffic and pedestrians already.
-    std::vector<uint16_t> replicated;
+    std::vector<uint32_t> replicated;  // entity | list << 16: an entity can be in two lists
     if (opt->replicas) prepare_roads();
     const auto place = [&](uint16_t e, int row, int col, uint16_t ec, bool cell_relative, bool replica,
                            const ReplicaChoice* choice) {
@@ -2161,6 +2167,8 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
         if (replica && std::find(std::begin(window_cells), std::end(window_cells), gx * kMapCells + gy) != std::end(window_cells)) {
             return;
         }
+        const game::Placement placement = placement_of(e, gx, gy);
+        if (placement == game::Placement::Deny) return;
         int32_t x, y;
         int16_t z;
         entity_xyz(e, x, y, z);
@@ -2170,7 +2178,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
         if (choice) {
             ++out->stats.replicas;
             const int k = (ec >> 6 & 3) * 4 + (ec >> 2 & 3);
-            const bool keep = (choice->keep[static_cast<size_t>(row * cols + col)] >> k & 1) != 0;
+            const bool keep = placement == game::Placement::Allow || (choice->keep[static_cast<size_t>(row * cols + col)] >> k & 1) != 0;
             if (opt->observer) {
                 const V3 v = to_camera(wx, wy, z);
                 opt->observer->copy({e, gx * kMapCells + gy, wx, wy, v.x, v.y, v.z, keep, false});
@@ -2210,8 +2218,9 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
             if (opt->replicas) {
                 // Every cell of its pattern (but the window's: place()) laid out along its route as the cells
                 // its route was made for (choose_replicas).
-                if (std::find(replicated.begin(), replicated.end(), e) != replicated.end()) continue;
-                replicated.push_back(e);
+                const uint32_t key = e | static_cast<uint32_t>(la) << 16;
+                if (std::find(replicated.begin(), replicated.end(), key) != replicated.end()) continue;
+                replicated.push_back(key);
                 const ReplicaChoice& choice = choose_replicas(e, true, ec, la, lists_a, rows * cols, cols);
                 for (int t = 0; t < rows * cols; ++t) {
                     if (lists_a[t] != la) continue;
@@ -2249,8 +2258,9 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
                 const uint16_t e = ram.d16(at);
                 if (e == 0xFFFF) break;
                 const uint16_t ec = ram.d16(static_cast<uint16_t>(at + 2));
-                if (std::find(replicated.begin(), replicated.end(), e) != replicated.end()) continue;
-                replicated.push_back(e);
+                const uint32_t key = e | static_cast<uint32_t>(lb) << 16;
+                if (std::find(replicated.begin(), replicated.end(), key) != replicated.end()) continue;
+                replicated.push_back(key);
                 const ReplicaChoice& choice = choose_replicas(e, false, ec, lb, lists_b, rows * cols, cols);
                 for (int t = 0; t < rows * cols; ++t) {
                     if (lists_b[t] != lb) continue;
@@ -2446,7 +2456,7 @@ const SceneBuilder::Impl::ReplicaChoice& SceneBuilder::Impl::choose_replicas(uin
         state_hash ^= (static_cast<uint64_t>(static_cast<uint32_t>(x >> 8)) << 8 ^ static_cast<uint32_t>(y >> 8)) * 0xD6E8FEB86659FD93ull;
     }
     if (replica_choices.size() > 4096) replica_choices.clear();
-    ReplicaChoice& choice = replica_choices[e];
+    ReplicaChoice& choice = replica_choices[e | static_cast<uint32_t>(list) << 16];
     if (choice.state == state_hash) return choice;
     choice.state = state_hash;
     choice.keep.fill(0);

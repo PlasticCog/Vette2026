@@ -59,6 +59,29 @@ TEST(settings_round_trip) {
     CHECK(Settings::parse(s.serialize()) == s);
 }
 
+TEST(settings_keep_the_players_changes) {
+    // Saved: Classic with the window. This run: --freeways off and --music pc98 on the command line.
+    Settings saved;
+    saved.apply(Settings::Preset::Classic);
+    Settings before = saved;
+    before.freeways = false;
+    before.music = Settings::Music::Pc98;
+    // In the launch menu the player switches to full screen and picks the Mac's sounds, and takes the
+    // music back to the original's.
+    Settings after = before;
+    after.fullscreen = true;
+    after.effects = Settings::Effects::Mac;
+    after.music = Settings::Music::Original;
+    const Settings kept = with_changes(saved, before, after);
+    CHECK(kept.fullscreen);
+    CHECK(kept.effects == Settings::Effects::Mac);
+    CHECK(kept.music == Settings::Music::Original);  // changed in the menu: the player's
+    CHECK(kept.freeways);                            // only the command line's: not kept
+    CHECK(kept.frame_rate == saved.frame_rate);
+    // Nothing changed: the file as it was.
+    CHECK(with_changes(saved, before, before) == saved);
+}
+
 TEST(settings_ignore_old_online_server) {
     // Online races need no server now: an old settings.ini's relay is forgotten.
     CHECK(Settings::parse("online_server = ws://127.0.0.1:8787\n").online_server.empty());

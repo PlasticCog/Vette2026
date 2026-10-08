@@ -1960,6 +1960,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         if (no_freeways) {
+            vette::game::add_no_freeway_cell_types(machine.memory());
             vette::game::add_no_freeway_roads(*city);
             // The picture and the cell list show the new cells too.
             for (int cx = 0; cx < world.cells_x(); ++cx) {
@@ -2000,7 +2001,9 @@ int main(int argc, char* argv[]) {
                               x, y});
         }
         if (no_freeways) {
-            // The opponent's roads: every 32 units along each, its region (-1: blocked).
+            // The opponent's roads: every 32 units along each, its region, or blocked (exactly: a car's
+            // smallest half-size from every wall box).
+            const auto boxes = vette::game::collision_boxes(mem, *city);
             int leg = 0;
             for (const auto& road : vette::game::no_freeway_opponent_roads()) {
                 std::printf("opponent road %d:", leg++);
@@ -2013,7 +2016,7 @@ int main(int argc, char* argv[]) {
                     for (int i = 0; i <= n; ++i) {
                         const int32_t x = x0 + (x1 - x0) * i / n, y = y0 + (y1 - y0) * i / n;
                         const int g = dm.region_at(x, y);
-                        if (g < 0) {
+                        if (!vette::game::point_clear(boxes, x, y, 12)) {
                             if (blocked++ < 6) std::printf(" BLOCKED at %d,%d (cell %d,%d)", x, y, x / 2048, y / 2048);
                         } else if (std::find(seen.begin(), seen.end(), g) == seen.end()) {
                             seen.push_back(g);

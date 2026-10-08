@@ -60,9 +60,10 @@ resolution, depth buffer and skyline, driving and lane centering, the manual che
 menu appears at startup. **Game folder** shows
 where your game files were found; select it to choose another folder. If the files aren't found, the
 menu opens anyway and asks for the folder. It works with the keyboard, mouse or gamepad. Choices
-(including the folder) are saved in
-`%APPDATA%\VETTE2026\config\settings.ini` (the per-user settings folder on other systems). Command-line
-flags override them for one run; `--launcher` brings the menu back if you switched it off.
+(including the folder, and full screen or the window as you leave it) are kept for next time, whether you
+play or quit, in `%APPDATA%\VETTE2026\config\settings.ini` (the per-user settings folder on other systems).
+Command-line flags override them for one run, and aren't kept; `--launcher` brings the menu back if you
+switched it off.
 
 The original asks a manual-lookup question (copy protection) before the first race. VETTE! 2026 skips
 it, since this version of the game accepts any answer anyway. Pass `--manual-check` to see it.
@@ -122,13 +123,16 @@ on along the road. The traffic itself (speeds, lanes, how often cars come, colli
 
 **Freeways.** The original's city is in parts that only its freeways join: the Zoo and the Sunset, the
 central city, the Marina, the Bay Bridge's end of town and the Golden Gate (every course takes at least one
-freeway). With **Freeways: Off** the city is one: roads made of the original's own cells join the parts (a
-causeway up the coast from the Great Highway to the Golden Gate, the Golden Gate's deck carried on to the
-Marina, Golden Gate Park and the Marina opened into the central city, and the diagonal barrier before the
-Bay Bridge made a street), the on-ramps lead nowhere, and the computer opponent drives streets where its
-route took a freeway. Every course can be raced on the city's streets, and the opponent finishes each one
-(it's quicker than with the freeways). An online race uses the host's choice. `--freeways off` turns them
-off for one run; `vette_world --drivable [--no-freeways]` shows which parts of the city connect.
+freeway). With **Freeways: Off** the city is one: roads made of the original's own pieces join the parts
+(a coast road from the Great Highway over the water and through the Marina to the Golden Gate, Marina
+Boulevard on through the park into the central city, Golden Gate Park opened into it, and the diagonal
+barrier before the Bay Bridge made a street), the on-ramps lead nowhere, and the computer opponent drives
+streets where its route took a freeway. The traffic goes along: the Golden Gate's cars carry on down the
+coast road both ways, the city's turn back where the coast road begins as they do at any dead end, the new
+diagonal has the old one's, and pedestrians walk the Marina but keep off the water and the coast road.
+Every course can be raced on the city's streets, and the opponent finishes each one (it's quicker than
+with the freeways). An online race uses the host's choice. `--freeways off` turns them off for one run;
+`vette_world --drivable [--no-freeways]` shows which parts of the city connect.
 
 **Map editor.** The launch menu's **Map** row picks the city you race in: the original, or a map of your
 own. Enter on it opens the map editor, which shows the whole city from above and lets you change it cell

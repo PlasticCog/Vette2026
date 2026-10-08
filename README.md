@@ -155,7 +155,7 @@ from Coit Tower to the Ferry Building), and below them the city's ordinary build
 one at a time in a 3D view. The original draws those with program code rather than as models, so the
 editor makes each one a model (31 of them, from the tall office blocks to the small things beside the streets), and a set
 that changes one has the game draw the model in its place, everywhere the city has it. Collisions follow
-the map rather than the shapes, so a building made bigger can be driven into. Pick vertices or faces with the mouse
+the map rather than the shapes: the car drives through whatever a building gains. Pick vertices or faces with the mouse
 (Tab switches), drag them to move them (X, Y or Z keeps the move to one axis, the arrow keys nudge),
 add vertices (A), make a face through the picked vertices in order (F), delete (Delete), mirror what's
 picked across the car's middle (M), recolour faces from the EGA palette (0-9, the palette, C), turn a face

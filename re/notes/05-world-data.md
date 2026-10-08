@@ -255,6 +255,15 @@ renderer entry points hooked. Every routine finished without error. Main groups:
 - The DOS code-drawn objects (§5) were not matched to Mac OBJS. **TBD**: the Mac draws ground pieces by
   QUAD object id.
 
+## 8b. Models moved (game/model_pack.h, ui/object_editor.h; **confirmed**)
+draw_model (B765) reads everything but the header from the segment the header's first word names (DS from
+`[E01E]`), and model_select_lod (B9F6) finds the header in 245A by the table at 245A:6FF8. So a model can
+live anywhere if its 8-byte header in 245A says where: the object editor's are written at segment 8000h
+(nothing of the game's writes there in a race: tests/game_model_pack.cpp fills 8000h-8FFFh and checks it
+after a minute's racing), with empty skip lists and, where faces were added or removed, back-to-front orders
+worked out per octant from the faces' middles. The original's 58 models read and write back unchanged.
+A few of its fills have only one or two points.
+
 ## 8a. The city's pieces (**confirmed**, `vette_world --dump-routine`)
 A city block (CE/CF/D7/D8...) is list 1 `276A(0,256) 7270(0,0) 7318(1792,256) 7238(1792,0)` and a building in
 list 2: 7270 the north-south street along the west edge (1792 x 256, colour 8, white lines at y 64, 128,

@@ -766,6 +766,30 @@ void Presenter::update_picture(const std::vector<std::uint32_t>& pixels, int x, 
     SDL_UpdateTexture(picture_tex_.get(), &rect, rows.data(), w * 4);
 }
 
+void Presenter::present_view(const enhanced::Scene& scene, std::uint32_t background) {
+    SDL_Renderer* renderer = renderer_.get();
+    SDL_SetRenderDrawColor(renderer, static_cast<std::uint8_t>(background >> 16), static_cast<std::uint8_t>(background >> 8),
+                           static_cast<std::uint8_t>(background), SDL_ALPHA_OPAQUE);
+    SDL_RenderClear(renderer);
+    int out_w = 0;
+    int out_h = 0;
+    SDL_GetCurrentRenderOutputSize(renderer, &out_w, &out_h);
+    const SDL_FRect dst{0, 0, static_cast<float>(out_w), static_cast<float>(out_h)};
+    if (depth_buffer() && out_w > 0 && out_h > 0) {
+        if (SDL_Texture* drawn = draw_depth_tested(scene, nullptr, out_w, out_h, out_w, out_h)) {
+            SDL_RenderTexture(renderer, drawn, nullptr, &dst);
+            finish_frame();
+            return;
+        }
+        if (gpu_->failed) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_RENDER, "Depth buffer dropped: %s", SDL_GetError());
+            gpu_.reset();
+        }
+    }
+    draw_triangles(scene, std::max(out_w, 1), std::max(out_h, 1), dst);
+    finish_frame();
+}
+
 void Presenter::present_picture(const SDL_FRect& src, const SDL_FRect& dst, std::uint32_t background,
                                 const PictureMarks& marks) {
     SDL_Renderer* renderer = renderer_.get();

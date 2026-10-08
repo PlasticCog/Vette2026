@@ -98,6 +98,10 @@ public:
         };
         std::vector<Box> boxes;
     };
+    // A 3D view in the window's own pixels (the object editor's): `scene`'s vertices are output pixels,
+    // drawn over `background` (with the depth buffer when it's on, else in their order), then the overlay.
+    void present_view(const enhanced::Scene& scene, std::uint32_t background);
+
     void set_picture(const std::vector<std::uint32_t>& pixels, int w, int h);
     void update_picture(const std::vector<std::uint32_t>& pixels, int x, int y, int w, int h);
     void present_picture(const SDL_FRect& src, const SDL_FRect& dst, std::uint32_t background, const PictureMarks& marks);

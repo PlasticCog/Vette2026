@@ -146,6 +146,22 @@ the game's files are never changed. `--map NAME` plays one for one run. For now 
 pedestrians and computer opponent keep their fixed routes, which can run through what you change, the
 street names and dashboard signs are the original's, and online races use the original map.
 
+**Object editor.** The launch menu's **Objects** row picks the cars, pedestrians and landmarks: the
+original's, or a set you've reshaped. Enter on it opens the object editor: the original's 58 3D models
+(the traffic and the opponents' cars, the police car, your Corvette, the pedestrians and the landmarks
+from Coit Tower to the Ferry Building), one at a time in a 3D view. Pick vertices or faces with the mouse
+(Tab switches), drag them to move them (X, Y or Z keeps the move to one axis, the arrow keys nudge),
+add vertices (A), make a face through the picked vertices in order (F), delete (Delete), mirror what's
+picked across the car's middle (M), recolour faces from the EGA palette (0-9, the palette, C), turn a face
+round (R), and undo and redo every step; F1 lists every key. The game takes 124 vertices and 16 corners a
+face at most, which the side panel checks as you go. Sets are saved in the `objects` folder next to
+`save` and written into the game's memory as it starts, so both the original's renderer and the Enhanced
+view draw them (the opponent screen's turning car too); the game's files are never changed.
+`--objects NAME` plays one for one run; two-player races use the original's objects.
+
+**The opponent screen.** With the Enhanced view, the opponent screen's turning car is drawn at the
+display's resolution too, and with the Smooth frame rate it turns smoothly rather than in the game's steps.
+
 **Online races.** Two players can race each other over the internet, in the original's two-player
 mode, with no server in between: the games connect straight to each other. In the launch menu, choose
 **Online race**, then **Host a race**: a code like **7K3M-QX9P-2HDA** goes onto your clipboard. Paste it to

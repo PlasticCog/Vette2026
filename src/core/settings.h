@@ -59,6 +59,9 @@ struct Settings {
     bool freeways = true;
     // The city played: a map made in the map editor (ui/map_editor.h), by name; empty: the original.
     std::string map_name;
+    // The cars, pedestrians and landmarks: a set made in the object editor (ui/object_editor.h), by
+    // name; empty: the original's.
+    std::string objects_name;
     Effects effects = Effects::AdLib;
     Music music = Music::Original;
     Graphics graphics = Graphics::Dos;

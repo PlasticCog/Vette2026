@@ -26,9 +26,10 @@ enum class LaunchChoice { Start, Online, Quit };
 // `search`; Start is only possible with the DOS files, so `game` is set whenever this returns Start.
 // Online: the player set up an online race (ui/online.h), which is in `*online`; null hides it.
 // Keyboard, mouse and gamepad all work; the display setting applies to the window immediately.
-// `maps_dir`: where the map editor's maps are (empty: no Map row choices or editor).
+// `maps_dir`: where the map editor's maps are (empty: no Map row choices or editor); `objects_dir` the
+// same for the object editor's objects.
 LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& settings, std::optional<GameDir>& game,
                           GameDirSearch& search, OnlineSession* online = nullptr,
-                          const std::filesystem::path& maps_dir = {});
+                          const std::filesystem::path& maps_dir = {}, const std::filesystem::path& objects_dir = {});
 
 }  // namespace vette::ui

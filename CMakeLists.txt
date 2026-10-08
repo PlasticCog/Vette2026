@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(vette2026 VERSION 0.4.0 LANGUAGES C CXX)
+project(vette2026 VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -374,6 +374,7 @@ if(VETTE_BUILD_GAME)
         src/ui/key_sheet.cpp
         src/ui/launcher.cpp
         src/ui/map_editor.cpp
+        src/ui/object_editor.cpp
         src/ui/online.cpp
         src/platform/url_scheme.cpp
     )

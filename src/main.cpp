@@ -7,11 +7,13 @@
 #include "core/settings.h"
 #include "enhanced/backdrop.h"
 #include "enhanced/lanes.h"
+#include "enhanced/menu_car.h"
 #include "enhanced/scene.h"
 #include "enhanced/world.h"
 #include "game/driving.h"
 #include "game/options.h"
 #include "game/city_map.h"
+#include "game/model_pack.h"
 #include "game/no_freeways.h"
 #include "game/smooth.h"
 #include "game/two_player.h"
@@ -37,6 +39,7 @@
 #include "ui/key_sheet.h"
 #include "ui/launcher.h"
 #include "ui/map_editor.h"
+#include "ui/object_editor.h"
 #include "ui/online.h"
 #include "ui/shortcuts.h"
 #include "platform/url_scheme.h"
@@ -111,6 +114,7 @@ constexpr const char* kUsage =
     "  --freeway-traffic smooth   (default) new freeway cars come at the far end of the road and fade in\n"
     "                       and out; original: they appear a few hundred yards ahead and vanish far off\n"
     "  --map NAME           play a map made in the map editor (original: the original's city)\n"
+    "  --objects NAME       play with objects made in the object editor (original: the original's)\n"
     "  --freeways off       no freeways: roads join the city's parts, driven as one city (default on)\n"
     "  --scaling sharp      (default) the pictures simply enlarged, every pixel a solid block; smooth:\n"
     "                       the edges between pixels softened\n"
@@ -217,6 +221,11 @@ struct Options {
     std::optional<bool> lane_centering;
     std::optional<bool> smooth_traffic;
     std::optional<std::string> map_name;
+    std::optional<std::string> objects_name;
+    // Checking the object editor (testing): open it at once on set NAME (or a new one), with keys and
+    // screenshots at times, and quit after it.
+    std::optional<std::string> object_editor;
+    ui::EditorScript editor_script;
     std::optional<bool> freeways;
     std::vector<ScriptedKey> keys;
     std::vector<ScriptedPress> presses;  // sorted by time
@@ -273,6 +282,8 @@ struct Options {
             s.smooth_traffic = *smooth_traffic;
         if (map_name)
             s.map_name = *map_name == "original" ? std::string() : *map_name;
+        if (objects_name)
+            s.objects_name = *objects_name == "original" ? std::string() : *objects_name;
         if (freeways)
             s.freeways = *freeways;
     }
@@ -348,6 +359,65 @@ std::optional<Options> parse_args(int argc, char** argv) {
             opts.freeways = std::string_view(argv[++i]) == "on";
         } else if (arg == "--map" && has_value) {
             opts.map_name = argv[++i];
+        } else if (arg == "--objects" && has_value) {
+            opts.objects_name = argv[++i];
+        } else if (arg == "--object-editor") {
+            opts.object_editor = has_value && argv[i + 1][0] != '-' ? std::string(argv[++i]) : std::string();
+        } else if ((arg == "--editor-key" || arg == "--editor-shot") && has_value) {
+            // T:KEY, KEY an SDL key name with ctrl+, shift+ or alt+ in front; T:FILE.bmp.
+            const std::string v = argv[++i];
+            const std::size_t colon = v.find(':');
+            if (colon == std::string::npos) {
+                std::fprintf(stderr, "%s needs T:VALUE\n", std::string(arg).c_str());
+                return std::nullopt;
+            }
+            const auto at = static_cast<std::uint64_t>(std::atof(v.substr(0, colon).c_str()) * 1000);
+            std::string what = v.substr(colon + 1);
+            if (arg == "--editor-shot") {
+                opts.editor_script.shots.emplace_back(at, what);
+            } else {
+                SDL_Keymod mod = 0;
+                for (const auto& [prefix, bit] : {std::pair<std::string, SDL_Keymod>{"ctrl+", SDL_KMOD_LCTRL},
+                                                  {"shift+", SDL_KMOD_LSHIFT}, {"alt+", SDL_KMOD_LALT}}) {
+                    while (what.rfind(prefix, 0) == 0) {
+                        mod = static_cast<SDL_Keymod>(mod | bit);
+                        what = what.substr(prefix.size());
+                    }
+                }
+                const SDL_Keycode key = SDL_GetKeyFromName(what.c_str());
+                if (key == SDLK_UNKNOWN) {
+                    std::fprintf(stderr, "--editor-key: no key called %s\n", what.c_str());
+                    return std::nullopt;
+                }
+                opts.editor_script.keys.push_back({at, key, mod});
+            }
+        } else if (arg == "--editor-mouse" && has_value) {
+            // T:down|up|move:X,Y[:right]
+            std::vector<std::string> parts;
+            std::string part;
+            for (const char ch : std::string(argv[++i]) + ":") {
+                if (ch == ':' || ch == ',') {
+                    parts.push_back(part);
+                    part.clear();
+                } else {
+                    part += ch;
+                }
+            }
+            if (parts.size() < 4 || (parts[1] != "down" && parts[1] != "up" && parts[1] != "move")) {
+                std::fprintf(stderr, "--editor-mouse needs T:down|up|move:X,Y\n");
+                return std::nullopt;
+            }
+            ui::EditorScript::Mouse m;
+            m.at_ms = static_cast<std::uint64_t>(std::atof(parts[0].c_str()) * 1000);
+            m.kind = parts[1] == "down" ? ui::EditorScript::Mouse::Kind::Down
+                     : parts[1] == "up" ? ui::EditorScript::Mouse::Kind::Up
+                                        : ui::EditorScript::Mouse::Kind::Move;
+            m.x = static_cast<float>(std::atof(parts[2].c_str()));
+            m.y = static_cast<float>(std::atof(parts[3].c_str()));
+            m.button = parts.size() > 4 && parts[4] == "right" ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT;
+            opts.editor_script.mouse.push_back(m);
+        } else if (arg == "--editor-quit" && has_value) {
+            opts.editor_script.quit_ms = static_cast<std::uint64_t>(std::atof(argv[++i]) * 1000);
         } else if (arg == "--freeway-traffic" && has_value && (std::string_view(argv[i + 1]) == "smooth" ||
                                                               std::string_view(argv[i + 1]) == "original")) {
             opts.smooth_traffic = std::string_view(argv[++i]) == "smooth";
@@ -463,7 +533,9 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--graphics" || arg == "--scaling" ||
                                      arg == "--resolution" || arg == "--skyline" ||
                                      arg == "--depth-buffer" || arg == "--driving" || arg == "--lane-centering" ||
-                                     arg == "--freeway-traffic" || arg == "--map" || arg == "--freeways" ||
+                                     arg == "--freeway-traffic" || arg == "--map" || arg == "--objects" || arg == "--freeways" ||
+                                     arg == "--editor-key" || arg == "--editor-shot" || arg == "--editor-quit" ||
+                                     arg == "--editor-mouse" ||
                                      arg == "--link-listen" || arg == "--link-connect" || arg == "--link-course" ||
                                      arg == "--link-delay" || arg == "--link-jitter" || arg == "--online-server" ||
                                      arg == "--online-join";
@@ -522,6 +594,7 @@ std::filesystem::path save_dir() { return pref_dir("save"); }
 
 // The map editor's maps (ui/map_editor.h).
 std::filesystem::path maps_dir() { return pref_dir("maps"); }
+std::filesystem::path objects_dir() { return pref_dir("objects"); }
 
 // The two-player setup screen opens on the link this program makes (game::link_config: Direct, COM1,
 // 57.6k), so an online race's start just goes down it; unless the player has saved choices of their own.
@@ -613,6 +686,12 @@ struct EnhancedView {
     enhanced::Scene scene;
     enhanced::Scene mirror;  // the rear-view mirror's, while it's on
     Framebuffer under, over;
+    // The opponent screen's turning car, drawn at the display's resolution too.
+    std::unique_ptr<enhanced::MenuCar> menu_car;
+    bool smooth_menu_car = true;  // Settings::frame_rate Smooth: it turns smoothly
+    enhanced::Scene menu_scene;
+    host::Ega::Frame menu_background;
+    Framebuffer menu_under, menu_over;
     std::uint64_t frames = 0;
     double build_ms = 0;
     std::uint64_t vehicles = 0;  // drawn in the main view, over all frames
@@ -1246,7 +1325,34 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
             presenter.show_overlay(sheet);
         }
         const bool replaced = art && art->compose(top);
-        if (layered && replaced)
+        // The opponent screen with the Enhanced view: its turning car at the display's resolution, over the
+        // frame with the car's box as the background picture has it (the original's car gone).
+        bool menu_car = false;
+        if (!layered && !replaced && view && view->menu_car && fb.width == 320) {
+            float sx = 1, sy = 1;
+            presenter.frame_scale(fb.width, fb.height, sx, sy);
+            menu_car = view->menu_car->build(machine.emulated_ns(), 1.5f / std::max(sx, 1.0f), view->smooth_menu_car,
+                                             view->menu_scene);
+            if (menu_car) {
+                machine.ega().render_page(enhanced::MenuCar::kBackgroundStart, view->menu_background);
+                if (view->menu_background.width == fb.width) {
+                    view->menu_under = fb;
+                    for (int y = enhanced::MenuCar::kBoxY; y < enhanced::MenuCar::kBoxY + enhanced::MenuCar::kBoxH && y < fb.height; ++y) {
+                        for (int x = enhanced::MenuCar::kBoxX; x < enhanced::MenuCar::kBoxX + enhanced::MenuCar::kBoxW && x < fb.width; ++x) {
+                            const auto i = static_cast<std::size_t>(y * fb.width + x);
+                            view->menu_under.pixels[i] = view->menu_background.pixels[i];
+                        }
+                    }
+                    view->menu_over = fb;
+                    std::fill(view->menu_over.pixels.begin(), view->menu_over.pixels.end(), Presenter::kTransparentPixel);
+                } else {
+                    menu_car = false;
+                }
+            }
+        }
+        if (menu_car)
+            presenter.present(view->menu_under, view->menu_scene, view->menu_over);
+        else if (layered && replaced)
             presenter.present(view->under, view->scene, art->composite, view->inset());
         else if (layered)
             presenter.present(view->under, view->scene, view->over, view->inset());
@@ -1312,6 +1418,14 @@ int run(int argc, char** argv) {
         }
         std::optional<GameDir> game = search.dir;
 
+        // Checking the object editor: it alone, then out.
+        if (opts->object_editor && game) {
+            Presenter editor_presenter(kAppName);
+            Gamepad editor_gamepad;
+            ui::run_object_editor(editor_presenter, editor_gamepad, *game, objects_dir(), *opts->object_editor,
+                                  &opts->editor_script);
+            return 0;
+        }
         // Opened by an invite link while a game is running: that game takes it, and this copy is done.
         if (opts->invite && ui::online_available() && ui::forward_invite(*opts->invite)) {
             SDL_Log("Invite: handed to the game that's already running.");
@@ -1347,13 +1461,13 @@ int run(int argc, char** argv) {
             SDL_Log("Invite: %s", invite->c_str());
             const bool quit =
                 !ui::run_online(presenter, gamepad, settings, *game, online, *invite) && !online.link &&
-                ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir()) == ui::LaunchChoice::Quit;
+                ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir(), objects_dir()) == ui::LaunchChoice::Quit;
             keep_settings(presenter);
             if (quit)
                 return 0;
         } else if (opts->launcher.value_or(settings.show_launcher) || !game) {
             const bool quit =
-                ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir()) == ui::LaunchChoice::Quit;
+                ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir(), objects_dir()) == ui::LaunchChoice::Quit;
             keep_settings(presenter);
             if (quit)
                 return 0;
@@ -1417,6 +1531,19 @@ int run(int argc, char** argv) {
                             settings.map_name.c_str(), error.c_str());
             }
         }
+        // Objects of the player's own (ui/object_editor.h), except in two-player races: the drawing's cost
+        // is part of the game's timing, which both must share.
+        if (!settings.objects_name.empty()) {
+            if (online.link || opts->link_listen || opts->link_connect) {
+                SDL_Log("Objects: the original's (two-player races use them)");
+            } else if (auto pack = ui::load_object_pack(objects_dir(), settings.objects_name, error)) {
+                game::install_model_pack(machine, std::move(*pack));
+                SDL_Log("Objects: %s", settings.objects_name.c_str());
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Objects %s: %s; the original's instead",
+                            settings.objects_name.c_str(), error.c_str());
+            }
+        }
         // Without the freeways (after the map, which their roads go into); an online race as its host chose.
         const bool no_freeways = !(online.link ? online.setup.freeways : settings.freeways);
         if (no_freeways) {
@@ -1441,6 +1568,8 @@ int run(int argc, char** argv) {
         }
         if (enhanced_view) {
             view = std::make_unique<EnhancedView>();
+            view->menu_car = std::make_unique<enhanced::MenuCar>(machine);
+            view->smooth_menu_car = smooth_fps;
             if (settings.draw_distance == Settings::DrawDistance::Extended)
                 view->radius = kExtendedRadius;
             view->hills = settings.skyline == Settings::Skyline::Hills;

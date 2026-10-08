@@ -110,6 +110,7 @@ std::string Settings::serialize() const {
     out << "smooth_traffic = " << kOnOff[smooth_traffic] << "\n";
     out << "freeways = " << kOnOff[freeways] << "\n";
     out << "map = " << map_name << "\n";
+    out << "objects = " << objects_name << "\n";
     out << kEffects.key << " = " << kEffects.names[static_cast<size_t>(effects)] << "\n";
     out << kMusic.key << " = " << kMusic.names[static_cast<size_t>(music)] << "\n";
     out << kGraphics.key << " = " << kGraphics.names[static_cast<size_t>(graphics)] << "\n";
@@ -148,6 +149,8 @@ Settings Settings::parse(const std::string& text) {
         read_bool("freeways", kOnOff, key, value, s.freeways);
         if (key == "map")
             s.map_name = std::string(value);
+        if (key == "objects")
+            s.objects_name = std::string(value);
         read(kEffects, key, value, s.effects);
         read(kMusic, key, value, s.music);
         read(kGraphics, key, value, s.graphics);

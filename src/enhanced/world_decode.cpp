@@ -109,11 +109,15 @@ bool decode_model_mesh(const ImageView& img, uint16_t seg, uint16_t header, Mode
     const uint16_t vptr = img.u16(seg, static_cast<uint16_t>(header + 4));
     const uint16_t optr = img.u16(seg, static_cast<uint16_t>(header + 6));
     char buf[96];
-    if (hseg != seg || nverts < 4 || nverts > 128) {
+    // The header's own segment holds the model (245A for the original's; an edited one elsewhere, as
+    // game/model_pack.h writes them).
+    if (hseg == 0 || nverts < 4 || nverts > 128) {
         std::snprintf(buf, sizeof buf, "model header %04X: segment %04X, %u vertices", header, hseg, nverts);
         error = buf;
         return false;
     }
+    const uint16_t header_seg = seg;
+    seg = hseg;
     for (uint16_t i = 0; i < nverts; ++i) {
         const auto at = static_cast<uint16_t>(vptr + 6 * i);
         out.verts.push_back({img.s16(seg, at), img.s16(seg, static_cast<uint16_t>(at + 2)),
@@ -153,7 +157,7 @@ bool decode_model_mesh(const ImageView& img, uint16_t seg, uint16_t header, Mode
                 if (!read_face(img, seg, fa, f, error)) {
                     return false;
                 }
-                if (colour_override >= 0) {
+                if (colour_override >= 0 && seg == header_seg) {  // (the far boxes: the original's)
                     for (const uint16_t pf : patched_faces) {
                         if (static_cast<uint16_t>(fa + 2) == pf) {
                             f.colour.raw = static_cast<uint8_t>(colour_override);

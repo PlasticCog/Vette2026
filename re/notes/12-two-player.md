@@ -266,6 +266,16 @@ Two games at 12 MHz (10–12 frames a second, both at full speed, 810 units/s, s
   and 1054).
 - **The smooth renderer** and the Enhanced world tracer run on scratch CPUs whose I/O reaches only the EGA (or
   nothing) and which have no interrupt controller: they can't touch the UART or the link.
+- **`game::IntroLink`** (`game/race_intro.h`): once the cable is connected, each game first sends its intro
+  ("VETTE2026 INTRO 1", the length, then `name=` and, from the host, `map` and its map's text), and takes the
+  other's off the front of what arrives, before the UART sees anything: the players' names, and an online race in
+  the host's own map (installed at 3009:0025 like any map, before the guest's game starts). The original's
+  bytes before the intro has gone out are dropped, as on a cable nobody listens to yet.
+- **Name tag and arrow** (`enhanced/player_markers.h`): drawn from the frame's DS, the remote car `DS:2F09`
+  (+22h/+24h its big tile) against this one `DS:2D35`, through the camera `DS:2C71` and the viewport (the
+  mirror's from `DS:2B87`, as in section "Rear-view mirror" of notes 03). Classic takes DS at 3009:036E (the
+  world about to be drawn), keeps it until the page flip has shown that frame (0546), and notes the mirror
+  (0666). Nothing on a freeway: `DS:2AD4` (this car) or `DS:842B` (the other's last packet a freeway's).
 
 ## Open questions
 

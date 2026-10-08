@@ -347,7 +347,7 @@ void OnlineLink::run_host() {
     LanHost lan;
     bool lan_answering = false;               // set_race done
     std::optional<RaceSettings> lan_settings;  // with these settings
-    const std::string name = computer_name();
+    const std::string name = options_.lan_name.empty() ? computer_name() : options_.lan_name;
     if (lan_code && options_.lan_port != 0) {
         std::string error;
         if (!lan.start(error, options_.lan_port)) {

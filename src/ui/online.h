@@ -5,6 +5,7 @@
 // are connected; the game then takes both into the original's two-player race (game/two_player.h).
 // Keyboard or gamepad.
 
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -12,6 +13,8 @@
 
 #include "core/game_dir.h"
 #include "core/settings.h"
+#include "game/city_map.h"
+#include "game/race_intro.h"
 #include "game/two_player.h"
 #include "host/serial_link.h"
 
@@ -27,11 +30,19 @@ namespace vette::ui {
 
 // Both players connected, ready to race.
 struct OnlineSession {
-    std::unique_ptr<host::SerialLink> link;  // a net::OnlineLink: the game's serial cable
+    std::unique_ptr<host::SerialLink> link;  // a net::OnlineLink
     net::OnlineLink* online = nullptr;       // the same, for its status
+    // The game's serial cable: `link` with the two games' intros (game/race_intro.h) already exchanged.
+    std::unique_ptr<game::IntroLink> cable;
     bool host = false;
     game::TwoPlayerSetup setup;  // the host's choice: the course and the driving physics, for both
+    std::string friend_name;     // the other player's name
+    std::optional<game::CityMap> map;  // the host's city, for both (none: the original's)
+    std::string map_name;
 };
+
+// A player's name as shown: theirs, or "Player" if they haven't chosen one.
+std::string shown_name(std::string_view name);
 
 // False when this build has no online play (built without libcurl).
 bool online_available();
@@ -46,15 +57,16 @@ std::optional<std::string> take_forwarded_invite();
 bool leave_for_invite(const std::string& link);
 
 // Runs the online race screen. True: `session` is ready (the race can start); false: the player went
-// back. Edits the server address and the host's course in `settings`. `join_now`: an invite link or code
-// to join straight away (a vette2026:// link the game was opened with).
+// back. Edits the player's name, the host's course and the other online choices in `settings`. A host
+// that plays a map of its own (`settings.map_name`, in `maps_dir`) races its friend in it. `join_now`: an
+// invite link or code to join straight away (a vette2026:// link the game was opened with).
 bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& settings, const GameDir& game,
-                OnlineSession& session, std::string_view join_now = {});
+                const std::filesystem::path& maps_dir, OnlineSession& session, std::string_view join_now = {});
 
 // Without the menu (--online-host / --online-join, for testing): hosts (logging the codes) or joins by
 // `code` (any code or invite link), and waits until both players are connected. False, with the reason
 // in `error`, if that fails or takes longer than `timeout_s`.
-bool connect_online(const Settings& settings, const GameDir& game, bool host, std::string_view code,
-                    OnlineSession& session, std::string& error, double timeout_s = 300);
+bool connect_online(const Settings& settings, const GameDir& game, const std::filesystem::path& maps_dir, bool host,
+                    std::string_view code, OnlineSession& session, std::string& error, double timeout_s = 300);
 
 }  // namespace vette::ui

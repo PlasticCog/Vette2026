@@ -2,8 +2,10 @@
 // The player's settings: what the launch menu edits. Stored as `key = value` lines in settings.ini in
 // the user's settings folder. Command-line flags override them for one run.
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 namespace vette {
 
@@ -75,6 +77,12 @@ struct Settings {
     bool online_port_forwarded = false;
     std::string online_address;
     std::string online_server;
+    // Two-player races: the name the other player sees over this player's car (printable ASCII, at most
+    // kMaxPlayerName characters; empty: "Player"), and whether the other player's tag and the arrow to
+    // them are shown (Tab in the race switches them).
+    static constexpr std::size_t kMaxPlayerName = 16;
+    std::string player_name;
+    bool player_markers = true;
 
     // Classic is VETTE! exactly as shipped in 1989 (its own frames, a 12 MHz PC/AT, the manual
     // question); Enhanced switches every improvement on. Presets set only the options that change
@@ -87,6 +95,10 @@ struct Settings {
 
     bool operator==(const Settings&) const = default;
 };
+
+// A player's name as it's shown and sent: printable ASCII only, spaces collapsed, trimmed, at most
+// Settings::kMaxPlayerName characters (empty if nothing is left).
+std::string clean_player_name(std::string_view typed);
 
 // A missing or unreadable file gives the defaults. save_settings creates the folder if needed.
 Settings load_settings(const std::filesystem::path& file);

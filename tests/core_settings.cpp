@@ -4,6 +4,7 @@
 #include "test.h"
 
 using vette::Settings;
+using vette::clean_player_name;
 
 TEST(settings_defaults_are_the_enhanced_preset) {
     const Settings s;
@@ -57,7 +58,21 @@ TEST(settings_round_trip) {
     s.online_course = 3;
     s.online_port_forwarded = true;
     s.online_address = "203.0.113.5";
+    s.player_name = "Dr. Ruth = #1";
+    s.player_markers = false;
     CHECK(Settings::parse(s.serialize()) == s);
+}
+
+TEST(settings_player_names_are_cleaned) {
+    CHECK_EQ(clean_player_name("  Alex   Ray  "), std::string("Alex Ray"));
+    CHECK_EQ(clean_player_name("Ren\xC3\xA9" "e\t!"), std::string("Rene!"));  // printable ASCII only
+    CHECK_EQ(clean_player_name("A very long name indeed"), std::string("A very long name"));
+    CHECK_EQ(clean_player_name("Sixteen chars ab cd"), std::string("Sixteen chars ab"));
+    CHECK_EQ(clean_player_name("Fifteen chars a bcd"), std::string("Fifteen chars a"));  // no space at the end
+    CHECK_EQ(clean_player_name(" \x01 "), std::string());
+    CHECK_EQ(Settings::parse("player_name =   Bo  Diddley \n").player_name, std::string("Bo Diddley"));
+    CHECK(Settings::parse("player_markers = off\n").player_markers == false);
+    CHECK(Settings{}.player_markers);
 }
 
 TEST(settings_keep_the_players_changes) {

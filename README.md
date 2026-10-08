@@ -143,8 +143,9 @@ land, Ctrl+Z/Ctrl+Y undo and redo, Ctrl+S saves (F1 lists every key). The city i
 16 x 16 cells, and big tiles that share a design (the water around the city, for one) change together.
 Maps are saved in VETTE! 2026's own folder (`maps`, next to `save`) and put into the game as it starts;
 the game's files are never changed. `--map NAME` plays one for one run. For now the original's traffic,
-pedestrians and computer opponent keep their fixed routes, which can run through what you change, the
-street names and dashboard signs are the original's, and online races use the original map.
+pedestrians and computer opponent keep their fixed routes, which can run through what you change, and the
+street names and dashboard signs are the original's. An online race is in the host's map: their game sends
+it to the friend's as the race begins.
 
 **Object editor.** The launch menu's **Objects** row picks the cars, pedestrians and landmarks: the
 original's, or a set you've reshaped. Enter on it opens the object editor: the original's 58 3D models
@@ -168,8 +169,16 @@ mode, with no server in between: the games connect straight to each other. In th
 your friend in any chat; they choose **Online race > Join a race** (the code is picked up from their
 clipboard) and both games go straight into the race. A `vette2026://direct/CODE` link does the same, and
 if VETTE! 2026 is already running, that copy joins. The race is on the host's course and with the host's
-Driving setting; Lane centering stays each player's own, and jumps show on both screens. Both players
-need the same version of VETTE! 2026 and their own copy of DOS VETTE! 1.1.
+Driving setting (and in the host's map, if they play one of their own); Lane centering stays each
+player's own, and jumps show on both screens. Both players need the same version of VETTE! 2026 and
+their own copy of DOS VETTE! 1.1.
+
+**Name tag and arrow.** In two-player races, each player's name floats over their car on the other's screen,
+and a yellow arrow on the ground circles your car, pointing at your friend's wherever they are (in the
+helicopter view, F4, you see it all round; from the driver's seat, when they're ahead or in the mirror).
+**Tab** shows or hides both during the race; the original leaves Tab unused. Set your name and whether
+they start on in the online screen (**Your name**, **Tag and arrow**); a LAN race is listed by its host's
+name. They're drawn at the display's resolution in Classic too, and kept out from under the mirror.
 
 **LAN races.** Two players on the same network (the same Wi-Fi or router) choose **Host a LAN race** and
 **Join a LAN race**: the second lists the races hosted on the network, and Enter joins one. There's no code
@@ -217,7 +226,8 @@ windows. `--pc 286` emulates a 12 MHz PC/AT of 1989 (about 12-17 fps); `--cpu-hz
 
 - **Keyboard:** every key goes to the game, Esc included, except this program's own: **Ctrl+H** shows
   the keys over the game (it pauses, except in an online race), **Alt+Q** quits to the desktop from any
-  screen, and F11 or Alt+Enter toggles fullscreen. **X** is the horn (with AdLib or the Mac sounds): the
+  screen, F11 or Alt+Enter toggles fullscreen, and in two-player races **Tab** shows or hides the other
+  player's name tag and the arrow to them. **X** is the horn (with AdLib or the Mac sounds): the
   DOS game has none, so it plays the Mac's. The original's own Ctrl+Q leaves the race, as does Esc's menu.
 - **Mouse:** acts as the PC's mouse. When the game shows the mouse pointer, it's drawn over the picture
   as the classic DOS arrow, and the Windows pointer is hidden while it's over the window.

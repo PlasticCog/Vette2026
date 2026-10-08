@@ -438,7 +438,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
                 selected = kFolder;
             } else if (!online || !online_available()) {
                 status = "This copy of VETTE! 2026 was built without online play.";
-            } else if (run_online(presenter, gamepad, s, *game, *online)) {
+            } else if (run_online(presenter, gamepad, s, *game, maps_dir, *online)) {
                 choice = LaunchChoice::Online;
                 return true;
             }
@@ -475,7 +475,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
         // An invite link opened while the menu is up (handed over by the new copy it started).
         if (const auto forwarded = take_forwarded_invite()) {
             SDL_RaiseWindow(presenter.window());
-            if (game && online && online_available() && run_online(presenter, gamepad, s, *game, *online, *forwarded))
+            if (game && online && online_available() && run_online(presenter, gamepad, s, *game, maps_dir, *online, *forwarded))
                 return LaunchChoice::Online;
         }
         // A folder chosen in the dialog: use it if VETTE!'s files are all there.
@@ -565,7 +565,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
                 break;
             case SDL_EVENT_DROP_FILE:  // macOS: an invite link opened while the menu is up
                 if (e.drop.data && is_invite_link(e.drop.data) && game && online && online_available() &&
-                    run_online(presenter, gamepad, s, *game, *online, e.drop.data)) {
+                    run_online(presenter, gamepad, s, *game, maps_dir, *online, e.drop.data)) {
                     choice = LaunchChoice::Online;
                     done = true;
                 }

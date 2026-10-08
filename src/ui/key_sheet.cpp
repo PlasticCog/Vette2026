@@ -57,6 +57,7 @@ constexpr Key kRight[] = {
     {"", ""},
     {"", "VETTE! 2026"},
     {"Ctrl+H", "These keys"},
+    {"Tab", "2P: tag, arrow"},
     {"Alt+Q", "Quit to desktop"},
     {"F11", "Full screen"},
 };

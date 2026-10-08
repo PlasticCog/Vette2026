@@ -8,6 +8,7 @@
 #include "enhanced/backdrop.h"
 #include "enhanced/lanes.h"
 #include "enhanced/menu_car.h"
+#include "enhanced/player_markers.h"
 #include "enhanced/scene.h"
 #include "enhanced/world.h"
 #include "game/driving.h"
@@ -15,6 +16,7 @@
 #include "game/city_map.h"
 #include "game/model_pack.h"
 #include "game/no_freeways.h"
+#include "game/race_intro.h"
 #include "game/smooth.h"
 #include "game/two_player.h"
 #include "game/x86.h"
@@ -66,6 +68,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace vette {
@@ -148,6 +151,8 @@ constexpr const char* kUsage =
     "  --link-course N      the host's course, 1-4 (default 1; the guest takes the host's)\n"
     "  --link-delay MS, --link-jitter MS   delay what arrives by MS plus a random 0..jitter, in order\n"
     "  --link-manual        don't drive the menus: Esc > Communications > Two players yourself\n"
+    "  --player-name NAME   your name in two-player races, for this run (the other player sees it over\n"
+    "                       your car)\n"
     "\n"
     "Ctrl+H shows the keys during the game; Alt+Q quits to the desktop from any screen; F11 or\n"
     "Alt+Enter toggles fullscreen. Every other key, Esc included, goes to the game.\n"
@@ -225,6 +230,8 @@ struct Options {
     // Checking the object editor (testing): open it at once on set NAME (or a new one), with keys and
     // screenshots at times, and quit after it.
     std::optional<std::string> object_editor;
+    // Checking the online race screen (testing): open it at once; --press times are seconds after it opens.
+    bool online_screen = false;
     ui::EditorScript editor_script;
     std::optional<bool> freeways;
     std::vector<ScriptedKey> keys;
@@ -246,8 +253,11 @@ struct Options {
     int link_course = 1;
     double link_delay_ms = 0, link_jitter_ms = 0;
     bool link_manual = false;
+    std::optional<std::string> player_name;
 
     void apply_to(Settings& s) const {
+        if (player_name)
+            s.player_name = clean_player_name(*player_name);
         if (online_server)
             s.online_server = *online_server;
         if (frame_rate)
@@ -322,6 +332,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
             (arg == "--link-delay" ? opts.link_delay_ms : opts.link_jitter_ms) = std::max(0.0, std::atof(argv[++i]));
         } else if (arg == "--link-manual") {
             opts.link_manual = true;
+        } else if (arg == "--player-name" && has_value) {
+            opts.player_name = argv[++i];
         } else if ((arg == "--shot" || arg == "--quit-after") && has_value) {
             const auto ns = static_cast<std::uint64_t>(std::atof(argv[++i]) * static_cast<double>(kNsPerSecond));
             if (arg == "--shot")
@@ -361,6 +373,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
             opts.map_name = argv[++i];
         } else if (arg == "--objects" && has_value) {
             opts.objects_name = argv[++i];
+        } else if (arg == "--online-screen") {
+            opts.online_screen = true;
         } else if (arg == "--object-editor") {
             opts.object_editor = has_value && argv[i + 1][0] != '-' ? std::string(argv[++i]) : std::string();
         } else if ((arg == "--editor-key" || arg == "--editor-shot") && has_value) {
@@ -538,7 +552,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--editor-mouse" ||
                                      arg == "--link-listen" || arg == "--link-connect" || arg == "--link-course" ||
                                      arg == "--link-delay" || arg == "--link-jitter" || arg == "--online-server" ||
-                                     arg == "--online-join";
+                                     arg == "--online-join" || arg == "--player-name";
             std::fprintf(stderr, "%s: %s\n\n%s", needs_value ? "Missing or invalid value for" : "Unknown option",
                          argv[i], kUsage);
             return std::nullopt;
@@ -931,6 +945,120 @@ std::unique_ptr<sound::SfxBackend> pc98_music(const GameVersions& versions, host
 struct TwoPlayerLink {
     virtual ~TwoPlayerLink() = default;
     virtual void update(host::Machine& machine, DrivingAids* driving) = 0;
+    // The other player's name (game/race_intro.h); empty until their game has said it.
+    virtual std::string other_name() const = 0;
+};
+
+// Two-player races: the other player's name in a tag over their car and an arrow on the ground round this
+// one that points at them (enhanced/player_markers.h). Tab shows or hides them: the original leaves it
+// unused in races.
+struct PlayerMarkers {
+    bool on = true;
+    std::string name;                             // the other player's
+    std::unique_ptr<enhanced::ShownFrame> shown;  // the memory of the race frame on screen (Classic)
+    std::uint64_t banner_until = 0;               // SDL ticks: whether they're on is shown until then
+    // Classic: this frame's, for the original's frame at the display's resolution (present_classic()).
+    enhanced::Scene scene, mirror_scene;
+    bool classic = false, classic_mirror = false;  // they're there
+    Framebuffer see_through;                       // an `over` that lets everything through
+
+    void toggle() {
+        on = !on;
+        banner_until = SDL_GetTicksNS() + 2 * kNsPerSecond;
+        SDL_Log("Name tag and arrow: %s", on ? "on" : "off");
+    }
+    const char* banner() const {
+        return SDL_GetTicksNS() >= banner_until ? nullptr : on ? "Name tag and arrow: on" : "Name tag and arrow: off";
+    }
+
+    // Into the Enhanced view's scenes (the main view's and the mirror's).
+    void add(EnhancedView& view, const Presenter& presenter) const {
+        const std::uint8_t* ds = view.layers.ram.data() + host::Cpu::linear(game::kDataSeg, 0);
+        enhanced::MarkerOptions o;
+        o.name = name;
+        o.depth = presenter.depth_buffer();
+        presenter.frame_scale(view.layers.under.width, view.layers.under.height, o.pixel_w, o.pixel_h);
+        if (on) {
+            o.avoid_mirror = view.layers.mirror;
+            enhanced::add_player_markers(ds, o, view.scene);
+            o.avoid_mirror = false;
+            if (view.layers.mirror) {
+                o.mirror = true;
+                enhanced::add_player_markers(ds, o, view.mirror);
+                o.mirror = false;
+            }
+        }
+        if (const char* text = banner())
+            enhanced::add_banner(ds, text, o, view.scene);
+    }
+
+    // For the original's frame (Classic): from the replay's memory with the Smooth frame rate (`replay_ram`),
+    // else from the frame on screen. Drawn at the display's resolution over the frame (present_classic()),
+    // or, `in_frame` (another version's art is composited from the frame), into its pixels.
+    void classic_frame(Framebuffer& fb, const std::uint8_t* replay_ram, std::uint64_t now_ns, const Presenter& presenter,
+                       bool in_frame) {
+        classic = classic_mirror = false;
+        if (fb.width != 320 || (!on && !banner()))
+            return;
+        bool mirror = false;
+        const std::uint8_t* shown_ds = shown ? shown->ds(now_ns, mirror) : nullptr;
+        const std::uint8_t* ds = replay_ram ? replay_ram + host::Cpu::linear(game::kDataSeg, 0) : shown_ds;
+        if (!ds || !shown_ds)
+            return;  // (not a race frame in the city)
+        enhanced::MarkerOptions o;
+        o.name = name;
+        if (!in_frame) {
+            o.depth = presenter.depth_buffer();
+            presenter.frame_scale(fb.width, fb.height, o.pixel_w, o.pixel_h);
+        }
+        scene.clear();
+        mirror_scene.clear();
+        if (on) {
+            if (mirror) {  // the mirror's view: its own (the main view's tag keeps out of it)
+                o.mirror = true;
+                classic_mirror = enhanced::add_player_markers(ds, o, mirror_scene);
+                o.mirror = false;
+            }
+            o.avoid_mirror = mirror;
+            classic = enhanced::add_player_markers(ds, o, scene);
+            o.avoid_mirror = false;
+        }
+        if (const char* text = banner()) {
+            enhanced::add_banner(ds, text, o, scene);
+            classic = true;
+        }
+        if (in_frame) {
+            std::array<std::uint32_t, 16> palette{};
+            for (std::size_t i = 0; i < palette.size(); ++i)
+                palette[i] = std::uint32_t{fb.palette[i].r} << 16 | std::uint32_t{fb.palette[i].g} << 8 | fb.palette[i].b;
+            std::array<int, 4> skip{};
+            if (classic_mirror) {
+                skip = {mirror_scene.view_x0, mirror_scene.view_y0, mirror_scene.view_x1, mirror_scene.view_y1};
+                enhanced::draw_scene_paletted(mirror_scene, fb.pixels.data(), fb.width, fb.height, palette);
+            }
+            if (classic)
+                enhanced::draw_scene_paletted(scene, fb.pixels.data(), fb.width, fb.height, palette, skip);
+            classic = classic_mirror = false;
+        } else if (classic || classic_mirror) {
+            // The mirror's in the main scene (an inset would be drawn with a sky of its own).
+            if (classic_mirror) {
+                if (!classic)
+                    std::tie(scene.view_x0, scene.view_y0, scene.view_x1, scene.view_y1) =
+                        std::tuple(0, 0, fb.width, fb.height);
+                enhanced::append_clipped(scene, mirror_scene);
+            }
+            classic = true;
+            if (see_through.width != fb.width || see_through.height != fb.height) {
+                see_through.width = fb.width;
+                see_through.height = fb.height;
+                see_through.pixels.assign(static_cast<std::size_t>(fb.width * fb.height), Presenter::kTransparentPixel);
+            }
+        }
+    }
+    void present_classic(Presenter& presenter, const Framebuffer& fb) {
+        see_through.palette = fb.palette;
+        presenter.present(fb, scene, see_through);
+    }
 };
 
 // --- Development two-player link (--link-listen / --link-connect) ----------------------------------------
@@ -940,6 +1068,7 @@ struct TwoPlayerLink {
 struct DevLink final : TwoPlayerLink {
     std::unique_ptr<host::TcpLink> tcp;
     std::unique_ptr<host::DelayedLink> delayed;  // --link-delay / --link-jitter
+    std::unique_ptr<game::IntroLink> intro;      // the players' names, first
     std::unique_ptr<game::LinkPacer> pacer;
     std::unique_ptr<game::TwoPlayerStart> start;
     bool host = false;
@@ -950,6 +1079,11 @@ struct DevLink final : TwoPlayerLink {
     bool got_setup = false;
     int jumps = 0;                 // logged so far: this car's jumps,
     bool remote_airborne = false;  // and whether the other car was last seen in the air
+    bool named = false;            // the other player's name logged
+
+    std::string other_name() const override {
+        return intro && intro->received() ? ui::shown_name(clean_player_name(intro->theirs()->name)) : std::string();
+    }
 
     // Between emulation slices: the setup from the host, the menus, the connection's state.
     void update(host::Machine& machine, DrivingAids* driving) override {
@@ -957,6 +1091,14 @@ struct DevLink final : TwoPlayerLink {
         if (tcp->connected() != connected) {
             connected = tcp->connected();
             SDL_Log("Two players: %s", connected ? "the other game is connected" : tcp->closed_reason().c_str());
+        }
+        intro->poll();
+        if (!named && (intro->received() || intro->failed())) {
+            named = true;
+            if (intro->received())
+                SDL_Log("Two players: racing %s", other_name().c_str());
+            else
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Two players: %s", intro->error().c_str());
         }
         if (!host && !got_setup && tcp->hello()) {
             got_setup = true;
@@ -1043,7 +1185,8 @@ std::unique_ptr<DevLink> make_dev_link(const Options& opts, const Settings& sett
         cable = link->delayed.get();
         SDL_Log("Two players: arrivals delayed by %.0f ms + up to %.0f ms", opts.link_delay_ms, opts.link_jitter_ms);
     }
-    link->pacer = std::make_unique<game::LinkPacer>(machine, *cable);
+    link->intro = std::make_unique<game::IntroLink>(*cable, game::RaceIntro{ui::shown_name(settings.player_name), std::nullopt});
+    link->pacer = std::make_unique<game::LinkPacer>(machine, *link->intro);
     machine.attach_serial(link->pacer.get());
     if (link->host && !link->manual)
         link->begin(machine);
@@ -1061,6 +1204,8 @@ struct OnlineRace final : TwoPlayerLink {
     SDL_Window* window = nullptr;
     std::uint64_t next_title_ns = 0;
 
+    std::string other_name() const override { return session.friend_name; }
+
     void update(host::Machine&, DrivingAids*) override {
         const auto before = start->phase();
         start->poll();
@@ -1074,13 +1219,13 @@ struct OnlineRace final : TwoPlayerLink {
             std::string title = std::string(kAppName) + " - online race: ";
             switch (st.state) {
             case net::LinkState::Connected:
-                title += std::string("racing your friend, ") + net::to_string(st.route);
+                title += "racing " + session.friend_name + ", " + net::to_string(st.route);
                 if (st.rtt_ms >= 0)
                     title += ", " + std::to_string(static_cast<int>(st.rtt_ms + 0.5)) + " ms";
                 break;
             case net::LinkState::Reconnecting: title += "reconnecting..."; break;
-            case net::LinkState::PeerAway: title += "your friend's connection dropped"; break;
-            default: title += "your friend has gone"; break;
+            case net::LinkState::PeerAway: title += session.friend_name + "'s connection dropped"; break;
+            default: title += session.friend_name + " has gone"; break;
             }
             SDL_SetWindowTitle(window, title.c_str());
         }
@@ -1093,7 +1238,8 @@ std::unique_ptr<OnlineRace> make_online_race(ui::OnlineSession session, const Se
     auto race = std::make_unique<OnlineRace>();
     race->session = std::move(session);
     race->window = window;
-    race->pacer = std::make_unique<game::LinkPacer>(machine, *race->session.link);
+    race->pacer = std::make_unique<game::LinkPacer>(
+        machine, race->session.cable ? static_cast<host::SerialLink&>(*race->session.cable) : *race->session.link);
     machine.attach_serial(race->pacer.get());
     const game::TwoPlayerSetup& setup = race->session.setup;
     if (driving)  // both games drive with the host's physics; lane centering is each player's own
@@ -1113,7 +1259,7 @@ std::unique_ptr<OnlineRace> make_online_race(ui::OnlineSession session, const Se
 // the testing options (keys, screenshots, quit time).
 void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Gamepad& gamepad,
                game::SmoothRenderer* smooth, EnhancedView* view, GameSound* game_sound, Artwork* art,
-               DrivingAids* driving, const Options& script, TwoPlayerLink* link) {
+               DrivingAids* driving, const Options& script, TwoPlayerLink* link, PlayerMarkers* markers) {
     std::size_t next_key = 0;
     std::size_t next_press = 0;
     std::size_t next_poke = 0;
@@ -1184,6 +1330,11 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
                     break;
                 }
                 const SDL_Scancode sc = event.key.scancode;
+                if (markers && sc == SDL_SCANCODE_TAB) {  // never the game's (it does nothing with it in a race)
+                    if (down && !event.key.repeat && !keys_open)
+                        markers->toggle();
+                    break;
+                }
                 if (!down && kept_out[sc]) {
                     kept_out[sc] = false;
                     break;
@@ -1285,8 +1436,11 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
             view->prepare(machine);
         if (driving)
             driving->prepare(machine, view);
-        if (link)
+        if (link) {
             link->update(machine, driving);
+            if (markers && markers->name.empty())
+                markers->name = link->other_name();
+        }
         // An invite link opened while a game runs (handed over by the new copy it started): leave and join?
         if (const auto invite = ui::take_forwarded_invite()) {
             SDL_RaiseWindow(presenter.window());
@@ -1301,10 +1455,16 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
             last = SDL_GetTicksNS();  // (the emulation doesn't catch up on the time the question took)
         }
         const bool layered = view && smooth && view->render(machine, *smooth, presenter);
+        if (layered && markers)
+            markers->add(*view, presenter);
         if (!layered) {
-            if (!smooth || !smooth->render(machine.emulated_ns(), frame))
+            const bool replayed = smooth && smooth->render(machine.emulated_ns(), frame);
+            if (!replayed)
                 machine.render(frame);
             copy_frame(frame, fb);
+            if (markers)
+                markers->classic_frame(fb, replayed ? smooth->replay_ram() : nullptr, machine.emulated_ns(), presenter,
+                                       art != nullptr);
         }
         // The mouse driver's pointer goes on the copy, never into video memory. Text mode isn't shown.
         Framebuffer& top = layered ? view->over : fb;
@@ -1358,6 +1518,8 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
             presenter.present(view->under, view->scene, view->over, view->inset());
         else if (replaced)
             presenter.present(art->composite);
+        else if (markers && markers->classic)
+            markers->present_classic(presenter, fb);
         else
             presenter.present(fb);
         ++presented.frames;
@@ -1426,6 +1588,31 @@ int run(int argc, char** argv) {
                                   &opts->editor_script);
             return 0;
         }
+        // Checking the online screen: it alone (with --press keys on the wall clock), then out.
+        if (opts->online_screen && game) {
+            Presenter screen_presenter(kAppName);
+            screen_presenter.set_fullscreen(settings.fullscreen);
+            Gamepad screen_gamepad;
+            struct Timed {
+                ScriptedPress press;
+                SDL_Window* window;
+            };
+            std::vector<std::unique_ptr<Timed>> timed;
+            std::vector<SDL_TimerID> timers;
+            for (const ScriptedPress& p : opts->presses) {
+                timed.push_back(std::make_unique<Timed>(Timed{p, screen_presenter.window()}));
+                timers.push_back(SDL_AddTimer(static_cast<Uint32>(p.at_ns / 1'000'000), [](void* data, SDL_TimerID, Uint32) -> Uint32 {
+                    const auto* t = static_cast<const Timed*>(data);
+                    push_press(t->press, t->window);
+                    return 0;
+                }, timed.back().get()));
+            }
+            ui::OnlineSession session;
+            ui::run_online(screen_presenter, screen_gamepad, settings, *game, maps_dir(), session);
+            for (const SDL_TimerID id : timers)
+                SDL_RemoveTimer(id);
+            return 0;
+        }
         // Opened by an invite link while a game is running: that game takes it, and this copy is done.
         if (opts->invite && ui::online_available() && ui::forward_invite(*opts->invite)) {
             SDL_Log("Invite: handed to the game that's already running.");
@@ -1433,6 +1620,9 @@ int run(int argc, char** argv) {
         }
         ui::accept_forwarded_invites(argv[0]);
 
+        // The menus take the click that brings the window to the front (Windows drops it otherwise: a row
+        // clicked in a window that wasn't active did nothing). Not in the game, where it would be the game's.
+        SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
         Presenter presenter(kAppName);
         presenter.set_fullscreen(settings.fullscreen);
         presenter.set_smooth_scaling(settings.scaling == Settings::Scaling::Smooth);
@@ -1460,7 +1650,7 @@ int run(int argc, char** argv) {
         if (invite && game && ui::online_available()) {
             SDL_Log("Invite: %s", invite->c_str());
             const bool quit =
-                !ui::run_online(presenter, gamepad, settings, *game, online, *invite) && !online.link &&
+                !ui::run_online(presenter, gamepad, settings, *game, maps_dir(), online, *invite) && !online.link &&
                 ui::run_launcher(presenter, gamepad, settings, game, search, &online, maps_dir(), objects_dir()) == ui::LaunchChoice::Quit;
             keep_settings(presenter);
             if (quit)
@@ -1478,7 +1668,7 @@ int run(int argc, char** argv) {
             if (opts->online_server)
                 run.online_server = *opts->online_server;
             std::string error;
-            if (!ui::connect_online(run, *game, opts->online_host, opts->online_join.value_or(""), online, error))
+            if (!ui::connect_online(run, *game, maps_dir(), opts->online_host, opts->online_join.value_or(""), online, error))
                 throw std::runtime_error("Online race: " + error);
         }
         SDL_Log("Game folder: %s", path_to_utf8(search.versions.root).c_str());
@@ -1519,9 +1709,17 @@ int run(int argc, char** argv) {
         std::string error;
         if (!machine.boot(error))
             throw std::runtime_error("Couldn't start VETTE.EXE: " + error);
-        // A map of the player's own (ui/map_editor.h), except in two-player races: both need the same city.
-        if (!settings.map_name.empty()) {
-            if (online.link || opts->link_listen || opts->link_connect) {
+        // A map of the player's own (ui/map_editor.h). Two players need the same city: an online race is in
+        // the host's (which its game sent this one), the development link's in the original.
+        if (online.link) {
+            if (online.map) {
+                game::install_city_map(machine, *online.map);
+                SDL_Log("Map: %s (the host's, for both players)", online.map_name.c_str());
+            } else {
+                SDL_Log("Map: the original (the host's choice)");
+            }
+        } else if (!settings.map_name.empty()) {
+            if (opts->link_listen || opts->link_connect) {
                 SDL_Log("Map: the original (two-player races use it)");
             } else if (const auto map = ui::load_map(maps_dir(), settings.map_name, error)) {
                 game::install_city_map(machine, *map);
@@ -1648,9 +1846,19 @@ int run(int argc, char** argv) {
             link = make_online_race(std::move(online), settings, machine, driving.get(), presenter.window());
         else
             link = make_dev_link(*opts, settings, machine);
+        std::unique_ptr<PlayerMarkers> markers;
+        if (link) {
+            markers = std::make_unique<PlayerMarkers>();
+            markers->on = settings.player_markers;
+            markers->shown = std::make_unique<enhanced::ShownFrame>(machine);
+            SDL_Log("Name tag and arrow: %s (Tab)", markers->on ? "on" : "off");
+        }
+        SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "0");
         main_loop(presenter, machine, audio ? &*audio : nullptr, gamepad, smooth ? &*smooth : nullptr, view.get(),
-                  game_sound.get(), art.get(), driving.get(), *opts, link.get());
-        keep_settings(presenter);  // (Alt+Enter in the game)
+                  game_sound.get(), art.get(), driving.get(), *opts, link.get(), markers.get());
+        if (markers)
+            settings.player_markers = markers->on;  // (Tab in the race)
+        keep_settings(presenter);  // (Alt+Enter in the game, Tab)
         if (art && art->frames)
             SDL_Log("Graphics: %.2f ms per frame to compose", art->compose_ms / static_cast<double>(art->frames));
         if (smooth && smooth->stats().replays)

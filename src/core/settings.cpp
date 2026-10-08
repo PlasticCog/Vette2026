@@ -119,6 +119,8 @@ std::string Settings::serialize() const {
     out << "online_course = " << online_course << "\n";
     out << "online_port_forwarded = " << kOnOff[online_port_forwarded] << "\n";
     out << "online_address = " << online_address << "\n";
+    out << "player_name = " << player_name << "\n";
+    out << "player_markers = " << kOnOff[player_markers] << "\n";
     return out.str();
 }
 
@@ -174,8 +176,31 @@ Settings Settings::parse(const std::string& text) {
         read_bool("online_port_forwarded", kOnOff, key, value, s.online_port_forwarded);
         if (key == "online_course" && value.size() == 1 && value[0] >= '1' && value[0] <= '4')
             s.online_course = value[0] - '0';
+        if (key == "player_name")
+            s.player_name = clean_player_name(value);
+        read_bool("player_markers", kOnOff, key, value, s.player_markers);
     }
     return s;
+}
+
+std::string clean_player_name(std::string_view typed) {
+    std::string name;
+    for (const char ch : typed) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 0x20 || c > 0x7E)
+            continue;
+        if (c == ' ' && (name.empty() || name.back() == ' '))
+            continue;
+        name += ch;
+    }
+    while (!name.empty() && name.back() == ' ')
+        name.pop_back();
+    if (name.size() > Settings::kMaxPlayerName) {
+        name.resize(Settings::kMaxPlayerName);
+        while (!name.empty() && name.back() == ' ')
+            name.pop_back();
+    }
+    return name;
 }
 
 Settings load_settings(const std::filesystem::path& file) {

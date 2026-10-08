@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <optional>
@@ -24,6 +25,7 @@
 #include "platform/presenter.h"
 #include "platform/url_scheme.h"
 #include "ui/canvas.h"
+#include "ui/map_editor.h"
 #include "ui/shortcuts.h"
 #include "ui/text.h"
 #include "ui/theme.h"
@@ -33,10 +35,19 @@ namespace {
 
 using namespace theme;
 
-enum Row { kHost, kJoin, kLanHost, kLanJoin, kCourse, kRouter, kAddress, kBack, kRows };
-enum class Page { Menu, Hosting, Joining, Address, Lan };
+enum Row { kHost, kJoin, kLanHost, kLanJoin, kName, kCourse, kMarkers, kRouter, kAddress, kBack, kRows };
+enum class Page { Menu, Hosting, Joining, Address, Name, Lan };
 
 constexpr std::uint64_t kStartDelayNs = 800'000'000;  // "Starting the race..." shows this long
+// Once connected, how long the games may take to tell each other their names (and the host's map).
+constexpr std::uint64_t kIntroTimeoutNs = 30'000'000'000;
+constexpr int kPitch = 14;  // the menu's rows
+
+// The menu's rows: a gap after the first two, after the LAN two, and before Back.
+int row_y(int row) {
+    return 64 + row * kPitch + (row >= kLanHost ? kPitch / 2 : 0) + (row >= kName ? kPitch / 2 : 0) +
+           (row == kBack ? kPitch / 2 : 0);
+}
 
 const char* course_name(int course) {
     switch (course) {
@@ -53,7 +64,9 @@ const char* row_label(int row) {
     case kJoin: return "Join a race";
     case kLanHost: return "Host a LAN race";
     case kLanJoin: return "Join a LAN race";
+    case kName: return "Your name";
     case kCourse: return "Course";
+    case kMarkers: return "Tag and arrow";
     case kRouter: return "Router";
     case kAddress: return "Internet address";
     default: return "Back";
@@ -73,7 +86,14 @@ std::string_view row_help(int row) {
         return "Race someone on the same network (the same Wi-Fi or router): no code to send, no router to set "
                "up. They choose Join a LAN race.";
     case kLanJoin: return "The races hosted on this network: pick one to join it.";
-    case kCourse: return "The course you race on when you host.";
+    case kName:
+        return "The name your friend sees over your car in the race, and in the list of races on your network.";
+    case kCourse:
+        return "The course you race on when you host. If you play a map of your own (Map in the launch menu), your "
+               "friend races in it too.";
+    case kMarkers:
+        return "In the race: your friend's name over their car, and an arrow on the ground round yours that points "
+               "at them. Tab switches them on and off while you race.";
     case kRouter:
         return "To host over the internet, your router must let your friend in. Most open the game's port "
                "themselves (UPnP). If yours doesn't, forward TCP port 26989 to this computer in its settings, "
@@ -94,6 +114,7 @@ std::string game_build(const GameDir& game) {
 
 net::OnlineOptions online_options(const Settings& s, const GameDir& game) {
     net::OnlineOptions o;
+    o.lan_name = s.player_name;
     o.server_url = server_of(s);
     o.app_version = VETTE_VERSION;
     o.game_build = game_build(game);
@@ -127,6 +148,49 @@ std::optional<game::TwoPlayerSetup> guest_setup(const net::OnlineLink& link) {
 }
 
 constexpr const char* kSetupMismatch = "Your friend's VETTE! 2026 sets up the race differently. Use the same version.";
+constexpr const char* kNoIntro = "Your friend's game didn't say who's racing. Try again.";
+
+// The host's own map (Map in the launch menu), which both race in; none for the original's.
+std::optional<game::CityMap> host_map(const Settings& s, const std::filesystem::path& maps_dir) {
+    if (s.map_name.empty())
+        return std::nullopt;
+    std::string error;
+    auto map = load_map(maps_dir, s.map_name, error);
+    if (!map)
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Online race: map %s: %s; the original instead", s.map_name.c_str(),
+                    error.c_str());
+    return map;
+}
+
+game::RaceIntro my_intro(const Settings& s, bool host, const std::optional<game::CityMap>& map) {
+    game::RaceIntro intro;
+    intro.name = shown_name(s.player_name);
+    if (host)
+        intro.map = map;
+    return intro;
+}
+
+// The session, once both intros are through. False if the friend's didn't come (or wasn't one).
+bool finish_session(OnlineSession& session, std::unique_ptr<net::OnlineLink> link, std::unique_ptr<game::IntroLink> intro,
+                    bool host, const game::TwoPlayerSetup& setup, const std::optional<game::CityMap>& map,
+                    const std::string& map_name) {
+    if (!intro->received()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Online race: %s",
+                    intro->failed() ? intro->error().c_str() : "no intro from the friend's game");
+        return false;
+    }
+    session.host = host;
+    session.setup = setup;
+    session.friend_name = shown_name(clean_player_name(intro->theirs()->name));
+    session.map = host ? map : intro->theirs()->map;
+    session.map_name = session.map ? (host ? map_name : session.map->name) : std::string();
+    SDL_Log("Online race: racing %s%s%s", session.friend_name.c_str(), session.map ? ", in the map " : "",
+            session.map_name.c_str());
+    session.online = link.get();
+    session.link = std::move(link);
+    session.cable = std::move(intro);
+    return true;
+}
 
 bool trouble(net::LinkState state) {
     return state == net::LinkState::Failed || state == net::LinkState::Closed || state == net::LinkState::PeerLeft;
@@ -178,6 +242,8 @@ void register_links() {
 
 }  // namespace
 
+std::string shown_name(std::string_view name) { return name.empty() ? std::string("Player") : std::string(name); }
+
 bool online_available() { return true; }
 
 bool forward_invite(const std::string& link) { return net::InstanceChannel::forward(link); }
@@ -206,8 +272,8 @@ bool leave_for_invite(const std::string& link) {
     return true;
 }
 
-bool connect_online(const Settings& s, const GameDir& game, bool host, std::string_view code, OnlineSession& session,
-                    std::string& error, double timeout_s) {
+bool connect_online(const Settings& s, const GameDir& game, const std::filesystem::path& maps_dir, bool host,
+                    std::string_view code, OnlineSession& session, std::string& error, double timeout_s) {
     register_links();
     net::OnlineOptions o = online_options(s, game);
     std::unique_ptr<net::OnlineLink> link;
@@ -239,6 +305,7 @@ bool connect_online(const Settings& s, const GameDir& game, bool host, std::stri
                 error = "No race found on this network.";
                 return false;
             }
+            SDL_PumpEvents();  // (the window stays responsive while this waits)
             SDL_Delay(50);
         }
         link = net::OnlineLink::join(std::move(o), found);
@@ -273,29 +340,49 @@ bool connect_online(const Settings& s, const GameDir& game, bool host, std::stri
             error = "Nobody joined in time.";
             return false;
         }
+        SDL_PumpEvents();
         SDL_Delay(20);
     }
-    session.host = host;
-    if (host) {
-        session.setup = host_setup(s);
-    } else if (const auto decoded = guest_setup(*link)) {
-        session.setup = *decoded;
-    } else {
-        error = kSetupMismatch;
+    game::TwoPlayerSetup setup = host_setup(s);
+    if (!host) {
+        const auto decoded = guest_setup(*link);
+        if (!decoded) {
+            error = kSetupMismatch;
+            return false;
+        }
+        setup = *decoded;
+    }
+    // The names (and the host's map), both ways.
+    const std::optional<game::CityMap> map = host ? host_map(s, maps_dir) : std::nullopt;
+    auto intro = std::make_unique<game::IntroLink>(*link, my_intro(s, host, map));
+    for (const std::uint64_t until = SDL_GetTicksNS() + kIntroTimeoutNs; !intro->received() && !intro->failed();) {
+        intro->poll();
+        if (SDL_GetTicksNS() > until || trouble(link->status().state))
+            break;
+        SDL_PumpEvents();
+        SDL_Delay(10);
+    }
+    if (!finish_session(session, std::move(link), std::move(intro), host, setup, map, s.map_name)) {
+        error = kNoIntro;
         return false;
     }
-    session.online = link.get();
-    session.link = std::move(link);
     return true;
 }
 
-bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameDir& game, OnlineSession& session,
-                std::string_view join_now) {
+bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameDir& game,
+                const std::filesystem::path& maps_dir, OnlineSession& session, std::string_view join_now) {
     register_links();  // so the invite links open this game
     Page page = Page::Menu;
     int selected = kHost;
     std::string status;  // a problem or a hint to show
     std::unique_ptr<net::OnlineLink> link;
+    std::unique_ptr<game::IntroLink> intro;  // once connected: the names (and the host's map), both ways
+    std::optional<game::CityMap> map;        // hosting: the map both race in
+    // The screen can open under a resting pointer: hovering selects once it has really moved.
+    SDL_FPoint pointer_start{};
+    SDL_GetGlobalMouseState(&pointer_start.x, &pointer_start.y);
+    bool pointer_moved = false;
+    bool go_back = false;  // Back chosen
     std::uint64_t connected_at = 0;  // when the friend was there (the race starts a moment later)
     bool invite_copied = false;
     std::string field;  // Joining: what's pasted or typed; Server: the address
@@ -316,6 +403,7 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
             SDL_StopTextInput(presenter.window());
     };
     const auto leave = [&] {
+        intro.reset();
         link.reset();  // leaves the room, removes the router's port forwarding
         connected_at = 0;
         invite_copied = false;
@@ -325,6 +413,7 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
         o.race_settings = race_settings(s);
         o.lan_only = lan;
         link = net::OnlineLink::host(std::move(o));
+        map = host_map(s, maps_dir);
         page = Page::Hosting;
         lan_hosting = lan;
         status.clear();
@@ -371,7 +460,14 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
         case kJoin: open_join({}); break;
         case kLanHost: host(true); break;
         case kLanJoin: open_lan(); break;
+        case kName:
+            page = Page::Name;
+            field = s.player_name;
+            text_input(true);
+            break;
         case kCourse: s.online_course = (s.online_course - 1 + dir + 4) % 4 + 1; break;
+        case kMarkers: s.player_markers = !s.player_markers; break;
+        case kBack: go_back = true; break;
         case kRouter: s.online_port_forwarded = !s.online_port_forwarded; break;
         case kAddress:
             page = Page::Address;
@@ -402,7 +498,8 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
             else
                 page = Page::Menu;
             return false;
-        case Page::Address: text_input(false); page = Page::Menu; return false;
+        case Page::Address:
+        case Page::Name: text_input(false); page = Page::Menu; return false;
         case Page::Lan: search.reset(); page = Page::Menu; return false;
         }
         return false;
@@ -427,7 +524,7 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
         case Page::Menu:
             if (up_down)
                 selected = (selected + up_down + kRows) % kRows;
-            if (left_right && (selected == kCourse || selected == kRouter))
+            if (left_right && (selected == kCourse || selected == kRouter || selected == kMarkers))
                 activate(selected, left_right);
             if (enter)
                 activate(selected, 1);
@@ -453,6 +550,14 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
                     text_input(false);
                     page = Page::Menu;
                 }
+            }
+            break;
+        case Page::Name:
+            if (enter) {
+                s.player_name = clean_player_name(field);
+                status.clear();
+                text_input(false);
+                page = Page::Menu;
             }
             break;
         case Page::Lan: {
@@ -519,11 +624,51 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
             case SDL_EVENT_TEXT_INPUT:
                 if ((page == Page::Joining && !link) || page == Page::Address)
                     field += e.text.text;
+                else if (page == Page::Name)
+                    for (const char* c = e.text.text; *c; ++c)
+                        if (static_cast<unsigned char>(*c) >= 0x20 && static_cast<unsigned char>(*c) < 0x7F &&
+                            field.size() < Settings::kMaxPlayerName)
+                            field += *c;
                 break;
+            case SDL_EVENT_MOUSE_MOTION:
+            case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+                // The menu's rows and the races on the network: the pointer selects, a click chooses (the
+                // right button changes a value the other way).
+                const bool click = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+                if (!click && !pointer_moved) {
+                    SDL_FPoint p{};
+                    SDL_GetGlobalMouseState(&p.x, &p.y);
+                    pointer_moved = std::abs(p.x - pointer_start.x) + std::abs(p.y - pointer_start.y) >= 8;
+                    if (!pointer_moved)
+                        break;
+                }
+                int fx = 0, fy = 0;
+                if (!presenter.window_to_frame(click ? e.button.x : e.motion.x, click ? e.button.y : e.motion.y, fx, fy))
+                    break;
+                if (page == Page::Menu) {
+                    for (int row = 0; row < kRows; ++row) {
+                        if (fy >= row_y(row) - 3 && fy < row_y(row) - 3 + kPitch) {
+                            selected = row;
+                            if (click)
+                                activate(row, e.button.button == SDL_BUTTON_RIGHT ? -1 : 1);
+                        }
+                    }
+                } else if (page == Page::Lan && search) {
+                    const int n = static_cast<int>(std::min<std::size_t>(search->races().size(), 8));
+                    for (int i = 0; i < n; ++i) {
+                        if (fy >= 82 + i * 14 - 3 && fy < 82 + i * 14 + 11) {
+                            lan_selected = i;
+                            if (click)
+                                key(0, 0, true);
+                        }
+                    }
+                }
+                break;
+            }
             case SDL_EVENT_KEY_DOWN: {
                 const SDL_Scancode k = e.key.scancode;
                 const bool enter = (k == SDL_SCANCODE_RETURN || k == SDL_SCANCODE_KP_ENTER) && !e.key.repeat;
-                const bool typing = page == Page::Address || (page == Page::Joining && !link);
+                const bool typing = page == Page::Address || page == Page::Name || (page == Page::Joining && !link);
                 const bool arrow = k == SDL_SCANCODE_LEFT || k == SDL_SCANCODE_RIGHT || k == SDL_SCANCODE_UP ||
                                    k == SDL_SCANCODE_DOWN;
                 if (k == SDL_SCANCODE_ESCAPE && !e.key.repeat) {
@@ -581,7 +726,7 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
                 default: break;
                 }
             }
-            if (done) {
+            if (done || go_back) {
                 text_input(false);
                 return false;
             }
@@ -614,22 +759,23 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
             }
             if (st.state == net::LinkState::Connected) {
                 const std::uint64_t now = SDL_GetTicksNS();
+                const bool hosting = page == Page::Hosting;
                 if (!connected_at)
                     connected_at = now;
-                if (now - connected_at >= kStartDelayNs) {
-                    session.host = page == Page::Hosting;
-                    session.setup = host_setup(s);
-                    const auto decoded = session.host ? std::nullopt : guest_setup(*link);
-                    if (session.host || decoded) {
-                        if (decoded)
-                            session.setup = *decoded;
-                        session.online = link.get();
-                        session.link = std::move(link);
+                if (!intro)
+                    intro = std::make_unique<game::IntroLink>(*link, my_intro(s, hosting, map));
+                intro->poll();
+                const bool told = intro->received() || intro->failed() || now - connected_at >= kIntroTimeoutNs;
+                if (now - connected_at >= kStartDelayNs && told) {
+                    const auto decoded = hosting ? std::optional(host_setup(s)) : guest_setup(*link);
+                    if (decoded && finish_session(session, std::move(link), std::move(intro), hosting, *decoded, map, s.map_name)) {
                         text_input(false);
                         return true;
                     }
                     leave();
-                    status = kSetupMismatch;
+                    status = decoded ? kNoIntro : kSetupMismatch;
+                    if (hosting)
+                        page = Page::Menu;  // (the hosting page shows a race that's gone)
                 }
             } else {
                 connected_at = 0;
@@ -655,21 +801,24 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
         };
         std::string help, hints;
         if (page == Page::Menu) {
-            const int pitch = 14;
             for (int row = 0; row < kRows; ++row) {
-                const int y = 64 + row * pitch + (row >= kLanHost ? pitch / 2 : 0) + (row >= kCourse ? pitch / 2 : 0) +
-                              (row == kBack ? pitch / 2 : 0);
+                const int y = row_y(row);
                 const bool sel = row == selected;
                 if (sel)
-                    canvas.fill_rect(6, y - 3, canvas.width - 12, pitch, kSelection);
-                if (row == kCourse || row == kRouter || row == kAddress) {
+                    canvas.fill_rect(6, y - 3, canvas.width - 12, kPitch, kSelection);
+                if (row == kName || row == kCourse || row == kMarkers || row == kRouter || row == kAddress) {
                     canvas.text(m, y, row_label(row), sel ? kGold : kLabel);
                     const int vx = m + 18 * kGlyph;
                     const size_t room_chars = static_cast<size_t>(std::max(0, (canvas.width - vx - m) / kGlyph));
                     std::string v;
                     std::uint32_t color = kValue;
-                    if (row == kCourse) {
+                    if (row == kName) {
+                        v = s.player_name.empty() ? std::string("Player (Enter to change)") : s.player_name;
+                        color = s.player_name.empty() ? kDim : kValue;
+                    } else if (row == kCourse) {
                         v = std::string("< ") + course_name(s.online_course) + " >";
+                    } else if (row == kMarkers) {
+                        v = s.player_markers ? "< On >" : "< Off >";
                     } else if (row == kRouter) {
                         v = s.online_port_forwarded ? "< Port forwarded by hand >" : "< Opens the port itself (UPnP) >";
                     } else if (!s.online_port_forwarded) {
@@ -685,7 +834,7 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
                 }
             }
             if (!status.empty())
-                lines(64 + kRows * 14 + 27, status, kBad, 2);
+                lines(row_y(kBack) + 20, status, kBad, 2);
             help = std::string(row_help(selected));
             hints = "Up/Down choose   Left/Right change   Enter select   Esc back";
         } else if (page == Page::Hosting) {
@@ -749,6 +898,9 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
             canvas.text(m, y + 18,
                         std::string("Driving: ") + (s.improved_driving ? "Improved" : "Original") + " (for both of you)",
                         kValue);
+            canvas.text(m, y + 30,
+                        std::string("Map: ") + (map ? s.map_name : std::string("the original")) + " (for both of you)",
+                        kValue);
             hints = std::string(room || direct ? "C copy code   " : "") + (lan ? "L copy same-network code   " : "") +
                     "Esc cancel";
         } else if (page == Page::Lan) {
@@ -804,6 +956,14 @@ bool run_online(Presenter& presenter, Gamepad& gamepad, Settings& s, const GameD
             help = "Paste with Ctrl+V, or type the code. With a gamepad: Up/Down change the last letter, Right adds "
                    "one, Left removes one.";
             hints = link ? "Esc stop" : "Ctrl+V paste   Enter join   Esc back";
+        } else if (page == Page::Name) {
+            canvas.text(m, 64, "Your name in online races:", kLabel);
+            canvas.fill_rect(m - 2, 78, canvas.width - 2 * m + 4, 14, kSelection);
+            canvas.text(m, 81, field + "_", kValue);
+            if (!status.empty())
+                lines(100, status, kBad, 2);
+            help = std::string(row_help(kName)) + " Up to 16 letters, digits and punctuation.";
+            hints = "Backspace delete   Enter save   Esc cancel";
         } else {
             canvas.text(m, 64, "Your internet address (for a port forwarded by hand):", kLabel);
             canvas.fill_rect(m - 2, 78, canvas.width - 2 * m + 4, 14, kSelection);
@@ -843,13 +1003,18 @@ std::optional<std::string> take_forwarded_invite() { return std::nullopt; }
 
 bool leave_for_invite(const std::string&) { return false; }
 
-bool connect_online(const Settings&, const GameDir&, bool, std::string_view, OnlineSession&, std::string& error,
-                    double) {
+std::string shown_name(std::string_view name) { return name.empty() ? std::string("Player") : std::string(name); }
+
+bool connect_online(const Settings&, const GameDir&, const std::filesystem::path&, bool, std::string_view, OnlineSession&,
+                    std::string& error, double) {
     error = "This copy of VETTE! 2026 was built without online play.";
     return false;
 }
 
-bool run_online(Presenter&, Gamepad&, Settings&, const GameDir&, OnlineSession&, std::string_view) { return false; }
+bool run_online(Presenter&, Gamepad&, Settings&, const GameDir&, const std::filesystem::path&, OnlineSession&,
+                std::string_view) {
+    return false;
+}
 
 }  // namespace vette::ui
 

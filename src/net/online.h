@@ -91,6 +91,7 @@ struct OnlineOptions {
     // Host: only on the local network (a LAN race): the same-network code and the answers to the games
     // looking for races there (net/lan.h), no room, router or internet address.
     bool lan_only = false;
+    std::string lan_name;  // host: the name those games list the race by (empty: this computer's name)
     std::uint16_t lan_port = kLanPort;  // where the LAN questions come (0: answer none)
     // Testing.
     bool loopback_only = false;  // the host listens on loopback only

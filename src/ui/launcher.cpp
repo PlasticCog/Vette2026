@@ -198,7 +198,7 @@ std::string_view help(int row, const Settings& s) {
         return "The city you race in: the original, or a map made in the map editor. Enter opens the map "
                "editor on the map shown here.";
     case kObjects:
-        return "The cars, pedestrians and landmark buildings: the original's, or a set reshaped in the object editor. "
+        return "The cars, pedestrians and buildings: the original's, or a set reshaped in the object editor. "
                "Enter opens the object editor on the set shown here.";
     case kTraffic:
         return s.smooth_traffic

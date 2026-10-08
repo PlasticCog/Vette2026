@@ -264,6 +264,19 @@ after a minute's racing), with empty skip lists and, where faces were added or r
 worked out per octant from the faces' middles. The original's 58 models read and write back unchanged.
 A few of its fills have only one or two points.
 
+## 8c. Code-drawn objects as models (game/model_pack.h, enhanced/object_models.h; **confirmed**)
+A cell's list-2 routine can be drawn as a model instead: the unrotated stubs (B912..BAEA) are only `AX=model; jmp B9E6`,
+and B9E6 draws model AX unrotated at the object's place (DS:3220) through B8DC, B9F6 and B765, so a watch at
+the routine's entry that sets AX and IP=B9E6 does the same for any slot. The table at 245A:6FF8 ends at 71D0
+(59 entries), where model 14's (the Chinatown gate's) data starts, running to 7470 (its header at 7468). With
+model 14 moved to 8000h like an edited model, those 2A0h bytes hold 41 more table entries from 71D0 and their
+headers after them (41 x 16 = 290h), so a set has up to 41 objects, slots 59..99. An object's model is its
+routine's most detailed variant (window detail on): the packed and plain parts' polygons and lines, a
+culled polygon wound so that the models' cull test (p0 − c)·((p1 − p0) × (p2 − p0)) > 0 shows its front,
+and faces painted on another (windows on walls) ordered after it in every octant. Unedited, the 31 that
+convert draw the same picture as the routines: street views pixel for pixel in the Enhanced view, and
+within one-pixel edges in the original's renderer.
+
 ## 8a. The city's pieces (**confirmed**, `vette_world --dump-routine`)
 A city block (CE/CF/D7/D8...) is list 1 `276A(0,256) 7270(0,0) 7318(1792,256) 7238(1792,0)` and a building in
 list 2: 7270 the north-south street along the west edge (1792 x 256, colour 8, white lines at y 64, 128,

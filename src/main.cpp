@@ -8,6 +8,7 @@
 #include "enhanced/backdrop.h"
 #include "enhanced/lanes.h"
 #include "enhanced/menu_car.h"
+#include "enhanced/object_models.h"
 #include "enhanced/player_markers.h"
 #include "enhanced/scene.h"
 #include "enhanced/world.h"
@@ -690,6 +691,8 @@ struct EnhancedView {
     bool hills = true;  // Settings::Skyline::Hills: the backdrop without its painted city
     bool smooth_traffic = true;  // Settings::smooth_traffic: freeway cars fade in and out
     bool no_freeways = false;    // Settings::freeways off: traffic and pedestrians where game::no_freeway_placement puts them
+    // A set of objects' code-drawn objects drawn as models ({routine, model}, game::object_models).
+    std::vector<std::pair<std::uint16_t, int>> object_models;
     enhanced::Backdrop backdrop;
     enhanced::World world;
     std::unique_ptr<enhanced::SceneBuilder> builder;  // once the world is extracted
@@ -717,6 +720,8 @@ struct EnhancedView {
         if (enhanced::extract_world(machine, world, error)) {
             SDL_Log("City extracted: %d cell types, %d objects, %d models (%.0f ms)", world.stats.types_used,
                     world.stats.routines, world.stats.models, world.stats.milliseconds);
+            if (!object_models.empty() && !enhanced::use_object_models(world, machine, object_models, error))
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Objects in the Enhanced view: %s", error.c_str());
             builder = std::make_unique<enhanced::SceneBuilder>(world);
         } else if (machine.emulated_ns() >= kExtractUntilNs) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "No Enhanced 3D view (the game's own is shown): %s",
@@ -1721,12 +1726,15 @@ int run(int argc, char** argv) {
         }
         // Objects of the player's own (ui/object_editor.h), except in two-player races: the drawing's cost
         // is part of the game's timing, which both must share.
+        std::optional<game::ModelPack> object_pack;
         if (!settings.objects_name.empty()) {
             if (online.link || opts->link_listen || opts->link_connect) {
                 SDL_Log("Objects: the original's (two-player races use them)");
             } else if (auto pack = ui::load_object_pack(objects_dir(), settings.objects_name, error)) {
-                game::install_model_pack(machine, std::move(*pack));
-                SDL_Log("Objects: %s", settings.objects_name.c_str());
+                game::install_model_pack(machine, *pack);
+                SDL_Log("Objects: %s (%d models, %d of the city's objects)", settings.objects_name.c_str(),
+                        static_cast<int>(pack->models.size()), static_cast<int>(pack->objects.size()));
+                object_pack = std::move(*pack);
             } else {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Objects %s: %s; the original's instead",
                             settings.objects_name.c_str(), error.c_str());
@@ -1753,6 +1761,8 @@ int run(int argc, char** argv) {
             smooth->set_interpolation(smooth_fps);
             if (no_freeways)
                 game::install_no_freeway_drawing(smooth->replay_cpu());
+            if (object_pack)
+                game::install_object_draws(smooth->replay_cpu(), *object_pack);
         }
         if (enhanced_view) {
             view = std::make_unique<EnhancedView>();
@@ -1763,6 +1773,8 @@ int run(int argc, char** argv) {
             view->hills = settings.skyline == Settings::Skyline::Hills;
             view->smooth_traffic = settings.smooth_traffic;
             view->no_freeways = no_freeways;
+            if (object_pack)
+                view->object_models = game::object_models(*object_pack);
         }
         SDL_Log("Frame rate: %s; draw distance: %s%s%s; emulated CPU %.0f MHz",
                 smooth_fps ? "smooth (display refresh)" : "original",

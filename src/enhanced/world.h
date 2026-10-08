@@ -57,6 +57,8 @@ constexpr int kBigTileCells = 16;
 constexpr int kElevationStep = 224;
 constexpr int kMapCells = 80;  // per side, as the shipped map is 5 x 5 big tiles (read from the data)
 constexpr int kModelCount = 59;
+// Model slots: the original's, then code-drawn objects drawn as models (enhanced/object_models.h).
+constexpr int kModelSlots = 100;
 
 struct Vec3i {
     int32_t x = 0, y = 0, z = 0;
@@ -277,7 +279,7 @@ struct World {
     std::array<CellType, 256> types;
     std::vector<Routine> routines;  // sorted by address
     const Routine* routine(uint16_t address) const;
-    std::array<Model, kModelCount> models;
+    std::array<Model, kModelSlots> models;  // the original's 0..58 (extract_world), then objects
     std::vector<CompoundInstance> compounds;
 
     struct Stats {

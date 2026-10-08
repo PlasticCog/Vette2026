@@ -14,8 +14,10 @@
 #include <sstream>
 
 #include "core/path_utf8.h"
+#include "enhanced/object_models.h"
 #include "enhanced/scene.h"
 #include "enhanced/scene_geometry.h"
+#include "enhanced/world.h"
 #include "game/city_map.h"
 #include "host/machine.h"
 #include "platform/gamepad.h"
@@ -37,9 +39,12 @@ using game::ModelPack;
 constexpr const char* kExtension = ".vobj";
 constexpr uint32_t kSeeThrough = 0xFF00FF;  // the overlay canvas's background: the 3D view shows there
 constexpr uint32_t kViewBack = 0x1A2238, kPanel = 0x161C30;
-constexpr int kTopBar = 14, kBottomBar = 28, kListW = 150, kSideW = 128, kSwatch = 22;
+constexpr int kTopBar = 14, kBottomBar = 28, kListW = 166, kSideW = 128, kSwatch = 22;
 constexpr uint64_t kMessageNs = 4'000'000'000;
 constexpr int kFirst = game::kReferenceVertices;  // the vertices before this are the model's frame, not shown
+// The list's items: a model's id, or kObjectItem + the routine of one of the city's code-drawn objects.
+constexpr int kObjectItem = 0x10000;
+constexpr int kSectionRow = -2;  // the list's row heading the city's objects
 
 using Vec = std::array<double, 3>;
 Vec sub(const Vec& a, const Vec& b) { return {a[0] - b[0], a[1] - b[1], a[2] - b[2]}; }
@@ -67,6 +72,28 @@ std::string clean_name(const std::string& name) {
     return out;
 }
 fs::path pack_path(const fs::path& dir, const std::string& name) { return dir / path_from_utf8(name + kExtension); }
+
+bool is_object(int item) { return item >= kObjectItem; }
+uint16_t routine_of(int item) { return static_cast<uint16_t>(item - kObjectItem); }
+// An item as the set has it, changed (nullptr: the original's).
+ModelData* edited(ModelPack& pack, int item) {
+    if (is_object(item)) {
+        const auto it = pack.objects.find(routine_of(item));
+        return it == pack.objects.end() ? nullptr : &it->second;
+    }
+    const auto it = pack.models.find(item);
+    return it == pack.models.end() ? nullptr : &it->second;
+}
+ModelData& edit_slot(ModelPack& pack, int item) { return is_object(item) ? pack.objects[routine_of(item)] : pack.models[item]; }
+void unedit(ModelPack& pack, int item) {
+    if (is_object(item)) pack.objects.erase(routine_of(item));
+    else pack.models.erase(item);
+}
+std::string hex4(uint16_t v) {
+    char s[8];
+    std::snprintf(s, sizeof s, "%04X", v);
+    return s;
+}
 
 bool save_pack(const fs::path& dir, const std::string& name, const ModelPack& pack, std::string& error) {
     std::error_code ec;
@@ -389,6 +416,8 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
     // The models as the game has them: VETTE.EXE started far enough to have unpacked itself.
     notice({"Loading the objects..."}, false);
     std::array<std::optional<ModelData>, game::kModelCount> original;
+    std::map<uint16_t, ModelData> original_objects;  // the city's code-drawn objects as models (enhanced/object_models.h)
+    std::vector<en::CityObject> city;                 // the ones there are, most used first
     std::string error;
     {
         host::MachineConfig config;
@@ -401,16 +430,42 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
             ready = game::run_until_started(machine);
             if (!ready) error = "it didn't start";
             for (int id = 0; ready && id < game::kModelCount; ++id) original[static_cast<size_t>(id)] = game::read_model(machine.memory(), id);
+            std::string why;
+            en::World world;
+            if (ready && en::extract_world(machine, world, why)) {
+                for (en::CityObject& o : en::city_objects(world)) {
+                    if (auto m = en::routine_model(world, o.routine, why)) {
+                        original_objects[o.routine] = std::move(*m);
+                        city.push_back(std::move(o));
+                    }
+                }
+            }
         }
         if (!ready || !original[1]) {
             notice({"The object editor couldn't read the objects from VETTE.EXE: " + error}, true);
             return name;
         }
     }
-    std::vector<int> ids;  // the models there are
+    std::vector<int> ids;   // the items there are: the models, then the city's objects
+    std::vector<int> rows;  // the list's rows: the same, with a heading row before the city's objects
     for (int id = 0; id < game::kModelCount; ++id) {
         if (original[static_cast<size_t>(id)]) ids.push_back(id);
     }
+    rows = ids;
+    if (!city.empty()) rows.push_back(kSectionRow);
+    for (const en::CityObject& o : city) {
+        ids.push_back(kObjectItem + o.routine);
+        rows.push_back(kObjectItem + o.routine);
+    }
+    const auto original_of = [&](int item) -> const ModelData& {
+        return is_object(item) ? original_objects.at(routine_of(item)) : *original[static_cast<size_t>(item)];
+    };
+    const auto city_object = [&](int item) -> const en::CityObject& {
+        return *std::find_if(city.begin(), city.end(), [&](const en::CityObject& o) { return o.routine == routine_of(item); });
+    };
+    const auto item_name = [&](int item) {
+        return is_object(item) ? city_object(item).name + " " + hex4(routine_of(item)) : game::model_name(item);
+    };
 
     // The set being edited: the models changed, the rest the original's.
     ModelPack pack;
@@ -431,29 +486,29 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
     }
     int current = 1;  // the Corvette
     const auto shown = [&]() -> const ModelData& {
-        const auto it = pack.models.find(current);
-        return it != pack.models.end() ? it->second : *original[static_cast<size_t>(current)];
+        const ModelData* m = edited(pack, current);
+        return m ? *m : original_of(current);
     };
 
     // Edits, as before-and-after copies of a model (they're small), to undo and redo.
     struct Edit {
-        int id = 0;
+        int id = 0;  // the item
         std::optional<ModelData> before, after;  // nullopt: the original's
     };
     std::vector<Edit> undo, redo;
     bool dirty = false;
     std::optional<ModelData> edit_before;
     const auto begin_edit = [&]() -> ModelData& {
-        const auto it = pack.models.find(current);
-        edit_before = it != pack.models.end() ? std::optional<ModelData>(it->second) : std::nullopt;
-        if (it == pack.models.end()) pack.models[current] = *original[static_cast<size_t>(current)];
-        return pack.models[current];
+        const ModelData* now = edited(pack, current);
+        edit_before = now ? std::optional<ModelData>(*now) : std::nullopt;
+        if (!now) edit_slot(pack, current) = original_of(current);
+        return edit_slot(pack, current);
     };
     const auto end_edit = [&] {
-        const ModelData& now = pack.models[current];
-        const ModelData& was = edit_before ? *edit_before : *original[static_cast<size_t>(current)];
+        const ModelData& now = edit_slot(pack, current);
+        const ModelData& was = edit_before ? *edit_before : original_of(current);
         if (now == was) {
-            if (!edit_before) pack.models.erase(current);
+            if (!edit_before) unedit(pack, current);
             return;
         }
         undo.push_back({current, edit_before, now});
@@ -461,8 +516,8 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
         dirty = true;
     };
     const auto put = [&](int id, const std::optional<ModelData>& m) {
-        if (m) pack.models[id] = *m;
-        else pack.models.erase(id);
+        if (m) edit_slot(pack, id) = *m;
+        else unedit(pack, id);
     };
 
     // Selection and view.
@@ -502,6 +557,7 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
     std::string field;
     bool quit_after = false, leave_after_save = false;
     int list_scroll = 0;
+    bool reveal = false;  // scroll the list to the item shown
     // The mouse: orbiting (right), panning (middle or shift+right), moving the selection (left on it).
     float mouse_x = -1, mouse_y = -1, press_x = 0, press_y = 0;
     bool orbit = false, pan = false, dragging = false, left_down = false;
@@ -521,6 +577,16 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
                 say("Not saved: " + game::model_name(id) + ": " + why + ".");
                 return false;
             }
+        }
+        for (const auto& [routine, m] : pack.objects) {
+            if (const std::string why = game::check_model(m); !why.empty()) {
+                say("Not saved: " + item_name(kObjectItem + routine) + ": " + why + ".");
+                return false;
+            }
+        }
+        if (pack.objects.size() > static_cast<size_t>(game::kMaxObjects)) {
+            say("Not saved: the game takes " + std::to_string(game::kMaxObjects) + " changed city objects at most.");
+            return false;
         }
         if (save_pack(dir, as, pack, error)) {
             pack_name = as;
@@ -545,6 +611,7 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
         current = id;
         clear_selection();
         frame_model();
+        reveal = true;
     };
     const auto step_model = [&](int dir_) {
         auto it = std::find(ids.begin(), ids.end(), current);
@@ -594,12 +661,17 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
         }
         // The model list (canvas pixels).
         const int list_top = kTopBar + 16, list_bottom = H - kBottomBar, row_h = 11;
-        list_scroll = std::clamp(list_scroll, 0, std::max(0, static_cast<int>(ids.size()) * row_h - (list_bottom - list_top)));
+        if (reveal) {
+            const int ry = static_cast<int>(std::find(rows.begin(), rows.end(), current) - rows.begin()) * row_h;
+            list_scroll = std::max(std::min(list_scroll, ry), ry + row_h - (list_bottom - list_top));
+            reveal = false;
+        }
+        list_scroll = std::clamp(list_scroll, 0, std::max(0, static_cast<int>(rows.size()) * row_h - (list_bottom - list_top)));
         const auto list_at = [&](float sx, float sy) {
             const int x = canvas_x(sx), y = canvas_y(sy);
             if (x < 0 || x >= kListW || y < list_top || y >= list_bottom) return -1;
             const int i = (y - list_top + list_scroll) / row_h;
-            return i < static_cast<int>(ids.size()) ? ids[static_cast<size_t>(i)] : -1;
+            return i < static_cast<int>(rows.size()) ? std::max(rows[static_cast<size_t>(i)], -1) : -1;
         };
         // The palette (canvas pixels).
         const int pal_x = W - kSideW + 8, pal_y = kTopBar + 40;
@@ -776,14 +848,15 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
                 }
                 if (prompt == Prompt::Revert || prompt == Prompt::Restart) {
                     if (k == SDLK_Y) {
-                        if (prompt == Prompt::Revert && pack.models.count(current)) {
+                        if (prompt == Prompt::Revert && edited(pack, current)) {
                             begin_edit();
-                            pack.models[current] = *original[static_cast<size_t>(current)];
+                            edit_slot(pack, current) = original_of(current);
                             end_edit();
-                            pack.models.erase(current);
-                            say(game::model_name(current) + " is the original's again.");
+                            unedit(pack, current);
+                            say(item_name(current) + " is the original's again.");
                         } else if (prompt == Prompt::Restart) {
                             pack.models.clear();
+                            pack.objects.clear();
                             undo.clear();
                             redo.clear();
                             dirty = true;
@@ -836,7 +909,7 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
                         save(pack_name);
                     }
                 } else if (ctrl && k == SDLK_R) {
-                    if (pack.models.count(current)) prompt = Prompt::Revert;
+                    if (edited(pack, current)) prompt = Prompt::Revert;
                 } else if (ctrl && k == SDLK_N) {
                     prompt = Prompt::Restart;
                 } else if (ctrl && k == SDLK_A) {
@@ -902,7 +975,7 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
                         end_edit();
                         mode = Mode::Vertices;
                         clear_selection();
-                        sel_verts.push_back(static_cast<uint16_t>(pack.models[current].verts.size() - 1));
+                        sel_verts.push_back(static_cast<uint16_t>(edit_slot(pack, current).verts.size() - 1));
                     }
                 } else if (k == SDLK_DELETE || k == SDLK_BACKSPACE) {
                     if (mode == Mode::Vertices && !sel_verts.empty()) {
@@ -933,7 +1006,7 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
                         end_edit();
                         mode = Mode::Faces;
                         clear_selection();
-                        sel_faces.push_back(static_cast<uint16_t>(pack.models[current].faces.size() - 1));
+                        sel_faces.push_back(static_cast<uint16_t>(edit_slot(pack, current).faces.size() - 1));
                         say("A new face. R turns it round if it shows its back.");
                     }
                 } else if (k == SDLK_R && !sel_faces.empty()) {
@@ -1037,7 +1110,7 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
                             if (l2 > 1) d[a] = ((nx - press_x) * ax + (ny - press_y) * ay) / l2 * 100;
                         }
                     }
-                    ModelData& ed = pack.models[current];
+                    ModelData& ed = edit_slot(pack, current);
                     for (const auto& [v, start] : drag_start) {
                         for (int c = 0; c < 3; ++c) {
                             const double moved = start[static_cast<size_t>(c)] + d[static_cast<size_t>(c)];
@@ -1230,14 +1303,21 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
         // The list.
         canvas.fill_rect(0, kTopBar, kListW, H - kTopBar - kBottomBar, kPanel);
         canvas.fill_rect(kListW - 1, kTopBar, 1, H - kTopBar - kBottomBar, kRule);
-        canvas.text(6, kTopBar + 4, "Objects", kLabel);
+        canvas.text(6, kTopBar + 4, "Models", kLabel);
         const int hover_id = list_at(mouse_x, mouse_y);
-        for (size_t i = 0; i < ids.size(); ++i) {
+        for (size_t i = 0; i < rows.size(); ++i) {
             const int y = list_top + static_cast<int>(i) * row_h - list_scroll;
             if (y < list_top || y + row_h > list_bottom) continue;
-            const int id = ids[i];
+            const int id = rows[i];
+            if (id == kSectionRow) {
+                canvas.fill_rect(4, y + 1, kListW - 10, 1, kRule);
+                canvas.text(6, y + 3, "City objects", kLabel);
+                continue;
+            }
             if (id == current) canvas.fill_rect(1, y - 1, kListW - 3, row_h, kSelection);
-            const std::string label = (pack.models.count(id) ? "*" : " ") + std::to_string(id) + " " + game::model_name(id);
+            const std::string label = (edited(pack, id) ? "*" : " ") +
+                                      (is_object(id) ? hex4(routine_of(id)) + " " + city_object(id).name
+                                                     : std::to_string(id) + " " + game::model_name(id));
             canvas.text(4, y, label.substr(0, static_cast<size_t>((kListW - 8) / kGlyph)),
                         id == current ? kGold : id == hover_id ? kValue : kHelp);
         }
@@ -1293,8 +1373,11 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
         canvas.fill_rect(0, H - kBottomBar, W, kBottomBar, kPanel);
         canvas.fill_rect(0, H - kBottomBar, W, 1, kRule);
         const size_t chars = static_cast<size_t>((W - 12) / kGlyph);
-        const std::string status = game::model_name(current) + " (model " + std::to_string(current) + ")" +
-                                   (pack.models.count(current) ? ", changed" : ", the original's") +
+        const std::string what =
+            is_object(current) ? city_object(current).name + " (drawn by 3009:" + hex4(routine_of(current)) + ", in " +
+                                     std::to_string(city_object(current).cells) + " of the map's cells)"
+                               : game::model_name(current) + " (model " + std::to_string(current) + ")";
+        const std::string status = what + (edited(pack, current) ? ", changed" : ", the original's") +
                                    (hover_vertex >= 0 ? ".  Vertex " + std::to_string(hover_vertex) : "") +
                                    (hover_face >= 0 ? ".  Face " + std::to_string(hover_face) : "");
         canvas.text(6, H - kBottomBar + 4, fit_left(status, chars), kValue);
@@ -1346,7 +1429,7 @@ std::string run_object_editor(Presenter& presenter, Gamepad& gamepad, const Game
             panel_box({{"Save your changes" + (pack_name.empty() ? std::string() : " to \"" + pack_name + "\"") + "?", kLabel},
                        {"Y: save   N: don't save   Esc: keep editing", kHint}});
         } else if (prompt == Prompt::Revert) {
-            panel_box({{game::model_name(current) + " back to the original's?", kLabel}, {"Y: yes   Esc: keep it", kHint}});
+            panel_box({{item_name(current) + " back to the original's?", kLabel}, {"Y: yes   Esc: keep it", kHint}});
         } else if (prompt == Prompt::Restart) {
             panel_box({{"Every object back to the original's? Your unsaved changes go.", kLabel},
                        {"Y: start again   Esc: keep editing", kHint}});

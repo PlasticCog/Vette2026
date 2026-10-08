@@ -193,7 +193,7 @@ struct SceneBuilder::Impl {
         std::vector<std::vector<PrimData>> faces;  // per face, per primitive
         float radius = 0, ylo = 0, yhi = 0;
     };
-    std::array<MeshData, kModelCount> meshes, far_meshes;
+    std::array<MeshData, kModelSlots> meshes, far_meshes;
     struct Entry {
         int routine = -1;  // index into world.routines
         int16_t dx = 0, dy = 0, dz = 0;
@@ -845,12 +845,12 @@ void SceneBuilder::Impl::prepare_routines() {
 
 void SceneBuilder::Impl::prepare_models() {
     std::vector<uint16_t> local;
-    for (size_t id = 0; id < kModelCount * 2; ++id) {
-        const Model& m = world.models[id % kModelCount];
+    for (size_t id = 0; id < kModelSlots * 2; ++id) {
+        const Model& m = world.models[id % kModelSlots];
         if (!m.present) continue;
-        const bool far = id >= kModelCount;
+        const bool far = id >= kModelSlots;
         const ModelMesh& mesh = far ? m.far_mesh : m.near_mesh;
-        MeshData& md = (far ? far_meshes : meshes)[id % kModelCount];
+        MeshData& md = (far ? far_meshes : meshes)[id % kModelSlots];
         for (const Vec3i& q : mesh.verts) {
             md.verts.push_back({static_cast<float>(q.x), static_cast<float>(q.y), static_cast<float>(q.z)});
             md.radius = std::max(md.radius, std::sqrt(float(q.x) * q.x + float(q.y) * q.y + float(q.z) * q.z));
@@ -1686,7 +1686,7 @@ void SceneBuilder::Impl::emit_line(P3 a, P3 b, const SceneColour& c) {
 // --- Objects ------------------------------------------------------------------------------------------------
 
 void SceneBuilder::Impl::draw_model(int model, const M3& rotation, V3 origin_cam, bool outline) {
-    if (model < 0 || model >= kModelCount || !world.models[static_cast<size_t>(model)].present) return;
+    if (model < 0 || model >= kModelSlots || !world.models[static_cast<size_t>(model)].present) return;
     const Model& m = world.models[static_cast<size_t>(model)];
     const bool saved_ribbons = ribbons;
     ribbons = false;
@@ -2564,7 +2564,7 @@ void SceneBuilder::Impl::draw_vehicle(int index) {
     const float scale = std::max(opt->pixel_w, opt->pixel_h);  // output pixels per race pixel
     for (uint32_t k = first; k < last; ++k) {
         const ModelDraw& md = vehicle_models[k];
-        const float radius = meshes[static_cast<size_t>(md.model) % kModelCount].radius;
+        const float radius = meshes[static_cast<size_t>(md.model) % kModelSlots].radius;
         const V3 c = to_camera(v.x + md.offset.x, v.y + md.offset.y, v.z + md.offset.z);
         if (!opt->original_window) {
             if (!sphere_visible(c, radius + 8)) continue;
@@ -3200,7 +3200,7 @@ void SceneBuilder::Impl::draw_freeway() {
             }
             continue;
         }
-        if (o.model < 0 || o.model >= kModelCount) continue;
+        if (o.model < 0 || o.model >= kModelSlots) continue;
         const V3 c = to_camera(o.x, o.y, o.z);
         if (!opt->original_window && !sphere_visible(c, meshes[static_cast<size_t>(o.model)].radius + 8)) continue;
         ++out->stats.vehicles;

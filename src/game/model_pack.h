@@ -11,15 +11,24 @@
 // faces to draw, back to front (the original has no depth buffer: it paints them in that order).
 // Edited models are written to segment 8000h, which nothing of the game's uses, and the model's
 // 8-byte header in segment 245A is pointed at them (the original reads every other address from it).
+//
+// Code-drawn objects (the city's ordinary buildings, its street lamps: routines in segment 3009 that draw
+// with the renderer's own primitives; enhanced/object_models.h makes models of them) can be played as
+// models too: a set's `objects`, by routine. Each gets a model number after the original's (kModelCount
+// on, in the routines' order), in table slots where the Chinatown gate's model data sat (that moves to
+// segment 8000h with the edited ones), and the game draws it in place of the routine: at the routine's
+// entry, the model number in AX and on to 3009:B9E6, as the original's own model objects go (B92A).
 
 #include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace vette::host {
+class Cpu;
 class Machine;
 class Memory;
 }
@@ -48,6 +57,7 @@ struct ModelData {
 };
 
 constexpr int kModelCount = 59;  // the model table's entries (245A:6FF8, 8 bytes each)
+constexpr int kMaxObjects = 41;  // code-drawn objects as models: table slots in the room freed for them
 constexpr int kReferenceVertices = 4;
 constexpr int kMaxVertices = 128;  // the original's projected-vertex buffer (DS:1A86)
 constexpr int kMaxPoints = 16;     // per polygon, as the original's own models
@@ -59,7 +69,7 @@ std::string model_name(int id);
 std::optional<ModelData> read_model(host::Memory& memory, int id);
 
 // Every octant's order from the faces: the drawn ones (not bit 14), farthest first from a viewpoint
-// out in that octant.
+// out in that octant, and a face painted on another (a window on its wall: in its plane) after it.
 void make_orders(ModelData& model);
 
 // What's wrong with a model for the game (too many vertices, a face with too many points or an index
@@ -68,9 +78,17 @@ std::string check_model(const ModelData& model);
 
 struct ModelPack {
     std::map<int, ModelData> models;  // by model id; the ones not here stay the original's
+    std::map<uint16_t, ModelData> objects;  // code-drawn objects drawn as these models, by routine (3009)
     std::string serialize() const;
     static std::optional<ModelPack> parse(const std::string& text, std::string& error);
 };
+
+// The model number each of the pack's objects is drawn with: {routine, model}, in routine order.
+std::vector<std::pair<uint16_t, int>> object_models(const ModelPack& pack);
+
+// The drawing of the pack's objects as models (their routines' entries sent to 3009:B9E6), on a CPU that
+// runs the game's drawing: install_model_pack does the game's; game::SmoothRenderer's replays need it too.
+void install_object_draws(host::Cpu& cpu, const ModelPack& pack);
 
 // Writes the pack's models into memory: their data in segment 8000h, their headers in 245A pointed at
 // it. False (with the reason) if a model is wrong (check_model) or they don't fit in 64 KB.

@@ -16,6 +16,9 @@ using host::Cpu;
 using host::Memory;
 
 constexpr uint16_t kModelSeg = emu_seg(0x245A), kModelTable = 0x6FF8;  // {w near, w mid, w far, w far colour}
+constexpr uint16_t kTableEnd = kModelTable + 8 * kModelCount;  // the Chinatown gate's vertices follow
+constexpr uint16_t kDrawUnrotated = 0xB9E6;  // draw model AX at the object's place (DS:3220), unrotated
+constexpr uint16_t kObjectFarColour = 7;     // (the far box's colour patch, BA18: unused, all slots are near)
 constexpr uint16_t kPackSeg = 0x8000;  // free conventional memory: the game keeps below 6E16h
 constexpr uint16_t kEntrySeg = emu_seg(0x3009), kEntry = 0x0025;
 constexpr const char* kMagic = "VETTE2026 MODELS 1";
@@ -108,6 +111,53 @@ std::optional<ModelData> read_model(Memory& m, int id) {
     return d;
 }
 
+namespace {
+
+// Whether face `decal` lies in the plane of polygon face `base` (all its points within 2 units of it) and
+// isn't `base` itself: drawn on it.
+bool painted_on(const ModelData& model, uint16_t decal, uint16_t base) {
+    if (decal == base) return false;
+    const ModelData::Face& b = model.faces[base];
+    if (b.lines() || b.prims.empty() || b.prims.front().size() < 3) return false;
+    const auto& p = b.prims.front();
+    const auto at = [&](uint16_t v) {
+        const auto& q = model.verts[v];
+        return std::array<double, 3>{double(q[0]), double(q[1]), double(q[2])};
+    };
+    // Newell's normal of the base.
+    std::array<double, 3> n{0, 0, 0};
+    for (size_t i = 0; i < p.size(); ++i) {
+        const auto c = at(p[i]), d = at(p[(i + 1) % p.size()]);
+        n[0] += (c[1] - d[1]) * (c[2] + d[2]);
+        n[1] += (c[2] - d[2]) * (c[0] + d[0]);
+        n[2] += (c[0] - d[0]) * (c[1] + d[1]);
+    }
+    const double len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (len < 1e-9) return false;
+    const auto o = at(p.front());
+    // ...and within its bounds (two faces in one plane: the smaller is on the larger, not the other way).
+    std::array<double, 3> lo{1e9, 1e9, 1e9}, hi{-1e9, -1e9, -1e9};
+    for (const uint16_t v : p) {
+        const auto q = at(v);
+        for (size_t c = 0; c < 3; ++c) lo[c] = std::min(lo[c], q[c] - 2), hi[c] = std::max(hi[c], q[c] + 2);
+    }
+    bool any = false;
+    for (const auto& prim : model.faces[decal].prims) {
+        for (const uint16_t v : prim) {
+            if (v >= model.verts.size()) return false;
+            const auto q = at(v);
+            if (std::fabs((n[0] * (q[0] - o[0]) + n[1] * (q[1] - o[1]) + n[2] * (q[2] - o[2])) / len) > 2) return false;
+            for (size_t c = 0; c < 3; ++c) {
+                if (q[c] < lo[c] || q[c] > hi[c]) return false;
+            }
+            any = true;
+        }
+    }
+    return any;
+}
+
+}  // namespace
+
 void make_orders(ModelData& model) {
     // A face's place: the middle of its points.
     std::vector<std::array<double, 3>> centre(model.faces.size());
@@ -136,6 +186,22 @@ void make_orders(ModelData& model) {
         auto& order = model.order[static_cast<size_t>(o)];
         order.clear();
         for (const auto& [d, i] : by_distance) order.push_back(i);
+        // A face painted on another goes after it (a window on its wall: without a depth buffer, the
+        // later one shows).
+        for (int pass = 0; pass < 4; ++pass) {
+            bool moved = false;
+            for (size_t a = 0; a < order.size(); ++a) {
+                for (size_t b = 0; b < a; ++b) {
+                    if (!painted_on(model, order[b], order[a])) continue;
+                    const uint16_t f = order[b];
+                    order.erase(order.begin() + static_cast<std::ptrdiff_t>(b));
+                    order.insert(order.begin() + static_cast<std::ptrdiff_t>(a), f);
+                    moved = true;
+                    break;
+                }
+            }
+            if (!moved) break;
+        }
     }
 }
 
@@ -173,8 +239,7 @@ std::string ModelPack::serialize() const {
     out << "# Models of VETTE! 2026's object editor. Vertices: x east, y down, z north; 0-3 are the model's\n"
            "# reference frame. A face: flags, colour, outline colour (hex), then its polygons' or lines'\n"
            "# vertices, '|' between them. An order: the faces drawn, back to front, seen from one octant.\n";
-    for (const auto& [id, m] : models) {
-        out << "model " << id << "  # " << model_name(id) << "\n";
+    const auto body = [&out](const ModelData& m) {
         for (const auto& v : m.verts) out << "v " << v[0] << " " << v[1] << " " << v[2] << "\n";
         for (const auto& f : m.faces) {
             out << "f " << hex(f.flags, 4) << " " << hex(f.colour, 2) << " " << hex(f.outline, 2);
@@ -191,6 +256,14 @@ std::string ModelPack::serialize() const {
             out << "\n";
         }
         out << "end\n";
+    };
+    for (const auto& [id, m] : models) {
+        out << "model " << id << "  # " << model_name(id) << "\n";
+        body(m);
+    }
+    for (const auto& [routine, m] : objects) {
+        out << "object " << hex(routine, 4) << "  # the code-drawn object 3009:" << hex(routine, 4) << "\n";
+        body(m);
     }
     return out.str();
 }
@@ -221,6 +294,19 @@ std::optional<ModelPack> ModelPack::parse(const std::string& text, std::string& 
             if (!(words >> id) || id < 0 || id >= kModelCount) return fail("a model number from 0 to " + std::to_string(kModelCount - 1));
             model = &pack.models[id];
             *model = ModelData{};
+        } else if (what == "object") {
+            std::string at;
+            unsigned long routine = 0;
+            try {
+                if (!(words >> at)) throw 0;
+                routine = std::stoul(at, nullptr, 16);
+                if (routine == 0 || routine > 0xFFFF) throw 0;
+            } catch (...) {
+                return fail("an object's routine is a hexadecimal address");
+            }
+            model = &pack.objects[static_cast<uint16_t>(routine)];
+            *model = ModelData{};
+            if (pack.objects.size() > kMaxObjects) return fail("more than " + std::to_string(kMaxObjects) + " objects");
         } else if (what == "end") {
             model = nullptr;
         } else if (!model) {
@@ -274,7 +360,28 @@ std::optional<ModelPack> ModelPack::parse(const std::string& text, std::string& 
             return std::nullopt;
         }
     }
+    for (const auto& [routine, m] : pack.objects) {
+        if (const std::string why = check_model(m); !why.empty()) {
+            error = "object " + hex(routine, 4) + ": " + why;
+            return std::nullopt;
+        }
+    }
     return pack;
+}
+
+std::vector<std::pair<uint16_t, int>> object_models(const ModelPack& pack) {
+    std::vector<std::pair<uint16_t, int>> out;
+    for (const auto& [routine, model] : pack.objects) out.emplace_back(routine, kModelCount + static_cast<int>(out.size()));
+    return out;
+}
+
+void install_object_draws(Cpu& cpu, const ModelPack& pack) {
+    for (const auto& [routine, id] : object_models(pack)) {
+        cpu.add_watch(Cpu::linear(kEntrySeg, routine), [id = id](Cpu& c) {
+            c.regs.r[host::AX] = static_cast<uint16_t>(id);
+            c.regs.ip = kDrawUnrotated;
+        });
+    }
 }
 
 bool write_models(Memory& m, const ModelPack& pack, std::string& error) {
@@ -285,15 +392,43 @@ bool write_models(Memory& m, const ModelPack& pack, std::string& error) {
         at += 2;
         return true;
     };
-    for (const auto& [id, original] : pack.models) {
-        ModelData model = original;
-        if (const std::string why = check_model(model); !why.empty()) {
-            error = model_name(id) + ": " + why;
+    // The objects' table slots and headers go where the model after the table has its data: it moves
+    // first, with the edited ones (as the game has it, if it isn't one of them).
+    std::map<int, ModelData> models = pack.models;
+    if (!pack.objects.empty()) {
+        if (pack.objects.size() > kMaxObjects) {
+            error = "more than " + std::to_string(kMaxObjects) + " objects";
             return false;
         }
-        const uint16_t header = near_header(m, id);
-        if (header == 0 || header == 0xFFFF || rd16(m, kModelSeg, header) == 0) {
-            error = model_name(id) + ": not in this game's model table";
+        int mover = -1;
+        for (int id = 0; id < kModelCount && mover < 0; ++id) {
+            const uint16_t h = near_header(m, id);
+            if (h && h != 0xFFFF && rd16(m, kModelSeg, h) == kModelSeg && rd16(m, kModelSeg, static_cast<uint16_t>(h + 4)) == kTableEnd)
+                mover = id;
+        }
+        if (mover < 0 && pack.models.empty()) {
+            error = "no room for the objects in this game's model table";
+            return false;
+        }
+        if (mover >= 0) {
+            const uint16_t h = near_header(m, mover);
+            if (h < kTableEnd + 16 * pack.objects.size()) {
+                error = "no room for " + std::to_string(pack.objects.size()) + " objects in this game's model table";
+                return false;
+            }
+            if (!models.count(mover)) {
+                auto as_is = read_model(m, mover);
+                if (!as_is) {
+                    error = model_name(mover) + " couldn't be moved to make room for the objects";
+                    return false;
+                }
+                models[mover] = std::move(*as_is);
+            }
+        }
+    }
+    const auto write_one = [&](ModelData model, uint16_t header, const std::string& name) {
+        if (const std::string why = check_model(model); !why.empty()) {
+            error = name + ": " + why;
             return false;
         }
         bool no_order = true;
@@ -333,6 +468,26 @@ bool write_models(Memory& m, const ModelPack& pack, std::string& error) {
         wr16(m, kModelSeg, static_cast<uint16_t>(header + 2), static_cast<uint16_t>(model.verts.size()));
         wr16(m, kModelSeg, static_cast<uint16_t>(header + 4), vptr);
         wr16(m, kModelSeg, static_cast<uint16_t>(header + 6), optr);
+        return true;
+    };
+    for (const auto& [id, model] : models) {
+        const uint16_t header = near_header(m, id);
+        if (header == 0 || header == 0xFFFF || rd16(m, kModelSeg, header) == 0) {
+            error = model_name(id) + ": not in this game's model table";
+            return false;
+        }
+        if (!write_one(model, header, model_name(id))) return false;
+    }
+    // The objects: slot kModelCount + k at the table's end (near, mid and far all the one mesh), its
+    // header after the slots.
+    const auto count = static_cast<uint16_t>(pack.objects.size());
+    uint16_t k = 0;
+    for (const auto& [routine, model] : pack.objects) {
+        const auto slot = static_cast<uint16_t>(kTableEnd + 8 * k), header = static_cast<uint16_t>(kTableEnd + 8 * count + 8 * k);
+        for (int i = 0; i < 3; ++i) wr16(m, kModelSeg, static_cast<uint16_t>(slot + 2 * i), header);
+        wr16(m, kModelSeg, static_cast<uint16_t>(slot + 6), kObjectFarColour);
+        if (!write_one(model, header, "object " + hex(routine, 4))) return false;
+        ++k;
     }
     return true;
 }
@@ -346,6 +501,7 @@ bool run_until_started(host::Machine& machine, uint64_t max_ns) {
 }
 
 void install_model_pack(host::Machine& machine, ModelPack pack) {
+    install_object_draws(machine.cpu(), pack);
     machine.cpu().add_watch(Cpu::linear(kEntrySeg, kEntry), [pack = std::move(pack)](Cpu& c) {
         std::string error;
         if (!write_models(c.memory(), pack, error)) std::fprintf(stderr, "Objects: %s\n", error.c_str());

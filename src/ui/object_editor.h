@@ -1,6 +1,7 @@
 #pragma once
 // The object editor (launch menu > Objects, Enter): the original's 3D models (the cars, the
-// pedestrians, the landmark buildings) one at a time in a 3D view to turn round and zoom into, reshaped
+// pedestrians, the landmark buildings), and the city's code-drawn buildings and street objects as models
+// (enhanced/object_models.h), one at a time in a 3D view to turn round and zoom into, reshaped
 // vertex by vertex and face by face: move, add, delete, mirror and recolour them, make new faces. Saved
 // as a set of one's own (game/model_pack.h) in the save folder's objects folder, which the launch menu's
 // Objects setting then plays with; the game's own files are never changed. Mouse and keyboard.

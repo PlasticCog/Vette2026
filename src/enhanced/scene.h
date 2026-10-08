@@ -108,6 +108,8 @@ struct SceneOptions {
     // Where a traffic car or pedestrian may be drawn beyond the original's rules (in the window and as a
     // copy): game::no_freeway_placement with the freeways off. Empty: the original's.
     std::function<game::Placement(uint16_t entity, int gx, int gy, uint8_t type)> placement;
+    // ...and where in the cell a car goes (game::no_freeway_lane_x: its x in the cell, 0-7FFh). Empty: as is.
+    std::function<int(uint16_t entity, int gx, int gy, int x)> lane_x;
     // Off: traffic and pedestrians only in the original's window, where the original draws them (they
     // appear as the camera nears). Without a depth buffer, far ones could show through the scenery.
     bool far_vehicles = true;

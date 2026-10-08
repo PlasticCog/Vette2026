@@ -739,8 +739,10 @@ struct EnhancedView {
         // only those near the car, where the original draws them (none show through the scenery).
         options.depth = options.replicas = options.far_vehicles = presenter.depth_buffer();
         options.smooth_traffic = smooth_traffic;
-        if (no_freeways)
+        if (no_freeways) {
             options.placement = game::no_freeway_placement;
+            options.lane_x = game::no_freeway_lane_x;
+        }
         options.time_s = static_cast<double>(machine.emulated_ns()) / 1e9;
         presenter.frame_scale(layers.under.width, layers.under.height, options.pixel_w, options.pixel_h);
         if (presenter.original_resolution())

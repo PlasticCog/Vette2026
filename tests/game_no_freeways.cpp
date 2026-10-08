@@ -180,6 +180,17 @@ TEST(no_freeways_placement) {
     CHECK(no_freeway_placement(kPedestrian, 10, 1, 0x01) == Placement::Deny);
     CHECK(no_freeway_placement(kPedestrian, 29, 2, 0x50) == Placement::Deny);
     CHECK(no_freeway_placement(kPedestrian, 35, 4, 0x34) == Placement::Default);
+    // The Bay Bridge's cars: their bridge, and Marina Boulevard (row 38, cells 0-11), in its lanes.
+    constexpr uint16_t kBayCar = 0xED96;
+    CHECK(no_freeway_placement(kBayCar, 38, 5, 0x55) == Placement::Allow);
+    CHECK(no_freeway_placement(kBayCar, 18, 60, 0x40) == Placement::Default);
+    CHECK(no_freeway_placement(kBayCar, 38, 13, 0x64) == Placement::Deny);
+    CHECK(no_freeway_placement(kBayCar, 10, 6, 0x64) == Placement::Deny);
+    using vette::game::no_freeway_lane_x;
+    CHECK_EQ(no_freeway_lane_x(kBayCar, 38, 5, 0x6A0), 32);    // the bridge's first lane: the boulevard's
+    CHECK_EQ(no_freeway_lane_x(kBayCar, 38, 5, 0x7E0), 212);   // ...its last, a bus inside the road (256)
+    CHECK_EQ(no_freeway_lane_x(kBayCar, 18, 60, 0x6A0), 0x6A0);  // on the bridge, as it is
+    CHECK_EQ(no_freeway_lane_x(kCityCar, 38, 5, 0x7A0), 0x7A0);
 }
 
 TEST(no_freeways_coast_traffic) {
@@ -238,4 +249,49 @@ TEST(no_freeways_coast_traffic) {
         }
     }
     CHECK_EQ(moved, 9);
+    // The Marina's big tile has a list of its own: the Golden Gate's, with the Bay Bridge's 9 cars, which
+    // move all the same (the camera still at the Zoo), and the Bay Bridge's list agrees on their cells.
+    const uint16_t marina = w(0xEF5A + 2 * 10);
+    CHECK(marina != 0xF0B0 && marina != city);
+    std::vector<uint16_t> bay;
+    for (uint16_t p = marina; w(p) != 0xFFFF; p = static_cast<uint16_t>(p + 4)) {
+        if (w(p) >= 0xED68 && w(p) < 0xEF06) bay.push_back(p);
+    }
+    CHECK_EQ(bay.size(), size_t{9});
+    std::vector<uint16_t> bay_before;
+    for (const uint16_t p : bay) bay_before.push_back(w(static_cast<uint16_t>(w(p) + 4)));  // y: they drive east
+    until(48);
+    int bay_moved = 0;
+    for (size_t i = 0; i < bay.size(); ++i) {
+        bay_moved += w(static_cast<uint16_t>(w(bay[i]) + 4)) != bay_before[i];
+        for (uint16_t q = 0xF0E6; w(q) != 0xFFFF; q = static_cast<uint16_t>(q + 4)) {
+            if (w(q) == w(bay[i])) CHECK_EQ(w(static_cast<uint16_t>(q + 2)), w(static_cast<uint16_t>(bay[i] + 2)));
+        }
+    }
+    CHECK_EQ(bay_moved, 9);
+    // With the camera in the Marina: its list is stepped as the Golden Gate's (the patrol car's moving flag,
+    // which the police read, set as on the bridge), the bridges' cars all move, and the lists agree on where
+    // in its pattern each is (the cell itself is the last one drawn in, which the drawing writes to the list
+    // it draws, as the original does).
+    const auto put = [&](uint16_t off, uint16_t v) { vette::game::wr16(mem, vette::game::kDataSeg, off, v); };
+    put(0x2D57, 2), put(0x2D59, 0), put(0x2D35, 6 * 2048 + 128), put(0x2D37, 5 * 2048 + 1024), put(0x2D3B, 90);
+    until(50);
+    CHECK_EQ(w(0x843A), 2 * 10);
+    CHECK_EQ(w(0xEF4C), 0xFFFF);
+    std::vector<uint16_t> gg, all_before;
+    for (uint16_t p = marina; w(p) != 0xFFFF; p = static_cast<uint16_t>(p + 4)) {
+        if ((w(p) >= 0xEB56 && w(p) < 0xECF4) || (w(p) >= 0xED68 && w(p) < 0xEF06)) gg.push_back(p);
+    }
+    CHECK_EQ(gg.size(), size_t{18});
+    for (const uint16_t p : gg) all_before.push_back(static_cast<uint16_t>(w(static_cast<uint16_t>(w(p) + 2)) ^ w(static_cast<uint16_t>(w(p) + 4))));
+    until(54);
+    int all_moved = 0;
+    for (size_t i = 0; i < gg.size(); ++i) {
+        all_moved += static_cast<uint16_t>(w(static_cast<uint16_t>(w(gg[i]) + 2)) ^ w(static_cast<uint16_t>(w(gg[i]) + 4))) != all_before[i];
+        const uint16_t own = w(gg[i]) < 0xED00 ? 0xF0B0 : 0xF0E6;
+        for (uint16_t q = own; w(q) != 0xFFFF; q = static_cast<uint16_t>(q + 4)) {
+            if (w(q) == w(gg[i])) CHECK_EQ(w(static_cast<uint16_t>(q + 2)) & 0x33, w(static_cast<uint16_t>(gg[i] + 2)) & 0x33);
+        }
+    }
+    CHECK_EQ(all_moved, 18);
 }

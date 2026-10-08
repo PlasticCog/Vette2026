@@ -296,6 +296,18 @@ and 100h on. At a corner the planner then takes the side street round the block.
 game/no_freeways.h: cars turning back at a corner sent it round, as did a sidestep across the Golden Gate's
 lanes).
 
+**Code that tells the lists apart** (every immediate F0B0/F0E6/F01E/F00C/EF5A/EF8C in segments 3009, 4021 and
+4160, **confirmed** by a scan): `cmp bx, F0E6` at BD69 (the Bay Bridge's headings), `cmp ax, F0E6` / `cmp ax, F0B0`
+at BF15 / BF22 (the bridges skip the cell rules), `cmp bp, F0B0` / `cmp bp, F0E6` at 1257 / 125D (the police: in a
+bridge's tiles a chase starts only with the patrol car on the right side). Nothing else does. In VETTE! 2026 with
+the freeways off (game/no_freeways.h), the Marina's tile has a list of its own (F0B0's, with the Bay Bridge's 9
+cars added for Marina Boulevard) that watches at BF22 and 1257 make the Golden Gate's to the game.
+
+**City cars can't take an east-west-only street**: a car whose path heads north or south into a cell whose rule
+has bits 0-1 clear is hidden (BF61/C00C: `+1C = 0`), not turned round, and a hidden car doesn't move (BDDE) until
+the view binds it to another cell. The city's cars drive loops of north-south and east-west legs, so on such a
+street each would show for a cell and stop. **Confirmed** (freeways off: all of the Marina's stood still).
+
 **Pedestrian entity (0x20 bytes, `BB72`)**: +02/+04 x,y in cell, +08 heading, +0A pitch (90 = knocked over),
 +0E state profile (EAE8 walking, EAEA hit), +10 reset profile, +12 → route (square of 0x11A sides, DS:EB00),
 +14 = 1, +16 speed (+1/frame up to 28), +18/+1A distance accumulators. When hit (16D9), the profile becomes EAEA,

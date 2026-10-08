@@ -2121,6 +2121,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
             int32_t x, y;
             int16_t z;
             entity_xyz(e, x, y, z);
+            if (slot >= 3 && opt->lane_x) x = opt->lane_x(e, gx, gy, x & 0x7FF);
             add_vehicle(e, ram.d16(e), cell, base_x + (x & 0x7FF), base_y + (y & 0x7FF), z, true);
             vehicles.back().window = true;
             if (opt->observer && slot >= 3) observe_window(e, cell, base_x + (x & 0x7FF), base_y + (y & 0x7FF), z);
@@ -2172,6 +2173,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
         int32_t x, y;
         int16_t z;
         entity_xyz(e, x, y, z);
+        if (!cell_relative && opt->lane_x) x = opt->lane_x(e, gx, gy, x & 0x7FF);
         const int32_t bx = gx * kCellSize, by = gy * kCellSize;
         const int32_t wx = cell_relative ? bx + static_cast<int16_t>(x) : bx + (x & 0x7FF);
         const int32_t wy = cell_relative ? by + static_cast<int16_t>(y) : by + (y & 0x7FF);

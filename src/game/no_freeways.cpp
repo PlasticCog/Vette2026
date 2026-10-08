@@ -1,5 +1,6 @@
 #include "game/no_freeways.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <iterator>
@@ -205,9 +206,10 @@ uint16_t route_opponent(Memory& m) {
 // Lists (notes 04 section 7): DS:EF5A[bt] -> {w entity, w cell (x*16+y in the big tile)} .. FFFF, slots 0-2
 // the player, the opponent, the chase car, slot 3 a patrol car; DS:EF8C[bt] the same for pedestrians.
 // The city's list F01E (big tiles 0, 5, 6, 7, 11, 12) ends where the bridge's F0B0 begins, so it's copied
-// to the scratch space with the Golden Gate's cars added.
+// to the scratch space with the Golden Gate's cars added. The Marina's big tile gets a list of its own
+// there: the Golden Gate's, with the Bay Bridge's cars (F0E6's) added for Marina Boulevard.
 constexpr uint16_t kListsA = 0xEF5A, kListsB = 0xEF8C;
-constexpr uint16_t kCityList = 0xF01E, kBridgeList = 0xF0B0;
+constexpr uint16_t kCityList = 0xF01E, kBridgeList = 0xF0B0, kBayList = 0xF0E6;
 constexpr uint16_t kCityPedestrians = 0xEFC0, kNoPedestrians = 0xEFBE;
 constexpr int kBigTiles = 25;
 // The Golden Gate's cars (F0B0's slots 4-12; slot 3 is the bridge's patrol car), records 2Eh apart, and
@@ -219,6 +221,14 @@ constexpr int kPedestrianCount = 16;
 bool bridge_car(uint16_t e) {
     return e >= kBridgeCars && e < kBridgeCars + kBridgeCarCount * kBridgeCarSize && (e - kBridgeCars) % kBridgeCarSize == 0;
 }
+// The Bay Bridge's cars (F0E6's slots 4-12; its patrol car, slot 3, stays on the bridge): never ruled by the
+// cells (the bridges' lists aren't), driving straight on, east (west on course 3: BD69 sets their heading).
+constexpr uint16_t kBayCars = 0xED68;
+bool bay_car(uint16_t e) {
+    return e >= kBayCars && e < kBayCars + kBridgeCarCount * kBridgeCarSize && (e - kBayCars) % kBridgeCarSize == 0;
+}
+constexpr uint16_t kBridgePatrol = 0xEB28;  // the Golden Gate's, F0B0's slot 3
+bool golden_gate(uint16_t e) { return bridge_car(e) || e == kBridgePatrol; }
 bool pedestrian(uint16_t e) {
     return e >= kPedestrians && e < kPedestrians + kPedestrianCount * kPedestrianSize && (e - kPedestrians) % kPedestrianSize == 0;
 }
@@ -227,6 +237,16 @@ bool pedestrian(uint16_t e) {
 // approach's, the causeway's and the Great Highway's), from the Zoo (row 0 is the map's southern wall)
 // to the approach (43), where the original's own rules take over.
 constexpr int kCoastColumn = 2, kCoastFrom = 1, kApproach = 43, kBridgeTiles = 48;
+
+// Marina Boulevard (row 38, cells 0-11), with the Bay Bridge's cars. Its road runs along the cells' south
+// edge, 256 wide (x 0-100h); the bridge's six lanes, 64 apart along its cells' north edge (x 6A0h-7E0h),
+// go into it 0.56 as far apart, from x 32 to 212 (no_freeway_lane_x), so a bus in the outer ones (44
+// wide) keeps to the asphalt (its kerbs about 16 in). The bridge's own big tiles (8, 9: map
+// rows 16-31, columns 48-79) keep them as the original has them.
+constexpr int kMarinaRow = 38, kMarinaTo = 11;
+bool marina_cell(int gx, int gy) { return gx == kMarinaRow && gy >= 0 && gy <= kMarinaTo; }
+bool bay_bridge_cell(int gx, int gy) { return gx >= 16 && gx < 32 && gy >= 48 && gy < 80; }
+constexpr int kBayLaneFirst = 0x6A0, kBayLaneLast = 0x7E0, kMarinaLaneFirst = 32, kMarinaLaneLast = 212;
 
 // The city cars' rules (traffic_intersection 3009:BF10): a byte per cell, D2AE[bt] -> 256 bytes (x*16+y).
 // 0 hides the car there; else bits 0-1 rule heading north or south (1 north only, 2 south only, 3 both,
@@ -258,7 +278,14 @@ constexpr RuleEdit kRuleEdits[] = {
 constexpr uint16_t kTrafficStep = 0xBCFB, kTrafficNext = 0xBD10, kTrafficEntity = 0xBD24, kTrafficEnd = 0xBDAB;
 constexpr uint16_t kCameraTile = 0x843A, kStepList = 0xEF50;
 constexpr uint16_t kStepState[] = {0xEF4C, 0xEF4E, 0xEF50, 0xF002, 0xF004};
-constexpr uint16_t kBridgeTile = 10;  // one of the bridge list's big tiles
+// The bridges' cars are stepped every frame, wherever the camera is: after the camera's list, a pass for
+// each bridge's (unless it was the camera's), as if the camera were there. The Marina's list (its tile's) is
+// the Golden Gate's to the game: no cell rules for it (BF22), the bridges' police (1257); the Golden Gate's
+// cars and patrol car are stepped with it while the camera is in the Marina.
+constexpr uint16_t kMarinaTile = 10;  // the Marina's big tile (the Golden Gate's list in the original)
+constexpr uint16_t kGoldenGateTile = 15, kBayBridgeTile = 8;  // the passes', the bridges' own tiles
+constexpr uint16_t kRulesSkip = 0xBF22;   // cmp ax, F0B0: the list being stepped (AX) is the Golden Gate's?
+constexpr uint16_t kPoliceStart = 0x1257;  // cmp bp, F0B0: the camera's list (BP) is?
 
 // The view's gathers (collect_vehicles 32F8, collect_pedestrians 34D6), each car or pedestrian against the
 // drawn cell (big tile * 2 in DS:3556, cell in 2CC9): the pattern's match for a car from slot 3, away from
@@ -269,6 +296,9 @@ struct Gather {
     uint16_t match, next;
 };
 constexpr Gather kCarGathers[] = {{0x3382, 0x3391}, {0x3414, 0x341D}};
+// ...and where a car's x in its cell has been read (AX, masked next; SI past it: the entity + 4), before the
+// cell's base is added: in the window (33AE) and in the camera's own cell (348E, the collision test after).
+constexpr uint16_t kCarX[] = {0x33AE, 0x348E};
 constexpr Gather kPedestrianGathers[] = {{0x34FC, 0x3515}, {0x3531, 0x353B}};
 // The computer opponent's look ahead for traffic (3009:D8FD, on once it has been in view) gathers the
 // cars of its big tile's list in its pattern cell as if they were in its own (D94C; a match at D95B, SI the
@@ -279,6 +309,7 @@ constexpr Gather kPedestrianGathers[] = {{0x34FC, 0x3515}, {0x3531, 0x353B}};
 // minute lost), so there it overtakes them in their lane. The opponent: big tile DS:2F2B/2F2D, place
 // 2F09/2F0B.
 constexpr Gather kOpponentLook = {0xD95B, 0xD965};
+constexpr uint16_t kLookX = 0xD971;  // its car's x read (AX), about to be masked; BX the entity + 2
 constexpr uint16_t kOpponentX = 0x2F09, kOpponentY = 0x2F0B, kOpponentRow = 0x2F2B, kOpponentCol = 0x2F2D;
 
 constexpr uint16_t kEntrySeg = emu_seg(0x3009), kEntry = 0x0025;  // start, after the image unpacks
@@ -328,6 +359,10 @@ Placement no_freeway_placement(uint16_t entity, int gx, int gy, uint8_t type) {
         if (gy == kCoastColumn) return gx < kCoastFrom ? Placement::Deny : gx < kApproach ? Placement::Allow : Placement::Default;
         return gx < kBridgeTiles ? Placement::Deny : Placement::Default;  // (the city's and the Marina's streets)
     }
+    if (bay_car(entity)) {
+        if (marina_cell(gx, gy)) return Placement::Allow;
+        return bay_bridge_cell(gx, gy) ? Placement::Default : Placement::Deny;
+    }
     if (pedestrian(entity)) {
         // Not on the water (the Marina's harbour too: 2B, 2D, 2E), the coast road (as on a freeway), the
         // bridge's deck (29, 2A, 11) or the walls and barriers.
@@ -360,18 +395,48 @@ void install_no_freeway_drawing(Cpu& cpu) {
             });
         }
     }
+    for (const uint16_t at : kCarX) {
+        cpu.add_watch(Cpu::linear(kEntrySeg, at), [](Cpu& c) {
+            Memory& m = c.memory();
+            const int bt = rd16(m, kDataSeg, kDrawnTile) / 2;
+            const uint16_t cell = rd16(m, kDataSeg, kDrawnCell);
+            if (bt < 0 || bt >= kBigTiles) return;
+            const int gx = bt / 5 * 16 + (cell >> 4 & 15), gy = bt % 5 * 16 + (cell & 15);
+            const auto entity = static_cast<uint16_t>(c.regs.r[host::SI] - 4);
+            c.regs.r[host::AX] = static_cast<uint16_t>(no_freeway_lane_x(entity, gx, gy, c.regs.r[host::AX] & 0x7FF));
+        });
+    }
+}
+
+int no_freeway_lane_x(uint16_t entity, int gx, int gy, int x) {
+    if (!bay_car(entity) || !marina_cell(gx, gy)) return x;
+    const int lane = std::clamp(x, kBayLaneFirst, kBayLaneLast) - kBayLaneFirst;
+    return kMarinaLaneFirst + lane * (kMarinaLaneLast - kMarinaLaneFirst) / (kBayLaneLast - kBayLaneFirst);
 }
 
 namespace {
+
+void opponent_cell(Memory& m, int& gx, int& gy) {
+    gx = rd16(m, kDataSeg, kOpponentRow) * 16 + (rd16(m, kDataSeg, kOpponentX) >> 11 & 15);
+    gy = rd16(m, kDataSeg, kOpponentCol) * 16 + (rd16(m, kDataSeg, kOpponentY) >> 11 & 15);
+}
 
 void install_opponent_look(Cpu& cpu) {
     cpu.add_watch(Cpu::linear(kEntrySeg, kOpponentLook.match), [](Cpu& c) {
         Memory& m = c.memory();
         const uint16_t entity = rd16(m, kDataSeg, c.regs.r[host::SI]);
-        if (!bridge_car(entity)) return;
-        const int gx = rd16(m, kDataSeg, kOpponentRow) * 16 + (rd16(m, kDataSeg, kOpponentX) >> 11 & 15);
-        const int gy = rd16(m, kDataSeg, kOpponentCol) * 16 + (rd16(m, kDataSeg, kOpponentY) >> 11 & 15);
-        if (gx < kApproach || no_freeway_placement(entity, gx, gy, 0xFF) == Placement::Deny) c.regs.ip = kOpponentLook.next;
+        if (!bridge_car(entity) && !bay_car(entity)) return;
+        int gx = 0, gy = 0;
+        opponent_cell(m, gx, gy);
+        if ((bridge_car(entity) && gx < kApproach) || no_freeway_placement(entity, gx, gy, 0xFF) == Placement::Deny)
+            c.regs.ip = kOpponentLook.next;
+    });
+    // On Marina Boulevard it sees the Bay Bridge's cars in the boulevard's lanes, where they're drawn.
+    cpu.add_watch(Cpu::linear(kEntrySeg, kLookX), [](Cpu& c) {
+        int gx = 0, gy = 0;
+        opponent_cell(c.memory(), gx, gy);
+        const auto entity = static_cast<uint16_t>(c.regs.r[host::BX] - 2);
+        c.regs.r[host::AX] = static_cast<uint16_t>(no_freeway_lane_x(entity, gx, gy, c.regs.r[host::AX] & 0x7FF));
     });
 }
 
@@ -409,8 +474,34 @@ uint16_t add_coast_traffic(Memory& m, uint16_t at, uint16_t end) {
     }
     // The Marina's big tile gets the city's pedestrians (the original's has none: nobody went there), on
     // its car parks, green, streets and the city's edge (no_freeway_placement keeps them off the rest).
-    if (rd16(m, kDataSeg, static_cast<uint16_t>(kListsB + 2 * kBridgeTile)) == kNoPedestrians)
-        wr16(m, kDataSeg, static_cast<uint16_t>(kListsB + 2 * kBridgeTile), kCityPedestrians);
+    if (rd16(m, kDataSeg, static_cast<uint16_t>(kListsB + 2 * kMarinaTile)) == kNoPedestrians)
+        wr16(m, kDataSeg, static_cast<uint16_t>(kListsB + 2 * kMarinaTile), kCityPedestrians);
+    return at;
+}
+
+// The Marina's list: the Golden Gate's (its slots 0-3 and its cars), and the Bay Bridge's cars for Marina
+// Boulevard, at `at`. Returns its address (0: it doesn't fit, or the lists aren't the ones expected).
+uint16_t add_marina_traffic(Memory& m, uint16_t at, uint16_t end) {
+    if (rd16(m, kDataSeg, static_cast<uint16_t>(kListsA + 2 * kMarinaTile)) != kBridgeList) return 0;
+    std::vector<uint16_t> words;
+    for (uint16_t p = kBridgeList; rd16(m, kDataSeg, p) != 0xFFFF && words.size() < 64; p = static_cast<uint16_t>(p + 4)) {
+        words.push_back(rd16(m, kDataSeg, p));
+        words.push_back(rd16(m, kDataSeg, static_cast<uint16_t>(p + 2)));
+    }
+    int added = 0;
+    for (uint16_t p = static_cast<uint16_t>(kBayList + 4 * 4); rd16(m, kDataSeg, p) != 0xFFFF && added < 16;
+         p = static_cast<uint16_t>(p + 4)) {
+        if (!bay_car(rd16(m, kDataSeg, p))) return 0;
+        words.push_back(rd16(m, kDataSeg, p));
+        words.push_back(rd16(m, kDataSeg, static_cast<uint16_t>(p + 2)));
+        ++added;
+    }
+    if (added != kBridgeCarCount) return 0;
+    words.push_back(0xFFFF);
+    at = static_cast<uint16_t>((at + 1) & ~1);
+    if (at + 2 * words.size() > end) return 0;
+    for (size_t i = 0; i < words.size(); ++i) wr16(m, kDataSeg, static_cast<uint16_t>(at + 2 * i), words[i]);
+    wr16(m, kDataSeg, static_cast<uint16_t>(kListsA + 2 * kMarinaTile), at);
     return at;
 }
 
@@ -422,12 +513,13 @@ void edit_cell_rules(Memory& m) {
     }
 }
 
-// The bridge's cars' cells, from the list that moved them into the city's (its own copies only follow).
-void copy_bridge_cells(Memory& m, uint16_t city_list) {
-    for (uint16_t q = city_list; rd16(m, kDataSeg, q) != 0xFFFF; q = static_cast<uint16_t>(q + 4)) {
+// The cells of `which` cars in list `to`, from list `from` (the one that moved them this frame).
+void copy_cells(Memory& m, uint16_t from, uint16_t to, bool (*which)(uint16_t)) {
+    if (from == to || to == 0) return;
+    for (uint16_t q = to; rd16(m, kDataSeg, q) != 0xFFFF; q = static_cast<uint16_t>(q + 4)) {
         const uint16_t e = rd16(m, kDataSeg, q);
-        if (!bridge_car(e)) continue;
-        for (uint16_t p = kBridgeList; rd16(m, kDataSeg, p) != 0xFFFF; p = static_cast<uint16_t>(p + 4)) {
+        if (!which(e)) continue;
+        for (uint16_t p = from; rd16(m, kDataSeg, p) != 0xFFFF; p = static_cast<uint16_t>(p + 4)) {
             if (rd16(m, kDataSeg, p) == e) {
                 wr16(m, kDataSeg, static_cast<uint16_t>(q + 2), rd16(m, kDataSeg, static_cast<uint16_t>(p + 2)));
                 break;
@@ -441,9 +533,18 @@ void copy_bridge_cells(Memory& m, uint16_t city_list) {
 void install_no_freeways(host::Machine& machine) {
     Cpu& cpu = machine.cpu();
     struct Traffic {
-        uint16_t city_list = 0;  // the city's list with the coast road's cars (0: not installed)
-        bool second_pass = false;
+        uint16_t city_list = 0;    // the city's list with the coast road's cars (0: not installed)
+        uint16_t marina_list = 0;  // the Marina's, with Marina Boulevard's
+        size_t pass = 0;           // 0: the camera's list; else the bridges' passes made so far
+        std::vector<uint16_t> passes;  // this frame's: the bridges' tiles to step as well
+        uint16_t camera_list = 0;      // this frame's camera's list
         uint16_t saved[std::size(kStepState) + 1] = {};
+        // The lists that moved the Golden Gate's cars this frame, and so on: the others take their cells.
+        void sync(Memory& m) const {
+            const uint16_t gg = camera_list == marina_list && marina_list ? marina_list : kBridgeList;
+            for (const uint16_t to : {city_list, marina_list, kBridgeList}) copy_cells(m, gg, to, golden_gate);
+            for (const uint16_t to : {city_list, marina_list}) copy_cells(m, kBayList, to, bay_car);
+        }
     };
     auto traffic = std::make_shared<Traffic>();
     cpu.add_watch(Cpu::linear(kEntrySeg, kEntry), [traffic](Cpu& c) {
@@ -453,40 +554,65 @@ void install_no_freeways(host::Machine& machine) {
         add_no_freeway_cell_types(c.memory());
         add_no_freeway_roads(*map);
         map->write(c.memory());
-        const uint16_t free = route_opponent(c.memory());
+        uint16_t free = route_opponent(c.memory());
         traffic->city_list = add_coast_traffic(c.memory(), free, kTypeRecords);
-        if (traffic->city_list) edit_cell_rules(c.memory());
+        if (traffic->city_list) {
+            edit_cell_rules(c.memory());
+            for (free = traffic->city_list; rd16(c.memory(), kDataSeg, free) != 0xFFFF; free = static_cast<uint16_t>(free + 4)) {}
+            traffic->marina_list = add_marina_traffic(c.memory(), static_cast<uint16_t>(free + 2), kTypeRecords);
+        }
     });
-    // The traffic step. The bridge's cars move with the bridge's list only: the city's leaves them alone.
+    // The traffic step. The bridges' cars move with their own lists only (the Golden Gate's, the Marina's
+    // as well): the others leave them alone.
     cpu.add_watch(Cpu::linear(kEntrySeg, kTrafficEntity), [traffic](Cpu& c) {
         Memory& m = c.memory();
-        if (traffic->city_list && bridge_car(c.regs.r[host::SI]) && rd16(m, kDataSeg, kStepList) != kBridgeList) {
+        const uint16_t e = c.regs.r[host::SI], list = rd16(m, kDataSeg, kStepList);
+        const Traffic& t = *traffic;
+        const bool skip = golden_gate(e) ? list != kBridgeList && (list != t.marina_list || !t.marina_list)
+                                         : bay_car(e) && list != kBayList;
+        if (t.city_list && skip) {
             c.regs.r[host::BX] = static_cast<uint16_t>(c.regs.r[host::BX] + 4);
             c.regs.ip = kTrafficNext;
         }
     });
-    // ...which is stepped every frame, wherever the camera is: after the camera's own list, a second pass
-    // as if the camera were on the bridge. Then the city's list takes their cells.
+    // The Marina's list is the Golden Gate's where the game asks.
+    for (const uint16_t at : {kRulesSkip, kPoliceStart}) {
+        cpu.add_watch(Cpu::linear(kEntrySeg, at), [traffic, at](Cpu& c) {
+            const int reg = at == kRulesSkip ? host::AX : host::BP;
+            if (traffic->marina_list && c.regs.r[reg] == traffic->marina_list) c.regs.r[reg] = kBridgeList;
+        });
+    }
+    // ...which are stepped every frame, wherever the camera is: after the camera's own list, a pass for
+    // each bridge's list it wasn't. Then the lists they were added to take their cells.
     cpu.add_watch(Cpu::linear(kEntrySeg, kTrafficEnd), [traffic](Cpu& c) {
         Memory& m = c.memory();
         if (!traffic->city_list) return;
         Traffic& t = *traffic;
-        if (t.second_pass) {
-            t.second_pass = false;
-            wr16(m, kDataSeg, kCameraTile, t.saved[0]);
-            for (size_t i = 0; i < std::size(kStepState); ++i) wr16(m, kDataSeg, kStepState[i], t.saved[i + 1]);
-        } else {
+        if (t.pass == 0) {
             const uint16_t camera = rd16(m, kDataSeg, kCameraTile);
-            if (camera < 2 * kBigTiles && rd16(m, kDataSeg, static_cast<uint16_t>(kListsA + camera)) != kBridgeList) {
-                t.saved[0] = camera;
-                for (size_t i = 0; i < std::size(kStepState); ++i) t.saved[i + 1] = rd16(m, kDataSeg, kStepState[i]);
-                wr16(m, kDataSeg, kCameraTile, 2 * kBridgeTile);
-                t.second_pass = true;
-                c.regs.ip = kTrafficStep;
+            if (camera >= 2 * kBigTiles) return;
+            const uint16_t list = rd16(m, kDataSeg, static_cast<uint16_t>(kListsA + camera));
+            t.camera_list = list;
+            t.passes.clear();
+            if (list != kBridgeList && (list != t.marina_list || !t.marina_list)) t.passes.push_back(kGoldenGateTile);
+            if (list != kBayList && t.marina_list) t.passes.push_back(kBayBridgeTile);
+            if (t.passes.empty()) {
+                t.sync(m);
                 return;
             }
+            t.saved[0] = camera;
+            for (size_t i = 0; i < std::size(kStepState); ++i) t.saved[i + 1] = rd16(m, kDataSeg, kStepState[i]);
         }
-        copy_bridge_cells(m, t.city_list);
+        if (t.pass < t.passes.size()) {
+            wr16(m, kDataSeg, kCameraTile, static_cast<uint16_t>(2 * t.passes[t.pass]));
+            ++t.pass;
+            c.regs.ip = kTrafficStep;
+            return;
+        }
+        t.pass = 0;
+        wr16(m, kDataSeg, kCameraTile, t.saved[0]);
+        for (size_t i = 0; i < std::size(kStepState); ++i) wr16(m, kDataSeg, kStepState[i], t.saved[i + 1]);
+        t.sync(m);
     });
     install_no_freeway_drawing(cpu);
     install_opponent_look(cpu);

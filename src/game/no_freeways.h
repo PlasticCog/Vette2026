@@ -52,8 +52,13 @@ std::vector<std::vector<std::pair<int32_t, int32_t>>> no_freeway_opponent_roads(
 enum class Placement { Default, Allow, Deny };
 Placement no_freeway_placement(uint16_t entity, int gx, int gy, uint8_t type);
 
-// The drawing's part of it: the view's car and pedestrian gathers keep to no_freeway_placement. On the
-// game's CPU (install_no_freeways does it) and on any that replays its drawing (game::SmoothRenderer's).
+// Where in cell gx, gy a traffic car with x `x` in it (0-7FFh) is drawn, its x there: the Bay Bridge's cars
+// on Marina Boulevard in the boulevard's lanes (theirs on the bridge are along the cells' other edge); else x.
+int no_freeway_lane_x(uint16_t entity, int gx, int gy, int x);
+
+// The drawing's part of it: the view's car and pedestrian gathers keep to no_freeway_placement, and draw
+// cars where no_freeway_lane_x puts them. On the game's CPU (install_no_freeways does it) and on any that
+// replays its drawing (game::SmoothRenderer's).
 void install_no_freeway_drawing(host::Cpu& cpu);
 
 }  // namespace vette::game

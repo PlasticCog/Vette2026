@@ -128,8 +128,9 @@ freeway). With **Freeways: Off** the city is one: roads made of the original's o
 Boulevard on through the park into the central city, Golden Gate Park opened into it, and the diagonal
 barrier before the Bay Bridge made a street), the on-ramps lead nowhere, and the computer opponent drives
 streets where its route took a freeway. The traffic goes along: the Golden Gate's cars carry on down the
-coast road both ways, the city's turn back where the coast road begins as they do at any dead end, the new
-diagonal has the old one's, and pedestrians walk the Marina but keep off the water and the coast road.
+coast road both ways, the Bay Bridge's drive Marina Boulevard (east, as on the bridge; west on course 3),
+the city's turn back where the coast road begins as they do at any dead end, the new diagonal has the old
+one's, and pedestrians walk the Marina but keep off the water and the coast road.
 Every course can be raced on the city's streets, and the opponent finishes each one (it's quicker than
 with the freeways). An online race uses the host's choice. `--freeways off` turns them off for one run;
 `vette_world --drivable [--no-freeways]` shows which parts of the city connect.

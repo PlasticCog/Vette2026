@@ -584,13 +584,15 @@ SDL_Texture* Presenter::draw_depth_tested(const enhanced::Scene& scene, const en
 }
 
 void Presenter::present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over,
-                        const enhanced::Scene* inset) {
+                        const enhanced::Scene* inset, const enhanced::Scene* top) {
     SDL_Renderer* renderer = renderer_.get();
     const SDL_FRect dst = fit();
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
     SDL_RenderClear(renderer);
     draw_scene(under, scene, inset, dst);
     SDL_RenderTexture(renderer, upload(over_, over, true, dst), nullptr, &dst);
+    if (top)
+        draw_triangles(*top, under.width, under.height, dst);
     finish_frame();
     picture_ = dst;
     picture_w_ = under.width;
@@ -667,13 +669,15 @@ void Presenter::present(const graphics::Composite& composite) {
 }
 
 void Presenter::present(const Framebuffer& under, const enhanced::Scene& scene, const graphics::Composite& composite,
-                        const enhanced::Scene* inset) {
+                        const enhanced::Scene* inset, const enhanced::Scene* top) {
     SDL_Renderer* renderer = renderer_.get();
     const SDL_FRect dst = fit();
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
     SDL_RenderClear(renderer);
     draw_scene(under, scene, inset, dst);
     draw_composite(composite, dst);
+    if (top)
+        draw_triangles(*top, under.width, under.height, dst);
     finish_frame();
     picture_ = dst;
     picture_w_ = under.width;

@@ -276,6 +276,9 @@ Two games at 12 MHz (10–12 frames a second, both at full speed, 810 units/s, s
   mirror's from `DS:2B87`, as in section "Rear-view mirror" of notes 03). Classic takes DS at 3009:036E (the
   world about to be drawn), keeps it until the page flip has shown that frame (0546), and notes the mirror
   (0666). Nothing on a freeway: `DS:2AD4` (this car) or `DS:842B` (the other's last packet a freeway's).
+  The arrow lies on the ground round the car in the helicopter view (`DS:2ACF` ≠ 0); from the driver's seat
+  it's a small one at the top of the view, its turn the other car's bearing less the camera's yaw (`DS:2C77`,
+  so the side views turn it too), held at ±90°.
 
 ## Open questions
 

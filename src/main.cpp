@@ -68,7 +68,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <vector>
 
 namespace vette {
@@ -699,6 +698,7 @@ struct EnhancedView {
     game::SmoothRenderer::Layers layers;
     enhanced::Scene scene;
     enhanced::Scene mirror;  // the rear-view mirror's, while it's on
+    enhanced::Scene top;     // over everything (two-player races: the driver's-seat arrow)
     Framebuffer under, over;
     // The opponent screen's turning car, drawn at the display's resolution too.
     std::unique_ptr<enhanced::MenuCar> menu_car;
@@ -765,6 +765,7 @@ struct EnhancedView {
         return true;
     }
     const enhanced::Scene* inset() const { return layers.mirror ? &mirror : nullptr; }
+    const enhanced::Scene* over_all() const { return top.indices.empty() ? nullptr : &top; }
 };
 
 // The game's sound put together from the player's choices (sound/game_audio.h): the effects from the
@@ -957,10 +958,7 @@ struct PlayerMarkers {
     std::string name;                             // the other player's
     std::unique_ptr<enhanced::ShownFrame> shown;  // the memory of the race frame on screen (Classic)
     std::uint64_t banner_until = 0;               // SDL ticks: whether they're on is shown until then
-    // Classic: this frame's, for the original's frame at the display's resolution (present_classic()).
-    enhanced::Scene scene, mirror_scene;
-    bool classic = false, classic_mirror = false;  // they're there
-    Framebuffer see_through;                       // an `over` that lets everything through
+    enhanced::Scene scene, mirror_scene, top;     // drawn into a frame's pixels (draw_pixels())
 
     void toggle() {
         on = !on;
@@ -971,17 +969,25 @@ struct PlayerMarkers {
         return SDL_GetTicksNS() >= banner_until ? nullptr : on ? "Name tag and arrow: on" : "Name tag and arrow: off";
     }
 
-    // Into the Enhanced view's scenes (the main view's and the mirror's).
-    void add(EnhancedView& view, const Presenter& presenter) const {
+    // Into the Enhanced view: its scenes (the main view's, the mirror's, and the one over everything); at the
+    // original's resolution, into its `over` frame's pixels instead.
+    void add(EnhancedView& view, const Presenter& presenter) {
         const std::uint8_t* ds = view.layers.ram.data() + host::Cpu::linear(game::kDataSeg, 0);
+        view.top.clear();
+        if (presenter.original_resolution()) {
+            draw_pixels(ds, view.layers.mirror, view.over);
+            return;
+        }
         enhanced::MarkerOptions o;
         o.name = name;
         o.depth = presenter.depth_buffer();
         presenter.frame_scale(view.layers.under.width, view.layers.under.height, o.pixel_w, o.pixel_h);
         if (on) {
             o.avoid_mirror = view.layers.mirror;
+            o.hud = &view.top;
             enhanced::add_player_markers(ds, o, view.scene);
             o.avoid_mirror = false;
+            o.hud = nullptr;
             if (view.layers.mirror) {
                 o.mirror = true;
                 enhanced::add_player_markers(ds, o, view.mirror);
@@ -992,72 +998,57 @@ struct PlayerMarkers {
             enhanced::add_banner(ds, text, o, view.scene);
     }
 
-    // For the original's frame (Classic): from the replay's memory with the Smooth frame rate (`replay_ram`),
-    // else from the frame on screen. Drawn at the display's resolution over the frame (present_classic()),
-    // or, `in_frame` (another version's art is composited from the frame), into its pixels.
-    void classic_frame(Framebuffer& fb, const std::uint8_t* replay_ram, std::uint64_t now_ns, const Presenter& presenter,
-                       bool in_frame) {
-        classic = classic_mirror = false;
-        if (fb.width != 320 || (!on && !banner()))
-            return;
+    // Into the original's frame (Classic): from the replay's memory with the Smooth frame rate (`replay_ram`),
+    // else from the frame on screen.
+    void classic_frame(Framebuffer& fb, const std::uint8_t* replay_ram, std::uint64_t now_ns) {
         bool mirror = false;
         const std::uint8_t* shown_ds = shown ? shown->ds(now_ns, mirror) : nullptr;
-        const std::uint8_t* ds = replay_ram ? replay_ram + host::Cpu::linear(game::kDataSeg, 0) : shown_ds;
-        if (!ds || !shown_ds)
+        if (!shown_ds)
             return;  // (not a race frame in the city)
+        draw_pixels(replay_ram ? replay_ram + host::Cpu::linear(game::kDataSeg, 0) : shown_ds, mirror, fb);
+    }
+
+    // Into a 320x200 frame's pixels (palette indices; the Enhanced view's `over` keeps its see-through ones
+    // elsewhere), as the game would draw them: whole pixels in its colours, the tag in a small pixel font.
+    // The mirror's first (the main view's kept out of it), the driver's-seat arrow last, over everything.
+    void draw_pixels(const std::uint8_t* ds, bool mirror, Framebuffer& frame) {
+        if (frame.width != 320 || (!on && !banner()))
+            return;
+        std::array<std::uint32_t, 16> palette{};
+        for (std::size_t i = 0; i < palette.size(); ++i)
+            palette[i] = std::uint32_t{frame.palette[i].r} << 16 | std::uint32_t{frame.palette[i].g} << 8 | frame.palette[i].b;
+        const auto draw = [&](const enhanced::Scene& s, std::array<int, 4> skip = {}) {
+            enhanced::draw_scene_paletted(s, frame.pixels.data(), frame.width, frame.height, palette, skip);
+        };
         enhanced::MarkerOptions o;
         o.name = name;
-        if (!in_frame) {
-            o.depth = presenter.depth_buffer();
-            presenter.frame_scale(fb.width, fb.height, o.pixel_w, o.pixel_h);
-        }
-        scene.clear();
-        mirror_scene.clear();
+        o.pixels = true;
         if (on) {
-            if (mirror) {  // the mirror's view: its own (the main view's tag keeps out of it)
+            std::array<int, 4> skip{};
+            if (mirror) {
+                mirror_scene.clear();
                 o.mirror = true;
-                classic_mirror = enhanced::add_player_markers(ds, o, mirror_scene);
+                if (enhanced::add_player_markers(ds, o, mirror_scene)) {
+                    skip = {mirror_scene.view_x0, mirror_scene.view_y0, mirror_scene.view_x1, mirror_scene.view_y1};
+                    draw(mirror_scene);
+                }
                 o.mirror = false;
             }
+            scene.clear();
+            top.clear();
             o.avoid_mirror = mirror;
-            classic = enhanced::add_player_markers(ds, o, scene);
+            o.hud = &top;
+            if (enhanced::add_player_markers(ds, o, scene))
+                draw(scene, skip);
+            draw(top);
             o.avoid_mirror = false;
+            o.hud = nullptr;
         }
         if (const char* text = banner()) {
+            scene.clear();
             enhanced::add_banner(ds, text, o, scene);
-            classic = true;
+            draw(scene);
         }
-        if (in_frame) {
-            std::array<std::uint32_t, 16> palette{};
-            for (std::size_t i = 0; i < palette.size(); ++i)
-                palette[i] = std::uint32_t{fb.palette[i].r} << 16 | std::uint32_t{fb.palette[i].g} << 8 | fb.palette[i].b;
-            std::array<int, 4> skip{};
-            if (classic_mirror) {
-                skip = {mirror_scene.view_x0, mirror_scene.view_y0, mirror_scene.view_x1, mirror_scene.view_y1};
-                enhanced::draw_scene_paletted(mirror_scene, fb.pixels.data(), fb.width, fb.height, palette);
-            }
-            if (classic)
-                enhanced::draw_scene_paletted(scene, fb.pixels.data(), fb.width, fb.height, palette, skip);
-            classic = classic_mirror = false;
-        } else if (classic || classic_mirror) {
-            // The mirror's in the main scene (an inset would be drawn with a sky of its own).
-            if (classic_mirror) {
-                if (!classic)
-                    std::tie(scene.view_x0, scene.view_y0, scene.view_x1, scene.view_y1) =
-                        std::tuple(0, 0, fb.width, fb.height);
-                enhanced::append_clipped(scene, mirror_scene);
-            }
-            classic = true;
-            if (see_through.width != fb.width || see_through.height != fb.height) {
-                see_through.width = fb.width;
-                see_through.height = fb.height;
-                see_through.pixels.assign(static_cast<std::size_t>(fb.width * fb.height), Presenter::kTransparentPixel);
-            }
-        }
-    }
-    void present_classic(Presenter& presenter, const Framebuffer& fb) {
-        see_through.palette = fb.palette;
-        presenter.present(fb, scene, see_through);
     }
 };
 
@@ -1463,8 +1454,7 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
                 machine.render(frame);
             copy_frame(frame, fb);
             if (markers)
-                markers->classic_frame(fb, replayed ? smooth->replay_ram() : nullptr, machine.emulated_ns(), presenter,
-                                       art != nullptr);
+                markers->classic_frame(fb, replayed ? smooth->replay_ram() : nullptr, machine.emulated_ns());
         }
         // The mouse driver's pointer goes on the copy, never into video memory. Text mode isn't shown.
         Framebuffer& top = layered ? view->over : fb;
@@ -1513,13 +1503,11 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
         if (menu_car)
             presenter.present(view->menu_under, view->menu_scene, view->menu_over);
         else if (layered && replaced)
-            presenter.present(view->under, view->scene, art->composite, view->inset());
+            presenter.present(view->under, view->scene, art->composite, view->inset(), view->over_all());
         else if (layered)
-            presenter.present(view->under, view->scene, view->over, view->inset());
+            presenter.present(view->under, view->scene, view->over, view->inset(), view->over_all());
         else if (replaced)
             presenter.present(art->composite);
-        else if (markers && markers->classic)
-            markers->present_classic(presenter, fb);
         else
             presenter.present(fb);
         ++presented.frames;

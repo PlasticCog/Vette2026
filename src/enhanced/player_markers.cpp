@@ -27,6 +27,107 @@ constexpr uint16_t kHighway = 0x2AD4;          // byte: this car on a freeway
 constexpr uint16_t kOtherOnFreeway = 0x842B;   // byte: the other car's last packet was a freeway's
 constexpr uint16_t kPlayer = 0x2D35, kPlayerRow = 0x2D57, kPlayerCol = 0x2D59;  // x, y, z, heading
 constexpr uint16_t kOther = 0x2F09, kOtherRow = 0x2F2B, kOtherCol = 0x2F2D;     // the remote car
+constexpr uint16_t kExternalView = 0x2ACF;     // byte: the helicopter view (the camera outside the car)
+
+// The tag in the original's frame: a 3x5 pixel font for ASCII 32-126 (lower case as capitals), a row per
+// byte, bit 2 the leftmost pixel.
+constexpr uint8_t kFont3x5[95][5] = {
+    {0b000, 0b000, 0b000, 0b000, 0b000},  // space
+    {0b010, 0b010, 0b010, 0b000, 0b010},  // !
+    {0b101, 0b101, 0b000, 0b000, 0b000},  // "
+    {0b101, 0b111, 0b101, 0b111, 0b101},  // #
+    {0b011, 0b110, 0b010, 0b011, 0b110},  // $
+    {0b101, 0b001, 0b010, 0b100, 0b101},  // %
+    {0b010, 0b101, 0b010, 0b101, 0b011},  // &
+    {0b010, 0b010, 0b000, 0b000, 0b000},  // '
+    {0b001, 0b010, 0b010, 0b010, 0b001},  // (
+    {0b100, 0b010, 0b010, 0b010, 0b100},  // )
+    {0b101, 0b010, 0b101, 0b000, 0b000},  // *
+    {0b000, 0b010, 0b111, 0b010, 0b000},  // +
+    {0b000, 0b000, 0b000, 0b010, 0b100},  // ,
+    {0b000, 0b000, 0b111, 0b000, 0b000},  // -
+    {0b000, 0b000, 0b000, 0b000, 0b010},  // .
+    {0b001, 0b001, 0b010, 0b100, 0b100},  // /
+    {0b111, 0b101, 0b101, 0b101, 0b111},  // 0
+    {0b010, 0b110, 0b010, 0b010, 0b111},  // 1
+    {0b110, 0b001, 0b010, 0b100, 0b111},  // 2
+    {0b110, 0b001, 0b010, 0b001, 0b110},  // 3
+    {0b101, 0b101, 0b111, 0b001, 0b001},  // 4
+    {0b111, 0b100, 0b110, 0b001, 0b110},  // 5
+    {0b011, 0b100, 0b111, 0b101, 0b111},  // 6
+    {0b111, 0b001, 0b010, 0b010, 0b010},  // 7
+    {0b111, 0b101, 0b111, 0b101, 0b111},  // 8
+    {0b111, 0b101, 0b111, 0b001, 0b110},  // 9
+    {0b000, 0b010, 0b000, 0b010, 0b000},  // :
+    {0b000, 0b010, 0b000, 0b010, 0b100},  // ;
+    {0b001, 0b010, 0b100, 0b010, 0b001},  // <
+    {0b000, 0b111, 0b000, 0b111, 0b000},  // =
+    {0b100, 0b010, 0b001, 0b010, 0b100},  // >
+    {0b110, 0b001, 0b010, 0b000, 0b010},  // ?
+    {0b010, 0b101, 0b111, 0b100, 0b011},  // @
+    {0b010, 0b101, 0b111, 0b101, 0b101},  // A
+    {0b110, 0b101, 0b110, 0b101, 0b110},  // B
+    {0b011, 0b100, 0b100, 0b100, 0b011},  // C
+    {0b110, 0b101, 0b101, 0b101, 0b110},  // D
+    {0b111, 0b100, 0b110, 0b100, 0b111},  // E
+    {0b111, 0b100, 0b110, 0b100, 0b100},  // F
+    {0b011, 0b100, 0b101, 0b101, 0b011},  // G
+    {0b101, 0b101, 0b111, 0b101, 0b101},  // H
+    {0b111, 0b010, 0b010, 0b010, 0b111},  // I
+    {0b001, 0b001, 0b001, 0b101, 0b010},  // J
+    {0b101, 0b101, 0b110, 0b101, 0b101},  // K
+    {0b100, 0b100, 0b100, 0b100, 0b111},  // L
+    {0b101, 0b111, 0b111, 0b101, 0b101},  // M
+    {0b110, 0b101, 0b101, 0b101, 0b101},  // N
+    {0b010, 0b101, 0b101, 0b101, 0b010},  // O
+    {0b110, 0b101, 0b110, 0b100, 0b100},  // P
+    {0b010, 0b101, 0b101, 0b110, 0b011},  // Q
+    {0b110, 0b101, 0b110, 0b101, 0b101},  // R
+    {0b011, 0b100, 0b010, 0b001, 0b110},  // S
+    {0b111, 0b010, 0b010, 0b010, 0b010},  // T
+    {0b101, 0b101, 0b101, 0b101, 0b111},  // U
+    {0b101, 0b101, 0b101, 0b101, 0b010},  // V
+    {0b101, 0b101, 0b111, 0b111, 0b101},  // W
+    {0b101, 0b101, 0b010, 0b101, 0b101},  // X
+    {0b101, 0b101, 0b010, 0b010, 0b010},  // Y
+    {0b111, 0b001, 0b010, 0b100, 0b111},  // Z
+    {0b011, 0b010, 0b010, 0b010, 0b011},  // [
+    {0b100, 0b100, 0b010, 0b001, 0b001},  // backslash
+    {0b110, 0b010, 0b010, 0b010, 0b110},  // ]
+    {0b010, 0b101, 0b000, 0b000, 0b000},  // ^
+    {0b000, 0b000, 0b000, 0b000, 0b111},  // _
+    {0b100, 0b010, 0b000, 0b000, 0b000},  // `
+    {0b010, 0b101, 0b111, 0b101, 0b101},  // a
+    {0b110, 0b101, 0b110, 0b101, 0b110},  // b
+    {0b011, 0b100, 0b100, 0b100, 0b011},  // c
+    {0b110, 0b101, 0b101, 0b101, 0b110},  // d
+    {0b111, 0b100, 0b110, 0b100, 0b111},  // e
+    {0b111, 0b100, 0b110, 0b100, 0b100},  // f
+    {0b011, 0b100, 0b101, 0b101, 0b011},  // g
+    {0b101, 0b101, 0b111, 0b101, 0b101},  // h
+    {0b111, 0b010, 0b010, 0b010, 0b111},  // i
+    {0b001, 0b001, 0b001, 0b101, 0b010},  // j
+    {0b101, 0b101, 0b110, 0b101, 0b101},  // k
+    {0b100, 0b100, 0b100, 0b100, 0b111},  // l
+    {0b101, 0b111, 0b111, 0b101, 0b101},  // m
+    {0b110, 0b101, 0b101, 0b101, 0b101},  // n
+    {0b010, 0b101, 0b101, 0b101, 0b010},  // o
+    {0b110, 0b101, 0b110, 0b100, 0b100},  // p
+    {0b010, 0b101, 0b101, 0b110, 0b011},  // q
+    {0b110, 0b101, 0b110, 0b101, 0b101},  // r
+    {0b011, 0b100, 0b010, 0b001, 0b110},  // s
+    {0b111, 0b010, 0b010, 0b010, 0b010},  // t
+    {0b101, 0b101, 0b101, 0b101, 0b111},  // u
+    {0b101, 0b101, 0b101, 0b101, 0b010},  // v
+    {0b101, 0b101, 0b111, 0b111, 0b101},  // w
+    {0b101, 0b101, 0b010, 0b101, 0b101},  // x
+    {0b101, 0b101, 0b010, 0b010, 0b010},  // y
+    {0b111, 0b001, 0b010, 0b100, 0b111},  // z
+    {0b011, 0b010, 0b110, 0b010, 0b011},  // {
+    {0b010, 0b010, 0b010, 0b010, 0b010},  // |
+    {0b110, 0b010, 0b011, 0b010, 0b110},  // }
+    {0b000, 0b011, 0b110, 0b000, 0b000},  // ~
+};
 
 // The arrow: on the ground round this car's middle, kRing out, pointing along +u (world units, ~3 in.).
 constexpr float kRing = 104;
@@ -40,12 +141,28 @@ struct P2f {
 };
 constexpr P2f kShaft[] = {{-30, -7}, {6, -7}, {6, 7}, {-30, 7}};
 constexpr P2f kHead[] = {{6, -20}, {32, 0}, {6, 20}};
-constexpr float kOutline = 1.22f;  // the dark edge: the shapes scaled up, drawn first
+// The dark edge round them, `d` units wide, drawn first (the head's sides moved out by d: its corners
+// 2.03 d out, its tip 1.63 d on).
+std::array<P2f, 4> shaft_edge(float d) { return {{{-30 - d, -7 - d}, {6, -7 - d}, {6, 7 + d}, {-30 - d, 7 + d}}}; }
+std::array<P2f, 3> head_edge(float d) {
+    return {{{6 - d, -20 - 2.03f * d}, {32 + 1.63f * d, 0}, {6 - d, 20 + 2.03f * d}}};
+}
+constexpr float kEdgeUnits = 3;
+// From the driver's seat, the arrow is a small one at the top of the view instead, pointing the way to
+// turn: on an arc from the view's top middle (the other car ahead) down to its left and right edges (90
+// degrees or more to that side; it doesn't point backwards). Its size: kHudUnit output pixels per shape
+// unit for every 1080 rows of the picture.
+constexpr float kHudUnit = 0.45f;
+constexpr float kHudPixelUnit = 0.26f;  // in the original's frame: race-frame pixels per unit (16 long),
+constexpr P2f kPixelShaft[] = {{-30, -4.5f}, {6, -4.5f}, {6, 4.5f}, {-30, 4.5f}};  // and thinner, to read as one
+constexpr P2f kPixelHead[] = {{4, -17}, {32, 0}, {4, 17}};
+constexpr float kArcDrop = 0.36f;  // the arc's ends below its top, of the view's height
 
 struct Rgba {
     float r, g, b, a;
 };
 constexpr Rgba kArrow = {1.0f, 1.0f, 0.333f, 1};   // EGA 14
+constexpr Rgba kHudArrow = {1.0f, 1.0f, 0.333f, 0.9f};  // (a little see-through)
 constexpr Rgba kEdge = {0.0f, 0.0f, 0.0f, 0.85f};
 constexpr Rgba kTagBack = {0.0f, 0.0f, 0.0f, 0.7f};
 constexpr Rgba kTagRim = {1.0f, 1.0f, 0.333f, 1};
@@ -173,48 +290,151 @@ void ground_polygon(const Camera& cam, Emitter& e, const std::vector<V3>& poly, 
     e.triangle_fan(pts, c);
 }
 
-// Text in the 8x8 font, its top left at (x, y), each font pixel gx x gy race-frame pixels: a quad per run
-// of set pixels in a row.
-void text(Emitter& e, float x, float y, std::string_view s, float gx, float gy, const Rgba& c) {
+// The lettering: the 8x8 font at the display's resolution, its font pixels gx x gy race-frame pixels; or
+// in the original's frame (MarkerOptions::pixels) the 3x5 one, a pixel each.
+struct Font {
+    float gx = 1, gy = 1;
+    bool small = false;
+    float advance() const { return (small ? 4 : 8) * gx; }
+    float height() const { return (small ? 5 : 8) * gy; }
+    float pad_x() const { return (small ? 2 : 4) * gx; }
+    float pad_y() const { return (small ? 1 : 3) * gy; }
+    float stem() const { return (small ? 2 : 5) * gy; }   // the tag's pointer
+    float half() const { return (small ? 2 : 4) * gx; }   // ...half its width
+    float width(std::string_view s) const {
+        return static_cast<float>(s.size()) * advance() - (small ? gx : 0) + 2 * pad_x();
+    }
+    float box_height() const { return height() + 2 * pad_y(); }
+};
+
+// Font pixels in whole output pixels: one for every `rows` rows of the picture (at least one).
+Font font_for(const MarkerOptions& o, float rows) {
+    if (o.pixels) return {1, 1, true};
+    const float k = std::max(1.0f, std::round(200 * o.pixel_h / rows));
+    return {k / std::max(o.pixel_w, 1e-3f), k / std::max(o.pixel_h, 1e-3f), false};
+}
+
+// Text, its top left at (x, y): a quad per run of set pixels in a row.
+void text(Emitter& e, float x, float y, std::string_view s, const Font& f, const Rgba& c) {
     for (size_t i = 0; i < s.size(); ++i) {
         const auto ch = static_cast<unsigned char>(s[i]);
-        const uint8_t* rows = ui::kFont8x8[ch < 128 ? ch : '?'];
-        const float x0 = x + static_cast<float>(i) * 8 * gx;
-        for (int r = 0; r < 8; ++r) {
-            for (int b = 0; b < 8;) {
-                if (!(rows[r] >> b & 1)) {
+        const int cols = f.small ? 3 : 8, rows = f.small ? 5 : 8;
+        const auto bit = [&](int r, int b) {
+            if (f.small) return ch >= 32 && ch < 127 ? (kFont3x5[ch - 32][r] >> (2 - b) & 1) != 0 : false;
+            return (ui::kFont8x8[ch < 128 ? ch : '?'][r] >> b & 1) != 0;
+        };
+        const float x0 = x + static_cast<float>(i) * f.advance();
+        for (int r = 0; r < rows; ++r) {
+            for (int b = 0; b < cols;) {
+                if (!bit(r, b)) {
                     ++b;
                     continue;
                 }
                 int end = b;
-                while (end < 8 && (rows[r] >> end & 1)) ++end;
-                e.rect(x0 + static_cast<float>(b) * gx, y + static_cast<float>(r) * gy, x0 + static_cast<float>(end) * gx,
-                       y + static_cast<float>(r + 1) * gy, c);
+                while (end < cols && bit(r, end)) ++end;
+                e.rect(x0 + static_cast<float>(b) * f.gx, y + static_cast<float>(r) * f.gy, x0 + static_cast<float>(end) * f.gx,
+                       y + static_cast<float>(r + 1) * f.gy, c);
                 b = end;
             }
         }
     }
 }
 
-// Font pixels in whole output pixels: one for every `rows` rows of the picture (at least one).
-void font_scale(const MarkerOptions& o, float rows, float& gx, float& gy) {
-    const float k = std::max(1.0f, std::round(200 * o.pixel_h / rows));
-    gx = k / std::max(o.pixel_w, 1e-3f);
-    gy = k / std::max(o.pixel_h, 1e-3f);
-}
-
 float snap(float v, float px) { return std::round(v * px) / px; }
 
-// A text in a box with a rim, its top left at (x, y); returns its size.
-void tag_box(Emitter& e, float x, float y, std::string_view s, float gx, float gy, const MarkerOptions& o, float& w, float& h) {
-    const float pad_x = 4 * gx, pad_y = 3 * gy;
-    w = static_cast<float>(s.size()) * 8 * gx + 2 * pad_x;
-    h = 8 * gy + 2 * pad_y;
+// A text in a box with a rim, its top left at (x, y).
+void tag_box(Emitter& e, float x, float y, std::string_view s, const Font& f, const MarkerOptions& o) {
+    const float w = f.width(s), h = f.box_height();
     x = snap(x, o.pixel_w);
     y = snap(y, o.pixel_h);
-    e.rect(x - gx, y - gy, x + w + gx, y + h + gy, kTagRim);
+    e.rect(x - f.gx, y - f.gy, x + w + f.gx, y + h + f.gy, kTagRim);
     e.rect(x, y, x + w, y + h, kTagBack);
-    text(e, x + pad_x, y + pad_y, s, gx, gy, kText);
+    text(e, x + f.pad_x(), y + f.pad_y(), s, f, kText);
+}
+
+// Convex polygons as a sprite in the original's frame: each pixel at least half covered (4 x 4 samples) in
+// `fill`, and the pixels beside those (left, right, above, below) in the dark edge; a quad a pixel.
+void pixel_sprite(Emitter& e, const std::vector<std::vector<std::array<float, 2>>>& polys, const Rgba& fill) {
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (const auto& poly : polys) {
+        for (const auto& v : poly) {
+            x0 = std::min(x0, v[0]), y0 = std::min(y0, v[1]), x1 = std::max(x1, v[0]), y1 = std::max(y1, v[1]);
+        }
+    }
+    const int ix0 = static_cast<int>(std::floor(x0)) - 1, iy0 = static_cast<int>(std::floor(y0)) - 1;
+    const int w = static_cast<int>(std::ceil(x1)) + 2 - ix0, h = static_cast<int>(std::ceil(y1)) + 2 - iy0;
+    if (w <= 0 || h <= 0 || w > 64 || h > 64) return;
+    const auto inside = [&](float x, float y) {
+        for (const auto& poly : polys) {
+            bool pos = false, neg = false;
+            for (size_t i = 0; i < poly.size(); ++i) {
+                const auto& a = poly[i];
+                const auto& b = poly[(i + 1) % poly.size()];
+                const float c = (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+                pos = pos || c > 0;
+                neg = neg || c < 0;
+            }
+            if (!(pos && neg)) return true;
+        }
+        return false;
+    };
+    std::vector<uint8_t> mask(static_cast<size_t>(w * h));
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            int n = 0;
+            for (int sy = 0; sy < 4; ++sy) {
+                for (int sx = 0; sx < 4; ++sx)
+                    n += inside(static_cast<float>(ix0 + x) + (sx + 0.5f) / 4, static_cast<float>(iy0 + y) + (sy + 0.5f) / 4);
+            }
+            mask[static_cast<size_t>(y * w + x)] = n >= 8;
+        }
+    }
+    const auto at = [&](int x, int y) { return x >= 0 && y >= 0 && x < w && y < h && mask[static_cast<size_t>(y * w + x)]; };
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const bool in = at(x, y);
+            if (!in && !at(x - 1, y) && !at(x + 1, y) && !at(x, y - 1) && !at(x, y + 1)) continue;
+            const auto px = static_cast<float>(ix0 + x), py = static_cast<float>(iy0 + y);
+            e.rect(px, py, px + 1, py + 1, in ? fill : kEdge);
+        }
+    }
+}
+
+// The driver's-seat arrow, for the other car `turn` radians clockwise from straight ahead.
+void hud_arrow(const Camera& cam, Emitter& e, float turn, const MarkerOptions& o) {
+    const float k = std::max(1.0f, std::round(200 * o.pixel_h / 1080));
+    const float sx = o.pixels ? kHudPixelUnit : kHudUnit * k / std::max(o.pixel_w, 1e-3f);
+    const float sy = o.pixels ? kHudPixelUnit : kHudUnit * k / std::max(o.pixel_h, 1e-3f);
+    // Its reach from its middle, in race-frame pixels (the edge's tip).
+    const float edge = o.pixels ? 1 / kHudPixelUnit : kEdgeUnits;
+    const float rx = (31 + 1.7f * edge) * sx, ry = (31 + 1.7f * edge) * sy;
+    const auto l = static_cast<float>(cam.left), t = static_cast<float>(cam.top);
+    const auto w = static_cast<float>(cam.right + 1 - cam.left), h = static_cast<float>(cam.bottom + 1 - cam.top);
+    constexpr float kQuarter = 1.5707963f;
+    turn = std::clamp(turn, -kQuarter, kQuarter);
+    const float top = t + ry + 2 * sy;
+    const float px = l + w / 2 + (w / 2 - rx - 2 * sx) * std::sin(turn);
+    float py = top + kArcDrop * h * (1 - std::cos(turn));
+    // In the original's frame: its middle on a pixel's (so it's drawn the same each way), its edge a pixel.
+    const float px_mid = o.pixels ? std::floor(px) + 0.5f : px;
+    if (o.pixels) py = std::floor(py) + 0.5f;
+    const float ux = std::sin(turn), uy = -std::cos(turn);  // along, on screen (y down)
+    const auto shape = [&](std::span<const P2f> pts, float scale) {
+        std::vector<std::array<float, 2>> out;
+        for (const P2f& p : pts) {
+            const float a = (p.u - 1) * scale, b = p.v * scale;  // (its middle at u 1)
+            out.push_back({px_mid + (a * ux - b * uy) * sx, py + (a * uy + b * ux) * sy});
+        }
+        return out;
+    };
+    if (o.pixels) {
+        pixel_sprite(e, {shape(kPixelShaft, 1), shape(kPixelHead, 1)}, kHudArrow);
+        return;
+    }
+    e.triangle_fan(shape(shaft_edge(edge), 1), kEdge);
+    e.triangle_fan(shape(head_edge(edge), 1), kEdge);
+    e.triangle_fan(shape(kShaft, 1), kHudArrow);
+    e.triangle_fan(shape(kHead, 1), kHudArrow);
 }
 
 void set_view(const Camera& cam, Scene& scene) {
@@ -241,10 +461,23 @@ bool add_player_markers(const uint8_t* data, const MarkerOptions& o, Scene& scen
     const double other_y = double(ds.s16(kOtherCol)) * 0x8000 + ds.u16(kOther + 2);
     const double other_z = ds.s16(kOther + 4);
 
-    // The arrow, round this car, towards the other (x north, y east).
+    // The arrow towards the other car (x north, y east): in the helicopter view on the ground round this
+    // car; from the driver's seat at the top of the view (not in the mirror's).
     const double dx = other_x - me_x, dy = other_y - me_y;
     const double distance = std::sqrt(dx * dx + dy * dy);
-    if (distance >= kNearby) {
+    const bool external = ds.u8(kExternalView) != 0;
+    if (distance >= kNearby && !external && !o.mirror) {
+        double turn = std::atan2(dy, dx) / kDeg - ds.s16(kCamera + 6);  // degrees, clockwise from ahead
+        turn = std::remainder(turn, 360.0);
+        if (o.hud) {
+            set_view(cam, *o.hud);
+            Emitter top{*o.hud, 0.0f};
+            hud_arrow(cam, top, static_cast<float>(turn * kDeg), o);
+        } else {
+            hud_arrow(cam, e, static_cast<float>(turn * kDeg), o);
+        }
+    }
+    if (distance >= kNearby && external) {
         const double ux = dx / distance, uy = dy / distance;  // along
         const double vx = -uy, vy = ux;                       // across
         const double cx = me_x + ux * kRing, cy = me_y + uy * kRing, z = me_z + 1;
@@ -254,8 +487,8 @@ bool add_player_markers(const uint8_t* data, const MarkerOptions& o, Scene& scen
                 poly.push_back(cam.view(cx + (p.u * ux + p.v * vx) * scale, cy + (p.u * uy + p.v * vy) * scale, z));
             return poly;
         };
-        ground_polygon(cam, e, shape(kShaft, kOutline), kEdge);
-        ground_polygon(cam, e, shape(kHead, kOutline), kEdge);
+        ground_polygon(cam, e, shape(shaft_edge(kEdgeUnits), 1), kEdge);
+        ground_polygon(cam, e, shape(head_edge(kEdgeUnits), 1), kEdge);
         ground_polygon(cam, e, shape(kShaft, 1), kArrow);
         ground_polygon(cam, e, shape(kHead, 1), kArrow);
     }
@@ -272,10 +505,10 @@ bool add_player_markers(const uint8_t* data, const MarkerOptions& o, Scene& scen
             return x >= cam.left && x <= cam.right + 1 && y >= cam.top && y <= cam.bottom + 1;
         };
         if (inside(sx, sy) || inside(bx, by)) {
-            float gx = 1, gy = 1;
-            font_scale(o, kTagRows, gx, gy);
-            const float w = static_cast<float>(o.name.size()) * 8 * gx + 8 * gx, h = 8 * gy + 6 * gy;
-            const float stem = 5 * gy;
+            const Font f = font_for(o, kTagRows);
+            const float gx = f.gx, gy = f.gy;
+            const float w = f.width(o.name), h = f.box_height();
+            const float stem = f.stem();
             // Kept in the view: beside its point at the edges, under it at the top.
             float x = std::clamp(sx - w / 2, static_cast<float>(cam.left) + gx, static_cast<float>(cam.right + 1) - w - gx);
             float y = std::clamp(sy - stem - h, static_cast<float>(cam.top) + gy, static_cast<float>(cam.bottom + 1) - h - gy);
@@ -296,12 +529,11 @@ bool add_player_markers(const uint8_t* data, const MarkerOptions& o, Scene& scen
             y = snap(y, o.pixel_h);
             // Its pointer, from the box's bottom to the point (when the box is above it).
             if (y + h <= sy) {
-                const float half = 4 * gx;
+                const float half = f.half();
                 const float px = std::clamp(sx, x + half, x + w - half);
                 e.triangle_fan({{px - half - gx, y + h}, {px + half + gx, y + h}, {sx, sy + gy}}, kTagRim);
             }
-            float bw = 0, bh = 0;
-            tag_box(e, x, y, o.name, gx, gy, o, bw, bh);
+            tag_box(e, x, y, o.name, f, o);
         }
     }
     return true;
@@ -312,11 +544,8 @@ void add_banner(const uint8_t* data, std::string_view s, const MarkerOptions& o,
     if (cam.right <= cam.left || cam.bottom <= cam.top) return;
     set_view(cam, scene);
     Emitter e{scene, o.depth ? kOnTop : 0.0f};
-    float gx = 1, gy = 1;
-    font_scale(o, kBannerRows, gx, gy);
-    const float w = static_cast<float>(s.size()) * 8 * gx + 8 * gx;
-    float bw = 0, bh = 0;
-    tag_box(e, (static_cast<float>(cam.left + cam.right + 1) - w) / 2, static_cast<float>(cam.top) + 6 * gy, s, gx, gy, o, bw, bh);
+    const Font f = font_for(o, kBannerRows);
+    tag_box(e, (static_cast<float>(cam.left + cam.right + 1) - f.width(s)) / 2, static_cast<float>(cam.top) + 6 * f.gy, s, f, o);
 }
 
 void draw_scene_paletted(const Scene& scene, uint8_t* pixels, int width, int height, const std::array<uint32_t, 16>& palette,
@@ -359,46 +588,6 @@ void draw_scene_paletted(const Scene& scene, uint8_t* pixels, int width, int hei
                 if (edge(a, b, px, py) >= 0 && edge(b, c, px, py) >= 0 && edge(c, a, px, py) >= 0)
                     pixels[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)] = static_cast<uint8_t>(best);
             }
-        }
-    }
-}
-
-void append_clipped(Scene& to, const Scene& from) {
-    const auto x0 = static_cast<float>(from.view_x0), y0 = static_cast<float>(from.view_y0);
-    const auto x1 = static_cast<float>(from.view_x1), y1 = static_cast<float>(from.view_y1);
-    std::vector<SceneVertex> poly, next;
-    // Keeps the part of `poly` where f(v) >= 0 (f linear along each edge).
-    const auto cut = [&](auto f) {
-        next.clear();
-        for (size_t i = 0; i < poly.size(); ++i) {
-            const SceneVertex& a = poly[i];
-            const SceneVertex& b = poly[(i + 1) % poly.size()];
-            const float fa = f(a), fb = f(b);
-            if (fa >= 0) next.push_back(a);
-            if ((fa >= 0) != (fb >= 0)) {
-                SceneVertex v = a;
-                const float t = fa / (fa - fb);
-                v.x = a.x + t * (b.x - a.x);
-                v.y = a.y + t * (b.y - a.y);
-                next.push_back(v);
-            }
-        }
-        poly.swap(next);
-    };
-    for (size_t t = 0; t + 2 < from.indices.size(); t += 3) {
-        poly = {from.vertices[static_cast<size_t>(from.indices[t])], from.vertices[static_cast<size_t>(from.indices[t + 1])],
-                from.vertices[static_cast<size_t>(from.indices[t + 2])]};
-        cut([&](const SceneVertex& v) { return v.x - x0; });
-        cut([&](const SceneVertex& v) { return x1 - v.x; });
-        cut([&](const SceneVertex& v) { return v.y - y0; });
-        cut([&](const SceneVertex& v) { return y1 - v.y; });
-        if (poly.size() < 3) continue;
-        const auto base = static_cast<int32_t>(to.vertices.size());
-        to.vertices.insert(to.vertices.end(), poly.begin(), poly.end());
-        for (size_t i = 1; i + 1 < poly.size(); ++i) {
-            to.indices.push_back(base);
-            to.indices.push_back(base + static_cast<int32_t>(i));
-            to.indices.push_back(base + static_cast<int32_t>(i + 1));
         }
     }
 }

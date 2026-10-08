@@ -38,15 +38,17 @@ public:
     // kTransparentPixel. All are in the frame's coordinates, placed as present() would. With the depth
     // buffer, the scenes' triangles hide each other by their SceneVertex::depth; else in their order.
     static constexpr std::uint8_t kTransparentPixel = 0xFF;
+    // `top` (if any) is drawn last, over `over` too, clipped to its own viewport (in the frame's
+    // coordinates, in its order).
     void present(const Framebuffer& under, const enhanced::Scene& scene, const Framebuffer& over,
-                 const enhanced::Scene* inset = nullptr);
+                 const enhanced::Scene* inset = nullptr, const enhanced::Scene* top = nullptr);
     // A frame with the PC-98's or the Mac's art in place of the DOS pictures (graphics/composite.h):
     // the backdrop or the DOS pixels under the art, the art at the output's resolution, then the DOS
     // pixels kept on top and the pieces moved into the art's layout. With `under` and `scene`, the
     // Enhanced 3D view is drawn first and the composite (made from its `over`) on top of it.
     void present(const graphics::Composite& composite);
     void present(const Framebuffer& under, const enhanced::Scene& scene, const graphics::Composite& composite,
-                 const enhanced::Scene* inset = nullptr);
+                 const enhanced::Scene* inset = nullptr, const enhanced::Scene* top = nullptr);
     // Output pixels per frame pixel, horizontally and vertically, for a frame of this size.
     void frame_scale(int frame_w, int frame_h, float& sx, float& sy) const;
     // The window's drawable size in pixels (what a Canvas should be laid out for).

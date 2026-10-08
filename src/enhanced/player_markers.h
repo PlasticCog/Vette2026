@@ -34,6 +34,12 @@ struct MarkerOptions {
     // The main view's, with the rear-view mirror on: the tag keeps out from under the mirror (beside it,
     // its point slanting to the car, or below it).
     bool avoid_mirror = false;
+    // Where the driver's-seat arrow goes: a scene drawn over everything (the dash, the mirror and its
+    // frame), so it's never hidden; null: into the view's own.
+    Scene* hud = nullptr;
+    // For the original's 320x200 frame (draw_scene_paletted), to look like the game's own pixels: the tag
+    // in a 3x5 pixel font, the driver's-seat arrow a 16-pixel sprite with a one-pixel outline, everything on whole pixels.
+    bool pixels = false;
 };
 
 // Adds the tag and the arrow to `scene` (its viewport is set to the view's), from the frame's data
@@ -42,10 +48,6 @@ bool add_player_markers(const uint8_t* ds, const MarkerOptions& options, Scene& 
 
 // A line of text at the top of the 3D view, centred (e.g. "Name tag and arrow: on" after Tab).
 void add_banner(const uint8_t* ds, std::string_view text, const MarkerOptions& options, Scene& scene);
-
-// Adds `from`'s triangles to `to`, cut to `from`'s viewport (e.g. the mirror's markers into the main view's
-// scene, which is drawn clipped to its own viewport only).
-void append_clipped(Scene& to, const Scene& from);
 
 // Draws a scene's triangles into a frame of palette indices (Classic): each pixel whose centre a triangle
 // covers takes the palette colour nearest to the triangle's (alpha under 0.5: left alone), inside the

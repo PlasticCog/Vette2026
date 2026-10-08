@@ -174,11 +174,13 @@ player's own, and jumps show on both screens. Both players need the same version
 their own copy of DOS VETTE! 1.1.
 
 **Name tag and arrow.** In two-player races, each player's name floats over their car on the other's screen,
-and a yellow arrow on the ground circles your car, pointing at your friend's wherever they are (in the
-helicopter view, F4, you see it all round; from the driver's seat, when they're ahead or in the mirror).
-**Tab** shows or hides both during the race; the original leaves Tab unused. Set your name and whether
-they start on in the online screen (**Your name**, **Tag and arrow**); a LAN race is listed by its host's
-name. They're drawn at the display's resolution in Classic too, and kept out from under the mirror.
+and a small yellow arrow shows the way to them. From the driver's seat it sits at the top of the view and
+turns to point where you need to steer: straight up when your friend is ahead, sliding down to the left or
+right edge (and pointing that way) as they fall to that side or behind you. In the helicopter view (F4) it
+lies on the ground and circles your car instead. **Tab** shows or hides both during the race; the original
+leaves Tab unused. Set your name and whether they start on in the online screen (**Your name**, **Tag and
+arrow**); a LAN race is listed by its host's name. In Classic (and with the Enhanced view at the original's
+resolution) they're drawn in the game's own pixels and colours, the tag in a small pixel font.
 
 **LAN races.** Two players on the same network (the same Wi-Fi or router) choose **Host a LAN race** and
 **Join a LAN race**: the second lists the races hosted on the network, and Enter joins one. There's no code

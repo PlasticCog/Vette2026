@@ -1,5 +1,6 @@
 // Two-player markers (enhanced/player_markers.h): the other player's tag and the arrow to them, on a made-up
-// frame's data segment: the camera at eye height over this car, looking north, the main view's viewport.
+// frame's data segment: the camera at eye height over this car, looking north, the main view's viewport;
+// the helicopter view's arrow on the ground round the car, the driver's seat's at the top of the view.
 
 #include <algorithm>
 #include <array>
@@ -21,8 +22,9 @@ struct Frame {
         ds[static_cast<uint16_t>(off + 1)] = static_cast<uint8_t>(v >> 8);
     }
     // This car at the middle of big tile (2, 2), heading north, the camera 10 over it; the other car
-    // `north` and `east` of it.
-    Frame(int north, int east) {
+    // `north` and `east` of it. `external`: the helicopter view.
+    Frame(int north, int east, bool external = true) {
+        ds[0x2ACF] = external ? 0xFF : 0;
         w16(0x2C71, 0x4000), w16(0x2C73, 0x4000), w16(0x2C75, 10);  // camera x, y, z
         w16(0x2C93, 2), w16(0x2C95, 2);
         w16(0x315E, 0), w16(0x315A, 0), w16(0x3160, 319), w16(0x315C, 119);  // left, top, right, bottom
@@ -36,12 +38,13 @@ struct Bounds {
     float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
     int n = 0;
 };
-// The vertices of one colour (r, g, b) below `min_y`: the tag's white text, or the yellow of the arrow (on
-// the ground, below the horizon at y 60) and of the tag's rim.
-Bounds bounds(const en::Scene& s, float r, float g, float b, float min_y = -1e9f) {
+// The vertices of one colour (r, g, b, a) below `min_y`: the tag's white text, or the yellow of the arrow
+// (on the ground, below the horizon at y 60) and of the tag's rim; the driver's-seat arrow's (a 0.9).
+Bounds bounds(const en::Scene& s, float r, float g, float b, float min_y = -1e9f, float a = 1) {
     Bounds out;
     for (const en::SceneVertex& v : s.vertices) {
-        if (std::fabs(v.r - r) > 0.01f || std::fabs(v.g - g) > 0.01f || std::fabs(v.b - b) > 0.01f || v.a < 0.99f) continue;
+        if (std::fabs(v.r - r) > 0.01f || std::fabs(v.g - g) > 0.01f || std::fabs(v.b - b) > 0.01f || std::fabs(v.a - a) > 0.01f)
+            continue;
         if (v.y < min_y) continue;
         out.x0 = std::min(out.x0, v.x), out.x1 = std::max(out.x1, v.x);
         out.y0 = std::min(out.y0, v.y), out.y1 = std::max(out.y1, v.y);
@@ -131,4 +134,84 @@ TEST(player_markers_tag_size) {
     CHECK(text.n > 0);
     const float tall = (text.y1 - text.y0) * o.pixel_h;  // the letters' height, in output pixels
     CHECK(tall >= 12 && tall <= 16.5f);
+}
+
+TEST(player_markers_drivers_seat) {
+    en::MarkerOptions o;
+    o.name = "Bob";
+    // The arrow's vertices (a 0.9), for the other car `north` and `east` of this one, in the driver's seat.
+    const auto hud = [&](int north, int east) {
+        const Frame f(north, east, false);
+        en::Scene s;
+        CHECK(en::add_player_markers(f.ds.data(), o, s));
+        CHECK_EQ(bounds(s, kYellow[0], kYellow[1], kYellow[2], 60).n, 0);  // no arrow on the ground
+        std::vector<en::SceneVertex> out;
+        for (const en::SceneVertex& v : s.vertices) {
+            if (std::fabs(v.a - 0.9f) < 0.01f) out.push_back(v);
+        }
+        CHECK(!out.empty());
+        return out;
+    };
+    // Its middle, and the vertex farthest along (dx, dy): the tip if it points that way.
+    const auto look = [](const std::vector<en::SceneVertex>& v, float dx, float dy, float& mx, float& my, en::SceneVertex& tip) {
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f, best = -1e9f;
+        for (const en::SceneVertex& p : v) {
+            x0 = std::min(x0, p.x), x1 = std::max(x1, p.x), y0 = std::min(y0, p.y), y1 = std::max(y1, p.y);
+            if (p.x * dx + p.y * dy > best) best = p.x * dx + p.y * dy, tip = p;
+        }
+        mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+    };
+    float x = 0, y = 0;
+    en::SceneVertex tip;
+    // Ahead: at the top of the view, in the middle, pointing up.
+    look(hud(1000, 0), 0, -1, x, y, tip);
+    CHECK(std::fabs(x - 160) < 2 && y < 40 && y > 0);
+    CHECK(std::fabs(tip.x - x) < 1 && tip.y < y - 8);
+    // To the right: down the right of the view, pointing right.
+    look(hud(0, 1000), 1, 0, x, y, tip);
+    CHECK(x > 230 && y > 30 && y < 70);
+    CHECK(std::fabs(tip.y - y) < 2 && tip.x > x + 8);
+    // To the left: the same on the left.
+    float lx = 0, ly = 0;
+    look(hud(0, -1000), -1, 0, lx, ly, tip);
+    CHECK(std::fabs((320 - lx) - x) < 2 && std::fabs(ly - y) < 2);
+    CHECK(std::fabs(tip.y - ly) < 2 && tip.x < lx - 8);
+    // Behind (to the right of it): at the right edge, pointing right (never backwards).
+    float bx = 0, by = 0;
+    look(hud(-1000, 200), 1, 0, bx, by, tip);
+    CHECK(std::fabs(bx - x) < 1 && std::fabs(by - y) < 1);
+    CHECK(std::fabs(tip.y - by) < 2 && tip.x > bx + 8);
+    look(hud(-1000, -200), -1, 0, bx, by, tip);
+    CHECK(std::fabs(bx - lx) < 1 && tip.x < bx - 8);
+    // With a scene over everything, it goes there.
+    {
+        const Frame f(1000, 0, false);
+        en::Scene s, top;
+        en::MarkerOptions oh = o;
+        oh.hud = &top;
+        CHECK(en::add_player_markers(f.ds.data(), oh, s));
+        CHECK_EQ(bounds(s, kYellow[0], kYellow[1], kYellow[2], -1e9f, 0.9f).n, 0);
+        CHECK(bounds(top, kYellow[0], kYellow[1], kYellow[2], -1e9f, 0.9f).n > 0);
+        CHECK(top.view_x1 == 320 && top.view_y1 == 120);
+    }
+    // Close by: none.
+    const Frame near(150, 0, false);
+    en::Scene s;
+    CHECK(en::add_player_markers(near.ds.data(), o, s));
+    CHECK_EQ(bounds(s, kYellow[0], kYellow[1], kYellow[2], -1e9f, 0.9f).n, 0);
+}
+
+TEST(player_markers_in_pixels) {
+    // For the original's frame: the tag's letters 5 pixels tall, the driver's-seat arrow about 16 long, outlined.
+    en::MarkerOptions o;
+    o.name = "Bob";
+    o.pixels = true;
+    const Frame f(1000, 0, false);
+    en::Scene s;
+    CHECK(en::add_player_markers(f.ds.data(), o, s));
+    const Bounds text = bounds(s, 1, 1, 1);
+    CHECK(text.y1 - text.y0 == 5.0f);
+    CHECK(text.x1 - text.x0 == 11.0f);  // B, o, b: 3 wide, a pixel apart
+    const Bounds arrow = bounds(s, kYellow[0], kYellow[1], kYellow[2], -1e9f, 0.9f);
+    CHECK(arrow.y1 - arrow.y0 > 14 && arrow.y1 - arrow.y0 < 18);
 }

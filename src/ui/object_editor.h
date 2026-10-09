@@ -1,10 +1,12 @@
 #pragma once
 // The object editor (launch menu > Objects, Enter): the original's 3D models (the cars, the
 // pedestrians, the landmark buildings), and the city's code-drawn buildings and street objects as models
-// (enhanced/object_models.h), one at a time in a 3D view to turn round and zoom into, reshaped
-// vertex by vertex and face by face: move, add, delete, mirror and recolour them, make new faces. Saved
-// as a set of one's own (game/model_pack.h) in the save folder's objects folder, which the launch menu's
-// Objects setting then plays with; the game's own files are never changed. Mouse and keyboard.
+// (enhanced/object_models.h), reshaped vertex by vertex and face by face, laid out like 3ds Max: menus, a
+// toolbar, four views (top, front, left, perspective; any of them flat or not, or one view), a command
+// panel to create shapes (game/model_tools.h) and modify what's picked, and a status bar. Moving, turning
+// and sizing what's picked by dragging, snapping to vertices and lining up with them, symmetry across the
+// middle, extruding. Saved as a set of one's own (game/model_pack.h) in the save folder's objects folder,
+// which the launch menu's Objects setting then plays with; the game's own files are never changed.
 
 #include <SDL3/SDL_keycode.h>
 

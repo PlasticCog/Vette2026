@@ -152,15 +152,24 @@ it to the friend's as the race begins.
 original's, or a set you've reshaped. Enter on it opens the object editor: the original's 58 3D models
 (the traffic and the opponents' cars, the police car, your Corvette, the pedestrians and the landmarks
 from Coit Tower to the Ferry Building), and below them the city's ordinary buildings and street objects,
-one at a time in a 3D view. The original draws those with program code rather than as models, so the
+one at a time. The original draws those with program code rather than as models, so the
 editor makes each one a model (31 of them, from the tall office blocks to the small things beside the streets), and a set
 that changes one has the game draw the model in its place, everywhere the city has it. Collisions follow
-the map rather than the shapes: the car drives through whatever a building gains. Pick vertices or faces with the mouse
-(Tab switches), drag them to move them (X, Y or Z keeps the move to one axis, the arrow keys nudge),
-add vertices (A), make a face through the picked vertices in order (F), delete (Delete), mirror what's
-picked across the car's middle (M), recolour faces from the EGA palette (0-9, the palette, C), turn a face
-round (R), and undo and redo every step; F1 lists every key. The game takes 124 vertices and 16 corners a
-face at most, which the side panel checks as you go. Sets are saved in the `objects` folder next to
+the map rather than the shapes: the car drives through whatever a building gains.
+
+The editor is laid out like 3ds Max: menus and a toolbar along the top, four views (Top, Front, Left and
+Perspective, each with a grid; click a view's name for the others, Isometric among them, or press Q for
+one view), the **Create** and **Modify** panel on the right and the status bar along the bottom, with
+the picked vertex's x, y and z and the view controls (zoom, slide, turn round). Pick vertices or faces
+with the mouse (Tab switches; drag on empty space for a box), then **Move** (V), **Turn** (T) or **Size**
+(S) them by dragging (X, Y or Z keeps it to one axis). While you drag, **Snap** lands the point on a
+vertex near it or lines it up with others along x, y or z, with guide lines to show which (hold Alt to
+move freely). **Symmetry** (Shift+M) does on one side of the middle whatever you do on the other. The
+Create panel adds a cube, cone, sphere, cylinder, pyramid, plane, wedge or roof to build with, and the
+Modify panel adds vertices and faces, extrudes faces (E), turns them round, mirrors and deletes, with
+each face's colour from the EGA palette and whether it hides its back. Everything can be undone, and F1
+lists every key. The game takes 124 vertices and 16 corners a face at most, which the panel checks as
+you go. Sets are saved in the `objects` folder next to
 `save` and written into the game's memory as it starts, so both the original's renderer and the Enhanced
 view draw them (the opponent screen's turning car too); the game's files are never changed.
 `--objects NAME` plays one for one run; two-player races use the original's objects.

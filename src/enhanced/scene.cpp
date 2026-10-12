@@ -285,6 +285,9 @@ struct SceneBuilder::Impl {
         int next = -1;
         uint16_t key = 0;  // the sort key the original gives it
         bool window = false;
+        bool traffic = false;  // one of the lists' cars (not the player, the opponent, the police or a pedestrian)
+        int heading = -1;      // a persistent car's own heading (degrees), else -1: the entity's
+        bool hidden = false;   // not drawn: its shadow is, until the original's car catches it up
     };
     std::vector<Vehicle> vehicles;
     std::vector<int> cell_head;  // first vehicle per cell
@@ -297,6 +300,27 @@ struct SceneBuilder::Impl {
     std::vector<ModelDraw> vehicle_models;
     std::vector<std::pair<uint32_t, uint32_t>> vehicle_model_range;  // per vehicle
     std::vector<uint16_t> seen_entities;
+
+    // Persistent traffic (SceneOptions::persistent_traffic): a shadow of every car the original draws,
+    // synced to it while a copy of its entity is drawn near it, driving on by itself once none is.
+    struct Persistent {
+        uint16_t entity = 0, routine = 0;
+        double x = 0, y = 0;  // world
+        int16_t z = 0;
+        int z_off = 0;        // above its cell's ground
+        int dir = 0;          // 0 north (+x), 1 east (+y), 2 south, 3 west
+        double speed = 120;   // units a second
+        bool own = false;     // driving by itself
+        int plan = -1;        // the direction to leave the intersection it's in by (-1: not decided)
+        int plan_cell = -1;   // the cell that plan was made in
+        bool matched = false, gone = false;
+    };
+    std::vector<Persistent> persistent;
+    double persistent_time = -1;  // the frame the shadows were last driven
+    std::unordered_map<uint32_t, std::vector<ModelDraw>> heading_models;  // traced at a heading: entity << 16 | heading
+    void shadow_traffic();
+    bool drivable(int gx, int gy, int dir) const;
+    void drive(Persistent& p, double dt);
     void observe_window(uint16_t e, int cell, int32_t x, int32_t y, int16_t z) {
         const V3 v = to_camera(x, y, z);
         opt->observer->copy({e, cell, x, y, v.x, v.y, v.z, true, true});
@@ -2162,6 +2186,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
             if (slot >= 3 && opt->lane_x) x = opt->lane_x(e, gx, gy, x & 0x7FF);
             add_vehicle(e, ram.d16(e), cell, base_x + (x & 0x7FF), base_y + (y & 0x7FF), z, true);
             vehicles.back().window = true;
+            vehicles.back().traffic = slot >= 3;
             if (opt->observer && slot >= 3) observe_window(e, cell, base_x + (x & 0x7FF), base_y + (y & 0x7FF), z);
         }
         // List B (34D6): pedestrians, positions already cell-relative.
@@ -2199,7 +2224,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
     std::vector<uint32_t> replicated;  // entity | list << 16: an entity can be in two lists
     if (opt->replicas) prepare_roads();
     const auto place = [&](uint16_t e, int row, int col, uint16_t ec, bool cell_relative, bool replica,
-                           const ReplicaChoice* choice) {
+                           const ReplicaChoice* choice, bool traffic) {
         if (row < 0 || col < 0 || row >= rows || col >= cols) return;
         const int gx = row * 16 + (ec >> 4 & 15), gy = col * 16 + (ec & 15);
         if (!in_radius(gx, gy)) return;
@@ -2229,6 +2254,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
             }
         }
         add_vehicle(e, ram.d16(e), gx * kMapCells + gy, wx, wy, z, false);
+        vehicles.back().traffic = traffic;
     };
     // The list entries of every big tile; an entity shared by several lists is drawn once.
     for (int bt = 0; bt < rows * cols; ++bt) {
@@ -2245,11 +2271,11 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
                 if (seen(e)) continue;
                 seen_entities.push_back(e);
                 if (slot == 0) {
-                    place(e, ram.s16(kPlayerRow), ram.s16(kPlayerCol), ec, false, false, nullptr);
+                    place(e, ram.s16(kPlayerRow), ram.s16(kPlayerCol), ec, false, false, nullptr, false);
                 } else if (slot == 1 && opponent_ok) {
-                    place(e, opp_tile / 5, opp_tile % 5, ec, false, false, nullptr);
+                    place(e, opp_tile / 5, opp_tile % 5, ec, false, false, nullptr, false);
                 } else if (slot == 2 && chase) {
-                    place(e, chase_tile / 5, chase_tile % 5, ec, false, false, nullptr);
+                    place(e, chase_tile / 5, chase_tile % 5, ec, false, false, nullptr, false);
                 }
                 continue;
             }
@@ -2265,7 +2291,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
                 for (int t = 0; t < rows * cols; ++t) {
                     if (lists_a[t] != la) continue;
                     for (int c = 0; c < 256; ++c) {
-                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), false, true, &choice);
+                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), false, true, &choice, true);
                     }
                 }
             } else {
@@ -2283,7 +2309,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
                         best = t;
                     }
                 }
-                if (best >= 0) place(e, best / cols, best % cols, ec, false, false, nullptr);
+                if (best >= 0) place(e, best / cols, best % cols, ec, false, false, nullptr, true);
             }
         }
     }
@@ -2305,7 +2331,7 @@ void SceneBuilder::Impl::collect_vehicles(bool fallback) {
                 for (int t = 0; t < rows * cols; ++t) {
                     if (lists_b[t] != lb) continue;
                     for (int c = 0; c < 256; ++c) {
-                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), true, true, &choice);
+                        if ((c & 0x33) == (ec & 0x33)) place(e, t / cols, t % cols, static_cast<uint16_t>(c), true, true, &choice, false);
                     }
                 }
             }
@@ -2558,6 +2584,45 @@ void SceneBuilder::Impl::trace_vehicles() {
     load_tracer();
     for (size_t i = 0; i < vehicles.size(); ++i) {
         Vehicle& v = vehicles[i];
+        if (v.heading >= 0) {
+            // A persistent car: its entity's routine run with its own heading, kept per heading.
+            const V3 cv = to_camera(v.x, v.y, v.z);
+            v.key = static_cast<uint16_t>(cv.z < 0 ? 0x400 : std::min(std::trunc(cv.z), 32767.0f));
+            const uint32_t key = static_cast<uint32_t>(v.entity) << 16 | static_cast<uint32_t>(v.heading);
+            auto it = heading_models.find(key);
+            if (it == heading_models.end()) {
+                const int gx = v.cell / kMapCells, gy = v.cell % kMapCells;
+                const Cell& cell = world.cell(gx, gy);
+                tracer->wr16(addr::kDataSeg, kCellTypeVar, cell.type);
+                tracer->wr16(addr::kDataSeg, kCellRecord, world.types[cell.type].address);
+                tracer->wr16(addr::kDataSeg, kCellZ, static_cast<uint16_t>(cell.elevation * kElevationStep));
+                for (int k = 0; k < 3; ++k) {
+                    tracer->wr16(addr::kDataSeg, static_cast<uint16_t>(addr::kObjPos + 2 * k), static_cast<uint16_t>(v.pos16[static_cast<size_t>(k)]));
+                }
+                tracer->wr16(addr::kCodeSeg, addr::kSortKey, v.key);
+                const uint16_t was = tracer->rd16(addr::kDataSeg, static_cast<uint16_t>(v.entity + 8));
+                tracer->wr16(addr::kDataSeg, static_cast<uint16_t>(v.entity + 8), static_cast<uint16_t>(v.heading));
+                tracer->run(v.routine, v.pos16, trace);
+                tracer->wr16(addr::kDataSeg, static_cast<uint16_t>(v.entity + 8), was);
+                std::vector<ModelDraw> mds;
+                for (const TraceEvent& e : trace.events) {
+                    if (e.op != TraceEvent::Op::Model) continue;
+                    ModelDraw md;
+                    md.model = e.addr;
+                    md.rotation = e.aux == 2 ? model_rotation(0, 0, 0)
+                                             : model_rotation(e.angles[0], e.aux == 1 ? e.angles[1] : 0, e.aux == 1 ? e.angles[2] : 0);
+                    md.offset = {static_cast<float>(e.pos[0]), static_cast<float>(e.pos[1]), static_cast<float>(e.pos[2])};
+                    md.outline = e.outline_enable != 0;
+                    mds.push_back(md);
+                }
+                if (heading_models.size() > 4096) heading_models.clear();
+                it = heading_models.emplace(key, std::move(mds)).first;
+            }
+            const auto first = static_cast<uint32_t>(vehicle_models.size());
+            vehicle_models.insert(vehicle_models.end(), it->second.begin(), it->second.end());
+            vehicle_model_range.push_back({first, static_cast<uint32_t>(vehicle_models.size())});
+            continue;
+        }
         // A replica of an entity already traced: same models, its own position.
         int32_t& first_of = entity_first[v.entity];
         if (first_of >= 0) {
@@ -2594,8 +2659,200 @@ void SceneBuilder::Impl::trace_vehicles() {
     for (const Vehicle& v : vehicles) entity_first[v.entity] = -1;
 }
 
+// --- Persistent traffic -----------------------------------------------------------------------------------
+
+// Whether a car can go on into cell (gx, gy) heading `dir`: the cell's rule allows the direction (DS:D2AE's
+// maps, notes 04 section 7: bits 0-1 north/south, 4-5 west/east, 0 nothing), and its road that way is there
+// (road_at, at the direction's lane). The roads run along the cells' edges: north-south in the strip y 0..256
+// (northbound at y 192, southbound at 64), east-west in x 1792..2048 (eastbound at x 1856, westbound 1984).
+bool SceneBuilder::Impl::drivable(int gx, int gy, int dir) const {
+    if (gx < 0 || gy < 0 || gx >= world.cells_x() || gy >= world.cells_y()) return false;
+    const int cols = std::clamp<int>(ram.s16(kBigCols), 1, 5);
+    const int bt = (gx / 16) * cols + gy / 16;
+    const uint16_t rules = ram.d16(static_cast<uint16_t>(0xD2AE + 2 * bt));
+    const uint8_t rule = ram.d8(static_cast<uint16_t>(rules + (gx % 16) * 16 + (gy % 16)));
+    const int ns = rule & 3, ew = rule >> 4 & 3;
+    const bool allowed = dir == 0 ? (ns & 1) != 0 : dir == 2 ? (ns & 2) != 0 : dir == 3 ? (ew & 1) != 0 : (ew & 2) != 0;
+    if (!allowed) return false;
+    const int32_t ox = gx * kCellSize, oy = gy * kCellSize;
+    const int32_t px = dir == 0 || dir == 2 ? ox + 1024 : ox + (dir == 1 ? 1856 : 1984);
+    const int32_t py = dir == 0 || dir == 2 ? oy + (dir == 0 ? 192 : 64) : oy + 1024;
+    return road_at(px, py, true) != 0;
+}
+
+// Drives a shadow on for `dt` seconds along its road: straight along its lane, and at each intersection
+// (the cell's corner, x 1792..2048 and y 0..256) on by the plan made on reaching it: straight on where the
+// road goes on (mostly), else a turn the roads allow, else round.
+void SceneBuilder::Impl::drive(Persistent& p, double dt) {
+    const auto lane_of = [](int dir) { return dir == 0 ? 192.0 : dir == 2 ? 64.0 : dir == 1 ? 1856.0 : 1984.0; };
+    const auto neighbour = [](int gx, int gy, int dir, int& nx, int& ny) {
+        nx = gx + (dir == 0 ? 1 : dir == 2 ? -1 : 0);
+        ny = gy + (dir == 1 ? 1 : dir == 3 ? -1 : 0);
+    };
+    double dist = p.speed * dt;
+    for (int guard = 0; dist > 0 && guard < 8; ++guard) {
+        const int gx = static_cast<int>(std::floor(p.x / kCellSize)), gy = static_cast<int>(std::floor(p.y / kCellSize));
+        if (gx < 0 || gy < 0 || gx >= world.cells_x() || gy >= world.cells_y()) {
+            p.gone = true;
+            return;
+        }
+        const int cell = gx * kMapCells + gy;
+        p.z = static_cast<int16_t>(world.cell(gx, gy).elevation * kElevationStep + p.z_off);
+        const double ix = p.x - gx * kCellSize, iy = p.y - gy * kCellSize;
+        const bool along_x = p.dir == 0 || p.dir == 2;
+        const int sign = p.dir == 0 || p.dir == 1 ? 1 : -1;
+        double prog = along_x ? ix : iy, lane = along_x ? iy : ix;
+        // Reaching the intersection: the plan.
+        const bool in_corner = along_x ? ix >= 1792 : iy < 256;
+        if (in_corner && p.plan_cell != cell) {
+            p.plan_cell = cell;
+            int nx = 0, ny = 0;
+            neighbour(gx, gy, p.dir, nx, ny);
+            const bool straight = drivable(nx, ny, p.dir);
+            const int to_right = (p.dir + 1) % 4, to_left = (p.dir + 3) % 4;
+            neighbour(gx, gy, to_right, nx, ny);
+            const bool can_right = drivable(nx, ny, to_right);
+            neighbour(gx, gy, to_left, nx, ny);
+            const bool can_left = drivable(nx, ny, to_left);
+            const uint32_t h = (static_cast<uint32_t>(p.entity) * 2654435761u) ^ (static_cast<uint32_t>(cell) * 40503u);
+            const bool turn_now = (h >> 3) % 5 == 0;
+            if (straight && !(turn_now && (can_right || can_left))) {
+                p.plan = p.dir;
+            } else if (can_right || can_left) {
+                p.plan = can_right && (!can_left || (h & 1)) ? to_right : to_left;
+            } else if (straight) {
+                p.plan = p.dir;
+            } else {
+                // Round: the other way, in that way's lane.
+                p.dir = (p.dir + 2) % 4;
+                p.plan = p.dir;
+                if (along_x) p.y = gy * kCellSize + lane_of(p.dir);
+                else p.x = gx * kCellSize + lane_of(p.dir);
+                continue;
+            }
+        }
+        // The next event along the way: the turn's point (the new direction's lane) or the cell's edge.
+        double event = sign > 0 ? kCellSize : 0;
+        int turn = -1;
+        if (p.plan >= 0 && p.plan != p.dir && p.plan_cell == cell) {
+            const double at = lane_of(p.plan);
+            if ((sign > 0 && at > prog) || (sign < 0 && at < prog)) {
+                event = at;
+                turn = p.plan;
+            } else {
+                p.dir = p.plan;  // past it: turn here
+                p.plan = p.dir;
+                continue;
+            }
+        }
+        const double remaining = std::fabs(event - prog);
+        const double step = std::min(dist, remaining);
+        prog += sign * step;
+        // Into the lane, gently.
+        const double want = lane_of(p.dir);
+        lane += std::clamp(want - lane, -step * 0.5, step * 0.5);
+        if (along_x) {
+            p.x = gx * kCellSize + prog;
+            p.y = gy * kCellSize + lane;
+        } else {
+            p.x = gx * kCellSize + lane;
+            p.y = gy * kCellSize + prog;
+        }
+        dist -= step;
+        if (step >= remaining - 1e-9) {
+            if (turn >= 0) {
+                p.dir = turn;
+                p.plan = p.dir;
+            } else {
+                // Over the edge, a hair into the next cell.
+                if (along_x) p.x += sign * 0.01;
+                else p.y += sign * 0.01;
+            }
+        }
+    }
+}
+
+void SceneBuilder::Impl::shadow_traffic() {
+    const double now = opt->time_s;
+    if (now < persistent_time) persistent.clear();  // time went back: another race
+    const bool advance = now > persistent_time;
+    const double dt = advance && persistent_time >= 0 ? std::min(now - persistent_time, 0.25) : 0;
+    prepare_roads();
+    for (Persistent& p : persistent) p.matched = false;
+    constexpr double kSame = 500;                  // a copy this close to a shadow is the same car
+    constexpr double kAdopt = 6.0 * kCellSize;     // copies this near the camera get shadows
+    constexpr double kLetGo = 9.0 * kCellSize;     // a shadow this far from the camera goes
+    constexpr size_t kMost = 200;
+    constexpr double kCaught = 48;                 // ... and this close, the original's car is drawn again
+    const size_t drawn = vehicles.size();
+    for (size_t i = 0; i < drawn; ++i) {
+        Vehicle& v = vehicles[i];
+        if (!v.traffic) continue;
+        Persistent* best = nullptr;
+        double best_d = kSame * kSame;
+        for (Persistent& p : persistent) {
+            if (p.entity != v.entity || p.matched) continue;
+            const double d = (p.x - v.x) * (p.x - v.x) + (p.y - v.y) * (p.y - v.y);
+            if (d < best_d) {
+                best_d = d;
+                best = &p;
+            }
+        }
+        if (!best) {
+            if (std::fabs(v.x - cam_x) > kAdopt || std::fabs(v.y - cam_y) > kAdopt || persistent.size() >= kMost) continue;
+            persistent.push_back({});
+            best = &persistent.back();
+            best->entity = v.entity;
+            best->routine = v.routine;
+        }
+        if (best->own && best_d > kCaught * kCaught) {
+            // Back near a shadow that has driven on (a car the original hid and then revived where it stopped,
+            // say): the shadow keeps the picture, driving on, until the original's car catches it up.
+            v.hidden = true;
+            continue;
+        }
+        const int gx = v.cell / kMapCells, gy = v.cell % kMapCells;
+        best->x = v.x;
+        best->y = v.y;
+        best->z = v.z;
+        best->z_off = v.z - world.cell(gx, gy).elevation * kElevationStep;
+        best->dir = ((ram.d16(static_cast<uint16_t>(v.entity + 8)) + 45) / 90) % 4;
+        const int speed = ram.s16(static_cast<uint16_t>(v.entity + 0x14));
+        best->speed = speed >= 30 ? speed : 120;
+        best->own = false;
+        best->plan = -1;
+        best->plan_cell = -1;
+        best->matched = true;
+    }
+    for (Persistent& p : persistent) {
+        if (p.matched) continue;
+        if (advance) {
+            p.own = true;
+            drive(p, dt);
+        }
+        if (p.gone || std::fabs(p.x - cam_x) > kLetGo || std::fabs(p.y - cam_y) > kLetGo) {
+            p.gone = true;
+            continue;
+        }
+        const int gx = static_cast<int>(std::floor(p.x / kCellSize)), gy = static_cast<int>(std::floor(p.y / kCellSize));
+        add_vehicle(p.entity, p.routine, gx * kMapCells + gy, static_cast<int32_t>(std::lround(p.x)),
+                    static_cast<int32_t>(std::lround(p.y)), p.z, false);
+        vehicles.back().traffic = true;
+        vehicles.back().heading = p.dir * 90;
+        ++out->stats.persistent;
+        if (opt->observer) {
+            const Vehicle& v = vehicles.back();
+            const V3 c = to_camera(v.x, v.y, v.z);
+            opt->observer->copy({v.entity, v.cell, v.x, v.y, c.x, c.y, c.z, true, false, true});
+        }
+    }
+    std::erase_if(persistent, [](const Persistent& p) { return p.gone; });
+    if (advance) persistent_time = now;
+}
+
 void SceneBuilder::Impl::draw_vehicle(int index) {
     const Vehicle& v = vehicles[static_cast<size_t>(index)];
+    if (v.hidden) return;
     const auto [first, last] = vehicle_model_range[static_cast<size_t>(index)];
     lod_key = v.key;
     bool drawn = false;
@@ -3286,6 +3543,7 @@ void SceneBuilder::build(const uint8_t* ram, const SceneOptions& options, Scene&
     std::fill(std::begin(m.window_steps), std::end(m.window_steps), -1);
     if (city) {
         m.collect_vehicles(!options.original_window && options.far_vehicles);
+        if (options.persistent_traffic && !options.original_window) m.shadow_traffic();
         m.trace_vehicles();
         for (size_t i = m.vehicles.size(); i-- > 0;) {
             Impl::Vehicle& v = m.vehicles[i];

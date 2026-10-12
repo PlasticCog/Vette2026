@@ -58,7 +58,7 @@ const char* label(int row) {
     case kDither: return "Colours";
     case kDriving: return "Driving";
     case kLaneCentering: return "Lane centering";
-    case kTraffic: return "Freeway traffic";
+    case kTraffic: return "Traffic";
     case kFreeways: return "Freeways";
     case kMap: return "Map";
     case kObjects: return "Objects";
@@ -204,10 +204,11 @@ std::string_view help(int row, const Settings& s) {
                "Enter opens the object editor on the set shown here.";
     case kTraffic:
         return s.smooth_traffic
-                   ? "New freeway cars come onto the road far ahead, at the end of what the original shows, and "
-                     "fade in and out instead of appearing and vanishing in view."
-                   : "The original's freeway traffic: new cars appear a few hundred yards ahead, and cars "
-                     "vanish as they get far away.";
+                   ? "City cars keep going: when the original would drop one (its turn rules hide a car whose "
+                     "street has no road its way, and its small window rebinds them as you move), it drives on "
+                     "along the roads by itself. New freeway cars come onto the road far ahead and fade in and out."
+                   : "The original's traffic: city cars can vanish in front of you, and freeway cars appear and "
+                     "vanish in view.";
     case kLaneCentering:
         return s.lane_centering ? "A slight steering assist that keeps your car straight in its lane. Steer to "
                                   "override it."

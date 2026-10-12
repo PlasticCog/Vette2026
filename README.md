@@ -118,7 +118,14 @@ Either one also evens out the original's rounding of sideways movement, which ma
 straight creep left but never right; speeds and race times are unchanged. `--driving improved` and
 `--lane-centering on` turn them on for one run.
 
-**Freeway traffic.** The original puts a new freeway car on the road 5 to 12 road slices ahead of you
+**Traffic.** The original's city cars can vanish in plain view: its turn rules hide a car whose street
+has no road its way (a park, the water, a one-way street), and its small drawing window rebinds the cars to
+new cells as you move. With **Smooth** (the default), Enhanced keeps a shadow of every car it draws, and
+when the original drops one, the shadow drives on by itself along the roads (straight on where it can, else
+a turn the roads and the one-way rules allow) until it is well behind you. Such a car is a picture only: the
+original's collisions are with its own cars.
+
+The original also puts a new freeway car on the road 5 to 12 road slices ahead of you
 (each slice is 128 of its units, about 30 feet), and takes cars off as they get more than 22 slices ahead
 or 7 behind. In its own 320x200 view that hardly shows; with the long draw distance, cars appear out of
 nowhere in front of you and vanish up the road. **Smooth** (the default; Classic turns it off) brings new

@@ -53,6 +53,7 @@ struct Scene {
         int cells = 0;
         int objects = 0;
         int vehicles = 0;
+        int persistent = 0;  // cars driving on by themselves (SceneOptions::persistent_traffic)
         int triangles = 0;
         double milliseconds = 0;  // build()
         // Added by the SceneBuilder implementation:
@@ -148,6 +149,12 @@ struct SceneOptions {
     // fades run by `time_s`, the frame's emulated time (so the mirror's build agrees with the main view's).
     bool smooth_traffic = false;
     double time_s = 0;
+    // City traffic, persistent: the original hides a car whose bound cell has no road its way (a park, the
+    // water, a one-way street) and the window rebinds cars as it moves, so a car in plain view can vanish.
+    // On, every car drawn has a shadow that, when the original's copy goes, drives on by itself along the
+    // roads (straight on, or a turn that the roads and the one-way rules allow) until it is far from the
+    // camera. The shadows run by `time_s`.
+    bool persistent_traffic = false;
 };
 
 // Validation only: chooses each static object's variant as the original would (vette_world runs the
@@ -179,6 +186,7 @@ public:
         float view_x = 0, view_y = 0, view_z = 0;  // camera space: right, down, ahead (its base)
         bool kept = false;
         bool window = false;           // the window's own (always kept)
+        bool shadow = false;           // a persistent car driving on by itself
     };
     virtual ~SceneObserver() = default;
     virtual void copy(const Copy& c) = 0;

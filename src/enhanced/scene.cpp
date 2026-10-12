@@ -1516,7 +1516,7 @@ void SceneBuilder::Impl::assign_layer(Layer& l, const float* sx, const float* sy
         }
     }
     support = on && on->kind == 1 &&
-              (l.kind == 2 || (dot(l.n, on->n) > 0.999f && std::fabs(dot(on->n, l.p) - on->d) <= kSnapDistance));
+              (l.kind == 2 || (std::fabs(dot(l.n, on->n)) > 0.999f && std::fabs(dot(on->n, l.p) - on->d) <= kSnapDistance));
     if (l.kind == 2 && support) {
         support = std::fabs(dot(on->n, l.p) - on->d) <= kSnapDistance && std::fabs(dot(on->n, l.q) - on->d) <= kSnapDistance;
     }

@@ -148,6 +148,27 @@ TEST(enhanced_scene_fill_triangles) {
     CHECK(close(area3(bend, tri), 2 * (20.0 * 6 + 8.0 * 14)));
 }
 
+TEST(enhanced_scene_fill_triangles_lombard) {
+    // A quarter of a ring, as Lombard Street's bends are drawn (routine 474D, a quadrant of its circle: the
+    // outer arc, then the inner arc back), sloping down the hill: concave, its hole left open.
+    const geo::P3 q[] = {{10, -224, 28}, {-58, -216, 27}, {-112, -194, 24}, {-158, -158, 20},
+                         {-68, -68, 9},  {-48, -83, 10},  {-25, -93, 12},   {0, -96, 12}};
+    CHECK(!geo::convex(q, 8));
+    std::vector<uint16_t> tri;
+    geo::fill_triangles(q, 8, tri);
+    CHECK_EQ(tri.size(), size_t{18});
+    // The flat area of the polygon (shoelace in x, y), twice: what the triangles must add up to; a fan
+    // from the first point would cover the hole as well, some 20% more.
+    double a2 = 0;
+    for (int i = 0, j = 7; i < 8; j = i++) a2 += double(q[j].x) * q[i].y - double(q[i].x) * q[j].y;
+    double t2 = 0;
+    for (size_t t = 0; t + 2 < tri.size(); t += 3) {
+        const geo::P3 &A = q[tri[t]], &B = q[tri[t + 1]], &C = q[tri[t + 2]];
+        t2 += std::fabs((double(B.x) - A.x) * (double(C.y) - A.y) - (double(C.x) - A.x) * (double(B.y) - A.y));
+    }
+    CHECK(close(t2, std::fabs(a2), 1.0));
+}
+
 TEST(enhanced_scene_clip_near) {
     geo::P3 out[8];
     // All in front: unchanged.

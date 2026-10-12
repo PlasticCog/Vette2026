@@ -296,14 +296,30 @@ struct SceneBuilder::Impl {
         M3 rotation;
         V3 offset;  // relative to the vehicle's position
         float clearance = 0;  // its height over the ground where it was traced: a copy elsewhere keeps it
+        double yaw = 0, roll = 0;  // the draw routine's angles (degrees)
+        bool full = false;         // drawn with yaw, pitch and roll (3009:B9D6), the pitch the ground's
         bool outline = true;
     };
-    // A copy of a traced vehicle's models at another place: at its clearance over the ground there (the
-    // routine's own height is the ground shape's where it was run, which another cell's isn't).
-    void place_models(const std::vector<ModelDraw>& from, int32_t x, int32_t y, int16_t z) {
-        const float ground = static_cast<float>(world.ground_z(x, y));
+    // The pitch (degrees, up positive) of the ground at (x, y) along yaw: what a car's draw routine gives it
+    // (the ground shapes' 1 in 8 is its 7), and in between where one slope meets another.
+    double ground_pitch(int32_t x, int32_t y, double heading) const {
+        constexpr double kReach = 96;
+        const double a = heading * 3.14159265358979323846 / 180;
+        const auto dx = static_cast<int32_t>(std::lround(std::cos(a) * kReach)), dy = static_cast<int32_t>(std::lround(std::sin(a) * kReach));
+        const int32_t ahead = world.ground_z(x + dx, y + dy), behind = world.ground_z(x - dx, y - dy);
+        return std::atan2(static_cast<double>(ahead - behind), 2 * kReach) * 180 / 3.14159265358979323846;
+    }
+    // A model of a vehicle at (x, y, z) on the ground there: at its clearance over it and, a car (`tilt`),
+    // pitched with it (the routine's own height and pitch are the ground's where it was traced).
+    void settle(ModelDraw& md, int32_t x, int32_t y, int16_t z, bool tilt) const {
+        const int32_t mx = x + static_cast<int32_t>(std::lround(md.offset.x)), my = y + static_cast<int32_t>(std::lround(md.offset.y));
+        md.offset.z = static_cast<float>(world.ground_z(mx, my)) + md.clearance - static_cast<float>(z);
+        if (tilt && md.full) md.rotation = model_rotation(md.yaw, ground_pitch(mx, my, md.yaw), md.roll);
+    }
+    // A copy of a traced vehicle's models at another place, settled on the ground there.
+    void place_models(const std::vector<ModelDraw>& from, int32_t x, int32_t y, int16_t z, bool tilt) {
         for (ModelDraw md : from) {
-            md.offset.z = ground + md.clearance - static_cast<float>(z);
+            settle(md, x, y, z, tilt);
             vehicle_models.push_back(md);
         }
     }
@@ -2623,7 +2639,12 @@ void SceneBuilder::Impl::trace_vehicles() {
                     md.rotation = e.aux == 2 ? model_rotation(0, 0, 0)
                                              : model_rotation(e.angles[0], e.aux == 1 ? e.angles[1] : 0, e.aux == 1 ? e.angles[2] : 0);
                     md.offset = {static_cast<float>(e.pos[0]), static_cast<float>(e.pos[1]), static_cast<float>(e.pos[2])};
-                    md.clearance = static_cast<float>(v.z) + md.offset.z - static_cast<float>(world.ground_z(v.x, v.y));
+                    md.clearance = static_cast<float>(v.z) + md.offset.z -
+                                   static_cast<float>(world.ground_z(v.x + static_cast<int32_t>(std::lround(md.offset.x)),
+                                                                     v.y + static_cast<int32_t>(std::lround(md.offset.y))));
+                    md.yaw = e.angles[0];
+                    md.roll = e.aux == 1 ? e.angles[2] : 0;
+                    md.full = e.aux == 1;
                     md.outline = e.outline_enable != 0;
                     mds.push_back(md);
                 }
@@ -2631,7 +2652,7 @@ void SceneBuilder::Impl::trace_vehicles() {
                 it = heading_models.emplace(key, std::move(mds)).first;
             }
             const auto first = static_cast<uint32_t>(vehicle_models.size());
-            place_models(it->second, v.x, v.y, v.z);
+            place_models(it->second, v.x, v.y, v.z, true);
             vehicle_model_range.push_back({first, static_cast<uint32_t>(vehicle_models.size())});
             continue;
         }
@@ -2641,7 +2662,7 @@ void SceneBuilder::Impl::trace_vehicles() {
             const auto [f0, f1] = vehicle_model_range[static_cast<size_t>(first_of)];
             const std::vector<ModelDraw> from(vehicle_models.begin() + f0, vehicle_models.begin() + f1);
             const auto first = static_cast<uint32_t>(vehicle_models.size());
-            place_models(from, v.x, v.y, v.z);
+            place_models(from, v.x, v.y, v.z, v.traffic);
             vehicle_model_range.push_back({first, static_cast<uint32_t>(vehicle_models.size())});
             continue;
         }
@@ -2667,8 +2688,14 @@ void SceneBuilder::Impl::trace_vehicles() {
                                      : model_rotation(e.angles[0], e.aux == 1 ? e.angles[1] : 0, e.aux == 1 ? e.angles[2] : 0);
             // Offsets in the 16-bit frame: z as drawn; x, y relative to the entry.
             md.offset = {static_cast<float>(e.pos[0]), static_cast<float>(e.pos[1]), static_cast<float>(e.pos[2])};
-            md.clearance = static_cast<float>(v.z) + md.offset.z - static_cast<float>(world.ground_z(v.x, v.y));
+            md.clearance = static_cast<float>(v.z) + md.offset.z -
+                           static_cast<float>(world.ground_z(v.x + static_cast<int32_t>(std::lround(md.offset.x)),
+                                                             v.y + static_cast<int32_t>(std::lround(md.offset.y))));
+            md.yaw = e.angles[0];
+            md.roll = e.aux == 1 ? e.angles[2] : 0;
+            md.full = e.aux == 1;
             md.outline = e.outline_enable != 0;
+            if (v.traffic) settle(md, v.x, v.y, v.z, true);  // (as its copies and shadow: no jump between them)
             vehicle_models.push_back(md);
         }
         vehicle_model_range.push_back({first, static_cast<uint32_t>(vehicle_models.size())});

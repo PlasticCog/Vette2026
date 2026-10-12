@@ -32,7 +32,7 @@ namespace vette::ui {
 namespace {
 
 enum Row {
-    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kSkyline, kGraphics, kEffects, kMusic, kDriving, kLaneCentering, kTraffic, kFreeways, kMap, kObjects, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
+    kFolder, kPreset, kFrameRate, kPc, kDrawDistance, kViewResolution, kDepthBuffer, kDither, kSkyline, kGraphics, kEffects, kMusic, kDriving, kLaneCentering, kTraffic, kFreeways, kMap, kObjects, kManualCheck, kJoystick, kDisplay, kScaling, kLauncher,
     kPlay, kOnline, kQuit, kRows
 };
 
@@ -55,6 +55,7 @@ const char* label(int row) {
     case kSkyline: return "Skyline";
     case kViewResolution: return "Resolution";
     case kDepthBuffer: return "Depth buffer";
+    case kDither: return "Colours";
     case kDriving: return "Driving";
     case kLaneCentering: return "Lane centering";
     case kTraffic: return "Freeway traffic";
@@ -123,6 +124,7 @@ std::string value(int row, const Settings& s, const GameDirSearch& search, const
     case kObjects: return s.objects_name.empty() ? "Original" : s.objects_name;
     case kDepthBuffer:
         return !s.depth_buffer ? "Off (original order)" : x.depth_buffer ? "On" : "On - not available here";
+    case kDither: return s.dither ? "Dithered (original)" : "Blended";
     case kGraphics: {
         const std::string v = s.graphics == Settings::Graphics::Dos    ? "DOS (original)"
                               : s.graphics == Settings::Graphics::Pc98 ? "PC-98"
@@ -216,6 +218,11 @@ std::string_view help(int row, const Settings& s) {
                      "drawn. Needs Direct3D 12, Vulkan or Metal; without, it works as Off."
                    : "The original's back-to-front drawing. Traffic and pedestrians appear as you near them, as "
                      "in the original, so none show through the scenery.";
+    case kDither:
+        return s.dither ? "The shades the original makes of two colours in a checkerboard (the dark sides of "
+                          "buildings, the water) are drawn as that checkerboard, each cell one of the original's "
+                          "pixels, in the Enhanced 3D view too."
+                        : "Each two-colour shade is blended to one flat colour in the Enhanced 3D view.";
     case kSkyline:
         return s.skyline == Settings::Skyline::Hills
                    ? "The backdrop behind the long-distance 3D view keeps only the hills: the real city stands in "
@@ -380,6 +387,7 @@ LaunchChoice run_launcher(Presenter& presenter, Gamepad& gamepad, Settings& s, s
         case kDepthBuffer:
             s.depth_buffer = !s.depth_buffer;
             break;
+        case kDither: s.dither = !s.dither; break;
         case kDriving: s.improved_driving = !s.improved_driving; break;
         case kLaneCentering: s.lane_centering = !s.lane_centering; break;
         case kTraffic: s.smooth_traffic = !s.smooth_traffic; break;

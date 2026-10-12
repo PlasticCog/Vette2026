@@ -129,6 +129,25 @@ TEST(enhanced_scene_triangulate_3d) {
     CHECK(close(area3(q, tri), 2 * (20.0 * 6 + 8.0 * 14), 1e-2));
 }
 
+TEST(enhanced_scene_fill_triangles) {
+    // A convex outline (a straight corner too): the fan from its first point, as before.
+    const geo::P3 square[] = {{0, 0, 3}, {5, 0, 3}, {10, 0, 3}, {10, 10, 3}, {0, 10, 3}};
+    CHECK(geo::convex(square, 5));
+    std::vector<uint16_t> tri;
+    geo::fill_triangles(square, 5, tri);
+    CHECK_EQ(tri.size(), size_t{9});
+    for (size_t t = 0; t < tri.size(); t += 3) CHECK_EQ(tri[t], uint16_t{0});
+    CHECK(close(area3(square, tri), 2 * 100.0));
+    // A concave one, as Lombard Street's bends are, starting where a fan would cover the notch: cut along
+    // its outline instead, its area exactly.
+    const geo::P3 bend[] = {{20, 6, 0}, {8, 6, 0}, {8, 20, 0}, {0, 20, 0}, {0, 0, 0}, {20, 0, 0}};
+    CHECK(!geo::convex(bend, 6));
+    tri.clear();
+    geo::fill_triangles(bend, 6, tri);
+    CHECK_EQ(tri.size(), size_t{12});
+    CHECK(close(area3(bend, tri), 2 * (20.0 * 6 + 8.0 * 14)));
+}
+
 TEST(enhanced_scene_clip_near) {
     geo::P3 out[8];
     // All in front: unchanged.

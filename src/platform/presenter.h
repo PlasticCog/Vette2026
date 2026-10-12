@@ -67,6 +67,10 @@ public:
     void set_depth_buffer(bool on) { depth_buffer_ = on; }
     bool depth_buffer() const { return depth_buffer_ && gpu_ != nullptr; }
     std::uint64_t depth_buffer_frames() const { return depth_frames_; }  // drawn with it so far
+    // Faces in two colours (SceneVertex::dither) drawn as the original's checkerboard, a cell a race-frame
+    // pixel: in the depth pass's pixel shader, or, without one, a second pass through a checkerboard texture.
+    void set_dither(bool on) { dither_ = on; }
+    bool dither() const { return dither_; }
     void toggle_fullscreen();
     void set_fullscreen(bool on);
     bool fullscreen() const;
@@ -126,6 +130,9 @@ private:
     void draw_scene_layers(SDL_Texture* under, int frame_w, int frame_h, const enhanced::Scene& scene,
                            const enhanced::Scene* inset, const SDL_FRect& dst);
     void draw_triangles(const enhanced::Scene& scene, int frame_w, int frame_h, const SDL_FRect& dst);
+    // The dither's checkerboard over the picture `dst`: opaque white on the odd cells of the frame's pixel
+    // grid, clear on the even (kept until the picture or frame size changes).
+    SDL_Texture* checkerboard(const SDL_FRect& dst, int frame_w, int frame_h);
     struct Gpu;
     SDL_Texture* draw_depth_tested(const enhanced::Scene& scene, const enhanced::Scene* inset, int frame_w,
                                    int frame_h, int w, int h);
@@ -151,6 +158,9 @@ private:
     SdlPtr<SDL_Texture> picture_tex_;  // set_picture()
     int picture_tex_w_ = 0, picture_tex_h_ = 0;
     std::vector<float> scene_xy_;  // the scene's vertices in render output pixels
+    std::vector<float> scene_uv_;  // ... and on the checkerboard
+    SdlPtr<SDL_Texture> checker_;  // checkerboard()
+    int checker_w_ = 0, checker_h_ = 0, checker_fw_ = 0, checker_fh_ = 0;
     std::string screenshot_;       // request_screenshot()
     int canvas_w_ = 0;
     int canvas_h_ = 0;
@@ -161,6 +171,7 @@ private:
     bool smooth_ = false;
     bool original_resolution_ = false;
     bool depth_buffer_ = true;
+    bool dither_ = false;
     std::uint64_t depth_frames_ = 0;
 };
 

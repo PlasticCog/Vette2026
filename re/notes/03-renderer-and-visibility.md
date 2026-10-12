@@ -136,6 +136,12 @@ x_right DS:3160, y_bottom DS:315C, centre_y DS:316B, centre_x DS:3169, height DS
   EGA **set/reset** fill (GC0 = colour, GC1 = 0F, GC8 = bit mask) with edge masks DS:E038/E040. Colour byte: low
   nibble = colour. If the high nibble differs, a second pass (9FFF) overlays the high nibble on a 0x55/0xAA checkerboard
   (two-colour **dither**). **confirmed**
+- The span tables keep one left and one right x per row, so a concave outline through the convex filler fills
+  each row from its leftmost edge to its rightmost, across any notch. Lombard Street's bend pieces (46D9, 46F6,
+  4748, 474D: 8 to 14 points, notched by 1-2% of their area) are the city's only concave fills drawn this way;
+  the Enhanced view cuts them along the outline instead (geometry::fill_triangles: a fan from the first point
+  would cross the outline and spike), and takes their depths on the hillside they lie on (SceneBuilder's
+  support plane), the original's rounding having left them half a unit off it. **confirmed**
 - Lines: `draw_line_list` 405E, and the self-modifying Bresenham `draw_line` 3009:5170 (it patches its own code at
   52E4–5375 and jumps through DS:38D8). **confirmed** → the interpreter must handle self-modifying code.
 

@@ -81,7 +81,8 @@ constexpr const char* kUsage =
     "                 [--draw-distance original|extended|maximum] [--cpu-hz <n>] [--[no-]joystick]\n"
     "                 [--effects off|speaker|adlib|mac] [--music off|original|pc98] [--no-sound]\n"
     "                 [--graphics dos|pc98|mac] [--scaling sharp|smooth] [--resolution display|original]\n"
-    "                 [--skyline hills|painted] [--depth-buffer on|off] [--driving original|improved]\n"
+    "                 [--skyline hills|painted] [--depth-buffer on|off] [--dither on|off]\n"
+    "                 [--driving original|improved]\n"
     "                 [--lane-centering on|off] [--freeway-traffic smooth|original] [--manual-check]\n"
     "                 [--dump-frame <file.bmp>]\n"
     "Settings come from the launch menu (saved in settings.ini); these flags override them for one run.\n"
@@ -111,6 +112,8 @@ constexpr const char* kUsage =
     "  --depth-buffer on    (default) the Enhanced 3D view on the GPU with a depth buffer: nearer things\n"
     "                       always cover farther ones, with the whole city's traffic; off: the original's\n"
     "                       drawing order, with traffic and pedestrians only near the car\n"
+    "  --dither off         (default) the Enhanced 3D view blends each two-colour shade to one colour; on:\n"
+    "                       the original's checkerboard, each cell one of its pixels\n"
     "  --driving original   (default) the original's driving; improved: the car drifts a little through\n"
     "                       fast corners and leaves the ground over crests at speed\n"
     "  --lane-centering on  a slight steering assist toward the lane's direction and centre (default off)\n"
@@ -222,6 +225,7 @@ struct Options {
     std::optional<Settings::ViewResolution> view_resolution;
     std::optional<Settings::Skyline> skyline;
     std::optional<bool> depth_buffer;
+    std::optional<bool> dither;
     std::optional<bool> improved_driving;
     std::optional<bool> lane_centering;
     std::optional<bool> smooth_traffic;
@@ -284,6 +288,8 @@ struct Options {
             s.skyline = *skyline;
         if (depth_buffer)
             s.depth_buffer = *depth_buffer;
+        if (dither)
+            s.dither = *dither;
         if (improved_driving)
             s.improved_driving = *improved_driving;
         if (lane_centering)
@@ -438,6 +444,9 @@ std::optional<Options> parse_args(int argc, char** argv) {
         } else if (arg == "--depth-buffer" && has_value && (std::string_view(argv[i + 1]) == "on" ||
                                                            std::string_view(argv[i + 1]) == "off")) {
             opts.depth_buffer = std::string_view(argv[++i]) == "on";
+        } else if (arg == "--dither" && has_value && (std::string_view(argv[i + 1]) == "on" ||
+                                                     std::string_view(argv[i + 1]) == "off")) {
+            opts.dither = std::string_view(argv[++i]) == "on";
         } else if (arg == "--skyline" && has_value && (std::string_view(argv[i + 1]) == "hills" ||
                                                       std::string_view(argv[i + 1]) == "painted")) {
             opts.skyline = std::string_view(argv[++i]) == "hills" ? Settings::Skyline::Hills : Settings::Skyline::Painted;
@@ -546,7 +555,7 @@ std::optional<Options> parse_args(int argc, char** argv) {
                                      arg == "--wav" || arg == "--effects" || arg == "--music" ||
                                      arg == "--graphics" || arg == "--scaling" ||
                                      arg == "--resolution" || arg == "--skyline" ||
-                                     arg == "--depth-buffer" || arg == "--driving" || arg == "--lane-centering" ||
+                                     arg == "--depth-buffer" || arg == "--dither" || arg == "--driving" || arg == "--lane-centering" ||
                                      arg == "--freeway-traffic" || arg == "--map" || arg == "--objects" || arg == "--freeways" ||
                                      arg == "--editor-key" || arg == "--editor-shot" || arg == "--editor-quit" ||
                                      arg == "--editor-mouse" ||
@@ -706,6 +715,7 @@ struct EnhancedView {
     // The opponent screen's turning car, drawn at the display's resolution too.
     std::unique_ptr<enhanced::MenuCar> menu_car;
     bool smooth_menu_car = true;  // Settings::frame_rate Smooth: it turns smoothly
+    bool dither = false;          // Settings::dither: two-colour faces as the original's checkerboard
     enhanced::Scene menu_scene;
     host::Ega::Frame menu_background;
     Framebuffer menu_under, menu_over;
@@ -744,6 +754,7 @@ struct EnhancedView {
         // only those near the car, where the original draws them (none show through the scenery).
         options.depth = options.replicas = options.far_vehicles = presenter.depth_buffer();
         options.smooth_traffic = smooth_traffic;
+        options.dither = dither;
         if (no_freeways) {
             options.placement = game::no_freeway_placement;
             options.lane_x = game::no_freeway_lane_x;
@@ -1489,7 +1500,7 @@ void main_loop(Presenter& presenter, host::Machine& machine, AudioOut* audio, Ga
             float sx = 1, sy = 1;
             presenter.frame_scale(fb.width, fb.height, sx, sy);
             menu_car = view->menu_car->build(machine.emulated_ns(), 1.5f / std::max(sx, 1.0f), view->smooth_menu_car,
-                                             view->menu_scene);
+                                             view->dither, view->menu_scene);
             if (menu_car) {
                 machine.ega().render_page(enhanced::MenuCar::kBackgroundStart, view->menu_background);
                 if (view->menu_background.width == fb.width) {
@@ -1623,6 +1634,7 @@ int run(int argc, char** argv) {
         presenter.set_smooth_scaling(settings.scaling == Settings::Scaling::Smooth);
         presenter.set_original_resolution(settings.view_resolution == Settings::ViewResolution::Original);
         presenter.set_depth_buffer(settings.depth_buffer);
+        presenter.set_dither(settings.dither);
         Gamepad gamepad;
 
         // An invite link: on macOS it comes as an event shortly after the start (SDL: a dropped "file").
@@ -1768,6 +1780,7 @@ int run(int argc, char** argv) {
             view = std::make_unique<EnhancedView>();
             view->menu_car = std::make_unique<enhanced::MenuCar>(machine);
             view->smooth_menu_car = smooth_fps;
+            view->dither = settings.dither;
             if (settings.draw_distance == Settings::DrawDistance::Extended)
                 view->radius = kExtendedRadius;
             view->hills = settings.skyline == Settings::Skyline::Hills;
@@ -1776,11 +1789,12 @@ int run(int argc, char** argv) {
             if (object_pack)
                 view->object_models = game::object_models(*object_pack);
         }
-        SDL_Log("Frame rate: %s; draw distance: %s%s%s; emulated CPU %.0f MHz",
+        SDL_Log("Frame rate: %s; draw distance: %s%s%s%s; emulated CPU %.0f MHz",
                 smooth_fps ? "smooth (display refresh)" : "original",
                 !enhanced_view ? "original" : view->radius == kExtendedRadius ? "extended" : "maximum",
                 !enhanced_view ? "" : view->hills ? ", hills skyline" : ", painted skyline",
                 !enhanced_view ? "" : presenter.depth_buffer() ? ", depth buffer" : ", original order",
+                !enhanced_view ? "" : settings.dither ? ", dithered colours" : ", blended colours",
                 static_cast<double>(config.cpu_hz) / 1e6);
 
         // Sound: the emulated PC speaker, or a replacement driven by the game's sound events.

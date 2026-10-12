@@ -118,6 +118,58 @@ bool triangulate(const P3* p, int n, std::vector<uint16_t>& out) {
     return ear_clip(u, v, m, out);
 }
 
+bool convex(const P3* p, int n) {
+    if (n <= 3) {
+        return true;
+    }
+    double nx = 0, ny = 0, nz = 0;
+    for (int i = 0; i < n; ++i) {
+        const P3& a = p[i];
+        const P3& b = p[(i + 1) % n];
+        nx += (double(a.y) - b.y) * (double(a.z) + b.z);
+        ny += (double(a.z) - b.z) * (double(a.x) + b.x);
+        nz += (double(a.x) - b.x) * (double(a.y) + b.y);
+    }
+    const double scale = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (scale < 1e-9) {
+        return true;
+    }
+    int sign = 0;
+    for (int i = 0; i < n; ++i) {
+        const P3& a = p[i];
+        const P3& b = p[(i + 1) % n];
+        const P3& c = p[(i + 2) % n];
+        const double ux = double(b.x) - a.x, uy = double(b.y) - a.y, uz = double(b.z) - a.z;
+        const double vx = double(c.x) - b.x, vy = double(c.y) - b.y, vz = double(c.z) - b.z;
+        const double turn = ((uy * vz - uz * vy) * nx + (uz * vx - ux * vz) * ny + (ux * vy - uy * vx) * nz) / scale;
+        const double size = std::sqrt((ux * ux + uy * uy + uz * uz) * (vx * vx + vy * vy + vz * vz));
+        if (std::fabs(turn) <= 1e-6 * size) {
+            continue;  // straight on
+        }
+        const int s = turn > 0 ? 1 : -1;
+        if (sign && s != sign) {
+            return false;
+        }
+        sign = s;
+    }
+    return true;
+}
+
+void fill_triangles(const P3* p, int n, std::vector<uint16_t>& out) {
+    if (n < 3) {
+        return;
+    }
+    if (!convex(p, n)) {
+        triangulate(p, n, out);
+        return;
+    }
+    for (int k = 1; k + 1 < n; ++k) {
+        out.push_back(0);
+        out.push_back(static_cast<uint16_t>(k));
+        out.push_back(static_cast<uint16_t>(k + 1));
+    }
+}
+
 int clip_near(const P3* in, int n, float near, P3* out) {
     int m = 0;
     for (int i = 0; i < n; ++i) {

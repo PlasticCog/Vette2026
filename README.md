@@ -93,6 +93,12 @@ Direct3D 12, Vulkan or Metal; without, the game works as with **Off**: the origi
 drawing order, with traffic and pedestrians only near the car, where the original draws them, so they
 appear as you get close (`--depth-buffer off`).
 
+**Colours.** The original's EGA has 16 colours, and a few things are shaded in two of them as a
+checkerboard: the Transamerica Pyramid's faces, some pavements, the odd sign. The Enhanced view blends
+each such pair to one flat colour. With **Dithered (original)**, it draws the checkerboard instead, each
+cell the size of one of the original's pixels, in the mirror and on the opponent screen's car too
+(`--dither on`).
+
 **Resolution.** The long-distance view is drawn at your display's full resolution. With **Original
 320x200**, it is drawn at the original's own 320x200 instead and enlarged like the rest of the picture:
 the whole city and every other enhancement, with the chunky pixels and one-pixel lines of 1989

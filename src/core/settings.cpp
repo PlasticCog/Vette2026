@@ -105,6 +105,7 @@ std::string Settings::serialize() const {
     out << kSkyline.key << " = " << kSkyline.names[static_cast<size_t>(skyline)] << "\n";
     out << kViewResolution.key << " = " << kViewResolution.names[static_cast<size_t>(view_resolution)] << "\n";
     out << "depth_buffer = " << kOnOff[depth_buffer] << "\n";
+    out << "dither = " << kOnOff[dither] << "\n";
     out << "improved_driving = " << kOnOff[improved_driving] << "\n";
     out << "lane_centering = " << kOnOff[lane_centering] << "\n";
     out << "smooth_traffic = " << kOnOff[smooth_traffic] << "\n";
@@ -145,6 +146,7 @@ Settings Settings::parse(const std::string& text) {
         read(kSkyline, key, value, s.skyline);
         read(kViewResolution, key, value, s.view_resolution);
         read_bool("depth_buffer", kOnOff, key, value, s.depth_buffer);
+        read_bool("dither", kOnOff, key, value, s.dither);
         read_bool("improved_driving", kOnOff, key, value, s.improved_driving);
         read_bool("lane_centering", kOnOff, key, value, s.lane_centering);
         read_bool("smooth_traffic", kOnOff, key, value, s.smooth_traffic);

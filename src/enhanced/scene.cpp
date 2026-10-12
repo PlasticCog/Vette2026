@@ -36,6 +36,9 @@ constexpr int kMaxLayer = kMaxDepthLayer;
 constexpr float kSmallModel = 8;
 // Coplanar enough to be painted on (world units, about 3 inches each).
 constexpr float kLayerTolerance = 4;
+// A face lying on another closer than this (and facing the same way) takes its depth on the other's plane:
+// the original's rounding, not a step (Lombard Street's bends, on its hillside to half a unit).
+constexpr float kSnapDistance = 1.5f;
 
 // Data in DS (notes 03, 04, 05).
 constexpr uint16_t kViewLeft = 0x315E, kViewTop = 0x315A, kViewRight = 0x3160, kViewBottom = 0x315C;
@@ -154,12 +157,19 @@ SceneColour ega_colour(int index) {
             static_cast<float>(c & 255) / 255.0f};
 }
 
-SceneColour scene_colour(Colour c) {
-    const SceneColour a = ega_colour(c.base());
+SceneColour scene_colour(Colour c, bool dither) {
+    SceneColour a = ega_colour(c.base());
     if (!c.dithered()) {
         return a;
     }
     const SceneColour b = ega_colour(c.second());
+    if (dither) {
+        a.r2 = b.r;
+        a.g2 = b.g;
+        a.b2 = b.b;
+        a.dither = 1;
+        return a;
+    }
     return {(a.r + b.r) * 0.5f, (a.g + b.g) * 0.5f, (a.b + b.b) * 0.5f};
 }
 
@@ -543,7 +553,7 @@ struct SceneBuilder::Impl {
         return m;
     }
     void vertex(float x, float y, float z, const SceneColour& c, float a) {
-        out->vertices.push_back({x, y, c.r, c.g, c.b, a, depth(z)});
+        out->vertices.push_back({x, y, c.r, c.g, c.b, a, depth(z), c.r2, c.g2, c.b2, a, c.dither});
     }
     SceneVertex* grow_vertices(size_t n) {
         const size_t at = out->vertices.size();
@@ -605,6 +615,21 @@ struct SceneBuilder::Impl {
     void find_candidates(const Layer& l);
     std::vector<P2> layer_pts;
     float bias = 1;             // 1 + s * kDepthStep of the primitive being emitted
+    // The face the primitive being emitted lies on (assign_layer), if any: its points' depths are taken on
+    // that face's plane, along their lines of sight (the picture doesn't move), so that the original's
+    // rounding can't put it behind what it's painted on (Lombard Street's bends lie on its hillside only to
+    // half a unit, more than a layer's bias where the slope is seen at a slant).
+    bool support = false;
+    V3 support_n;
+    float support_d = 0;
+    // A camera-space point's z for its depth: where its line of sight meets the supporting face's plane.
+    float support_z(const V3& q) const {
+        if (!support) return q.z;
+        const float nq = dot(support_n, q);
+        if (std::fabs(nq) < 1e-6f) return q.z;
+        const float t = support_d / nq;
+        return t > 0.9f && t < 1.1f ? q.z * t : q.z;
+    }
     bool backdrop = false;      // emitting the backdrop: depth 0
     bool stripe = false;        // emitting a marking's stripe
     bool small = false;         // a small vehicle: its far box, true depth only (lines one layer up), no layers
@@ -650,6 +675,7 @@ struct SceneBuilder::Impl {
     // A polygon (camera-space points point(0..n-1)) whose outline on screen is (sx, sy)[0..ns).
     template <typename Point>
     void layer_polygon(int n, Point point, const float* sx, const float* sy, int ns) {
+        support = false;
         if (backdrop || no_depth) return;
         if (small) {
             bias = 1;
@@ -676,6 +702,7 @@ struct SceneBuilder::Impl {
     }
     // A line from a to b (camera space) drawn as the quad (sx, sy)[0..4).
     void layer_line(V3 a, V3 b, const float* sx, const float* sy) {
+        support = false;
         if (backdrop || no_depth) return;
         if (small) {
             bias = 1 + kDepthStep;  // a line: on something
@@ -694,7 +721,7 @@ struct SceneBuilder::Impl {
         }
         assign_layer(l, sx, sy, 4);
     }
-    std::vector<float> clip_points;  // emit_polygon: per clipped triangle, its count, then x, y, camera z each
+    std::vector<float> clip_points;  // emit_polygon: per clipped triangle, its count, then x, y and the camera-space point each
     std::vector<P2> hull_in, hull_out;
 
     void emit_polygon(const P3* pts, int n, const uint16_t* tri, uint32_t ntri, const SceneColour& c, float a);
@@ -829,9 +856,7 @@ void SceneBuilder::Impl::prepare_routines() {
                         if (prim.kind == Prim::Kind::PolygonAlt) {
                             geometry::triangulate(pts, n, local);
                         } else {
-                            for (int k = 1; k + 1 < n; ++k) {
-                                local.insert(local.end(), {0, static_cast<uint16_t>(k), static_cast<uint16_t>(k + 1)});
-                            }
+                            geometry::fill_triangles(pts, n, local);
                         }
                         tris.insert(tris.end(), local.begin(), local.end());
                     }
@@ -873,9 +898,7 @@ void SceneBuilder::Impl::prepare_models() {
                     if (f.kind() == 2) {
                         geometry::triangulate(pts, n, local);
                     } else {
-                        for (int k = 1; k + 1 < n; ++k) {
-                            local.insert(local.end(), {0, static_cast<uint16_t>(k), static_cast<uint16_t>(k + 1)});
-                        }
+                        geometry::fill_triangles(pts, n, local);
                     }
                     tris.insert(tris.end(), local.begin(), local.end());
                 }
@@ -1456,13 +1479,26 @@ void SceneBuilder::Impl::assign_layer(Layer& l, const float* sx, const float* sy
         find_candidates(l);
     }
     int s = 0;
+    const Layer* on = nullptr;
     for (size_t k = candidates.size(); k-- > 0 && s <= group_top;) {
         Layer& o = layers[candidates[k]];
         if (o.s < s || !lies_on(l, o)) continue;  // (can't raise it)
         // A line on a face or along a line: their boxes overlap, that will do. A face over a line it contains:
         // only if the line runs inside it (not along its edge: the outline of a neighbouring face). Faces: if
         // their outlines overlap.
-        if (l.kind == 2 || (o.kind == 2 ? inside(l, o.mx, o.my) : overlap(l, o))) s = o.s + 1;
+        if (l.kind == 2 || (o.kind == 2 ? inside(l, o.mx, o.my) : overlap(l, o))) {
+            s = o.s + 1;
+            on = &o;
+        }
+    }
+    support = on && on->kind == 1 &&
+              (l.kind == 2 || (dot(l.n, on->n) > 0.999f && std::fabs(dot(on->n, l.p) - on->d) <= kSnapDistance));
+    if (l.kind == 2 && support) {
+        support = std::fabs(dot(on->n, l.p) - on->d) <= kSnapDistance && std::fabs(dot(on->n, l.q) - on->d) <= kSnapDistance;
+    }
+    if (support) {
+        support_n = on->n;
+        support_d = on->d;
     }
     // Lines and markings are always drawn on something (a face's outline, the road): at least one layer up,
     // also over a coplanar surface of another group (a neighbouring cell's road under a kerb line).
@@ -1504,7 +1540,8 @@ void SceneBuilder::Impl::emit_polygon(const P3* pts, int n, const uint16_t* tri,
         layer_polygon(n, [&](int k) { return V3{pts[k].x, pts[k].y, pts[k].z}; }, sx, sy, n);
         SceneVertex* v = grow_vertices(static_cast<size_t>(n));
         const auto base = static_cast<int32_t>(out->vertices.size()) - n;
-        for (int k = 0; k < n; ++k) v[k] = {sx[k], sy[k], c.r, c.g, c.b, a, depth(pts[k].z)};
+        for (int k = 0; k < n; ++k)
+            v[k] = {sx[k], sy[k], c.r, c.g, c.b, a, depth(support_z(V3{pts[k].x, pts[k].y, pts[k].z})), c.r2, c.g2, c.b2, a, c.dither};
         int32_t* ix = grow_indices(ntri * 3);
         for (uint32_t t = 0; t < ntri * 3; ++t) ix[t] = base + tri[t];
         out->stats.triangles += static_cast<int>(ntri);
@@ -1521,7 +1558,7 @@ void SceneBuilder::Impl::emit_polygon(const P3* pts, int n, const uint16_t* tri,
         clip_points.push_back(static_cast<float>(m));
         for (int k = 0; k < m; ++k) {
             const float x = px(cl[k]), y = py(cl[k]);
-            clip_points.insert(clip_points.end(), {x, y, cl[k].z});
+            clip_points.insert(clip_points.end(), {x, y, cl[k].x, cl[k].y, cl[k].z});
             x0 = std::min(x0, x);
             y0 = std::min(y0, y);
             x1 = std::max(x1, x);
@@ -1534,7 +1571,8 @@ void SceneBuilder::Impl::emit_polygon(const P3* pts, int n, const uint16_t* tri,
     for (size_t i = 0; i < clip_points.size();) {
         const int m = static_cast<int>(clip_points[i++]);
         const auto base = static_cast<int32_t>(out->vertices.size());
-        for (int k = 0; k < m; ++k, i += 3) vertex(clip_points[i], clip_points[i + 1], clip_points[i + 2], c, a);
+        for (int k = 0; k < m; ++k, i += 5)
+            vertex(clip_points[i], clip_points[i + 1], support_z(V3{clip_points[i + 2], clip_points[i + 3], clip_points[i + 4]}), c, a);
         for (int k = 1; k + 1 < m; ++k) {
             out->indices.push_back(base);
             out->indices.push_back(base + k);
@@ -1567,7 +1605,7 @@ void SceneBuilder::Impl::emit_indexed(const V3* cv, const P2* sv, const uint16_t
         const auto base = static_cast<int32_t>(out->vertices.size()) - n;
         for (int k = 0; k < n; ++k) {
             const P2 q = sv[idx[k]];
-            v[k] = {q.x, q.y, c.r, c.g, c.b, a, depth(cv[idx[k]].z)};
+            v[k] = {q.x, q.y, c.r, c.g, c.b, a, depth(support_z(cv[idx[k]])), c.r2, c.g2, c.b2, a, c.dither};
         }
         int32_t* ix = grow_indices(ntri * 3);
         for (uint32_t t = 0; t < ntri * 3; ++t) ix[t] = base + tri[t];
@@ -1611,13 +1649,13 @@ void SceneBuilder::Impl::emit_quad_2d(V3 ea, V3 eb, float x0, float y0, float x1
     const float ax = ux * h0 / pw, ay = uy * h0 / ph, bx = ux * h1 / pw, by = uy * h1 / ph;
     const float qx[4] = {x0 + ax, x0 - ax, x1 - bx, x1 + bx}, qy[4] = {y0 + ay, y0 - ay, y1 - by, y1 + by};
     layer_line(ea, eb, qx, qy);
-    const float d0 = depth(z0), d1 = depth(z1);
+    const float d0 = depth(support_z(ea)), d1 = depth(support_z(eb));
     SceneVertex* v = grow_vertices(4);
     const auto base = static_cast<int32_t>(out->vertices.size()) - 4;
-    v[0] = {x0 + ax, y0 + ay, c.r, c.g, c.b, fade, d0};
-    v[1] = {x0 - ax, y0 - ay, c.r, c.g, c.b, fade, d0};
-    v[2] = {x1 - bx, y1 - by, c.r, c.g, c.b, fade, d1};
-    v[3] = {x1 + bx, y1 + by, c.r, c.g, c.b, fade, d1};
+    v[0] = {x0 + ax, y0 + ay, c.r, c.g, c.b, fade, d0, c.r2, c.g2, c.b2, fade, c.dither};
+    v[1] = {x0 - ax, y0 - ay, c.r, c.g, c.b, fade, d0, c.r2, c.g2, c.b2, fade, c.dither};
+    v[2] = {x1 - bx, y1 - by, c.r, c.g, c.b, fade, d1, c.r2, c.g2, c.b2, fade, c.dither};
+    v[3] = {x1 + bx, y1 + by, c.r, c.g, c.b, fade, d1, c.r2, c.g2, c.b2, fade, c.dither};
     int32_t* ix = grow_indices(6);
     ix[0] = base;
     ix[1] = base + 1;
@@ -1709,7 +1747,7 @@ void SceneBuilder::Impl::draw_model(int model, const M3& rotation, V3 origin_cam
     for (const uint16_t fi : mesh.order[static_cast<size_t>(octant)]) {
         const ModelFace& f = mesh.faces[fi];
         if (f.flags & 0x4000) continue;
-        const SceneColour col = scene_colour(f.colour);
+        const SceneColour col = scene_colour(f.colour, opt->dither);
         const float alpha = ((f.flags & 0x8000) ? 0.5f : 1.0f) * fade;
         for (size_t pi = 0; pi < f.prims.size(); ++pi) {
             const auto& prim = f.prims[pi];
@@ -1834,7 +1872,7 @@ void SceneBuilder::Impl::draw_prim(const Part& p, const Prim& prim, const PrimDa
         emit_segment(cv, sv, idx[0], idx[1], ega_colour(prim.colour.base()));  // a two-point "polygon"
         return;
     }
-    emit_indexed(cv, sv, idx, std::min<int>(prim.count, 256), &tris[pr.first * 3], pr.count, scene_colour(prim.colour), 1);
+    emit_indexed(cv, sv, idx, std::min<int>(prim.count, 256), &tris[pr.first * 3], pr.count, scene_colour(prim.colour, opt->dither), 1);
 }
 
 void SceneBuilder::Impl::draw_entry(const Entry& e, int32_t x, int32_t y, int32_t z, std::array<int16_t, 3> pos16,
@@ -2596,7 +2634,7 @@ void SceneBuilder::Impl::draw_ground() {
         static constexpr uint16_t kQuad[6] = {0, 1, 2, 0, 2, 3};
         Colour water;
         water.raw = 9;
-        emit_polygon(pts, 4, kQuad, 2, scene_colour(water), 1);
+        emit_polygon(pts, 4, kQuad, 2, scene_colour(water, opt->dither), 1);
     }
     for (int row = 0; row < world.big_rows; ++row) {
         for (int col = 0; col < world.big_cols; ++col) {
@@ -2609,7 +2647,7 @@ void SceneBuilder::Impl::draw_ground() {
             static constexpr uint16_t kQuad[6] = {0, 1, 2, 0, 2, 3};
             Colour colour;
             colour.raw = world.big_tile_ground[static_cast<size_t>(row * world.big_cols + col)];
-            emit_polygon(pts, 4, kQuad, 2, scene_colour(colour), 1);
+            emit_polygon(pts, 4, kQuad, 2, scene_colour(colour, opt->dither), 1);
         }
     }
     backdrop = false;
@@ -2666,7 +2704,7 @@ void SceneBuilder::Impl::draw_cell_enhanced(int cell) {
             line_piece = false;
             thin_line = false;
         } else {
-            emit_polygon(pts, n, kFan, static_cast<uint32_t>(n - 2), scene_colour(ch.colour), 1);
+            emit_polygon(pts, n, kFan, static_cast<uint32_t>(n - 2), scene_colour(ch.colour, opt->dither), 1);
         }
     }
     ribbons = false;
@@ -2833,10 +2871,10 @@ void SceneBuilder::Impl::draw_sky() {
     const SceneColour c = ega_colour(kSkyColour);
     SceneVertex* v = grow_vertices(4);
     const auto base = static_cast<int32_t>(out->vertices.size()) - 4;
-    v[0] = {left, top, c.r, c.g, c.b, 1};
-    v[1] = {right + 1, top, c.r, c.g, c.b, 1};
-    v[2] = {right + 1, bottom + 1, c.r, c.g, c.b, 1};
-    v[3] = {left, bottom + 1, c.r, c.g, c.b, 1};
+    v[0] = {left, top, c.r, c.g, c.b, 1, 0, c.r2, c.g2, c.b2, 1, c.dither};
+    v[1] = {right + 1, top, c.r, c.g, c.b, 1, 0, c.r2, c.g2, c.b2, 1, c.dither};
+    v[2] = {right + 1, bottom + 1, c.r, c.g, c.b, 1, 0, c.r2, c.g2, c.b2, 1, c.dither};
+    v[3] = {left, bottom + 1, c.r, c.g, c.b, 1, 0, c.r2, c.g2, c.b2, 1, c.dither};
     int32_t* ix = grow_indices(6);
     const int32_t quad[6] = {0, 1, 2, 0, 2, 3};
     for (int k = 0; k < 6; ++k) ix[k] = base + quad[k];

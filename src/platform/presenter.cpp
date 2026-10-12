@@ -130,6 +130,7 @@ struct Presenter::Gpu {
         vs.stage = SDL_GPU_SHADERSTAGE_VERTEX;
         vs.num_uniform_buffers = 1;
         ps.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+        ps.num_uniform_buffers = 1;
         vertex_shader = SDL_CreateGPUShader(device, &vs);
         pixel_shader = SDL_CreateGPUShader(device, &ps);
         if (!vertex_shader || !pixel_shader)
@@ -151,6 +152,8 @@ struct Presenter::Gpu {
             {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(enhanced::SceneVertex, x)},
             {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(enhanced::SceneVertex, r)},
             {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, offsetof(enhanced::SceneVertex, depth)},
+            {3, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(enhanced::SceneVertex, r2)},
+            {4, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, offsetof(enhanced::SceneVertex, dither)},
         };
         SDL_GPUColorTargetDescription target_desc{};
         target_desc.format = format;
@@ -165,7 +168,7 @@ struct Presenter::Gpu {
         info.vertex_input_state.vertex_buffer_descriptions = &buffer;
         info.vertex_input_state.num_vertex_buffers = 1;
         info.vertex_input_state.vertex_attributes = attributes;
-        info.vertex_input_state.num_vertex_attributes = 3;
+        info.vertex_input_state.num_vertex_attributes = 5;
         info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
         info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
         info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
@@ -431,13 +434,69 @@ void Presenter::draw_triangles(const enhanced::Scene& scene, int frame_w, int fr
                         edge(dst.y + static_cast<float>(scene.view_y1) * sy) - y0};
     SDL_SetRenderClipRect(renderer, &clip);
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);  // screen-door faces are translucent
-    SDL_RenderGeometryRaw(renderer, nullptr, scene_xy_.data(), static_cast<int>(2 * sizeof(float)),
-                          reinterpret_cast<const SDL_FColor*>(&scene.vertices[0].r),
-                          static_cast<int>(sizeof(enhanced::SceneVertex)), nullptr, 0,
-                          static_cast<int>(scene.vertices.size()), scene.indices.data(),
-                          static_cast<int>(scene.indices.size()), static_cast<int>(sizeof(std::int32_t)));
+    const int stride = static_cast<int>(sizeof(enhanced::SceneVertex));
+    const int nv = static_cast<int>(scene.vertices.size());
+    const auto draw = [&](const std::int32_t* first, size_t count, const SDL_FColor* colours, SDL_Texture* texture,
+                          const float* uv) {
+        SDL_RenderGeometryRaw(renderer, texture, scene_xy_.data(), static_cast<int>(2 * sizeof(float)), colours, stride, uv,
+                              static_cast<int>(2 * sizeof(float)), nv, first, static_cast<int>(count),
+                              static_cast<int>(sizeof(std::int32_t)));
+    };
+    const auto* first_colours = reinterpret_cast<const SDL_FColor*>(&scene.vertices[0].r);
+    SDL_Texture* checker = dither_ ? checkerboard(dst, frame_w, frame_h) : nullptr;
+    if (!checker) {
+        draw(scene.indices.data(), scene.indices.size(), first_colours, nullptr, nullptr);
+    } else {
+        // Dithered faces: their first colour with the rest, then their second through the checkerboard (the
+        // same cells for every face, so a run of them can go as a whole; a run changes with the flag).
+        scene_uv_.resize(scene.vertices.size() * 2);
+        for (std::size_t i = 0; i < scene.vertices.size(); ++i) {
+            scene_uv_[2 * i] = (scene_xy_[2 * i] - dst.x) / dst.w;
+            scene_uv_[2 * i + 1] = (scene_xy_[2 * i + 1] - dst.y) / dst.h;
+        }
+        const auto* second_colours = reinterpret_cast<const SDL_FColor*>(&scene.vertices[0].r2);
+        const size_t triangles = scene.indices.size() / 3;
+        const auto dithered = [&](size_t t) {
+            return scene.vertices[static_cast<size_t>(scene.indices[3 * t])].dither > 0.5f;
+        };
+        for (size_t start = 0; start < triangles;) {
+            const bool d = dithered(start);
+            size_t end = start + 1;
+            while (end < triangles && dithered(end) == d)
+                ++end;
+            draw(scene.indices.data() + 3 * start, 3 * (end - start), first_colours, nullptr, nullptr);
+            if (d)
+                draw(scene.indices.data() + 3 * start, 3 * (end - start), second_colours, checker, scene_uv_.data());
+            start = end;
+        }
+    }
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderClipRect(renderer, nullptr);
+}
+
+SDL_Texture* Presenter::checkerboard(const SDL_FRect& dst, int frame_w, int frame_h) {
+    const int w = std::max(1, static_cast<int>(std::lround(dst.w)));
+    const int h = std::max(1, static_cast<int>(std::lround(dst.h)));
+    if (checker_ && w == checker_w_ && h == checker_h_ && frame_w == checker_fw_ && frame_h == checker_fh_)
+        return checker_.get();
+    checker_ = create_texture(renderer_.get(), SDL_TEXTUREACCESS_STATIC, w, h, SDL_SCALEMODE_NEAREST);
+    SDL_SetTextureBlendMode(checker_.get(), SDL_BLENDMODE_BLEND);
+    std::vector<std::uint32_t> pixels(static_cast<size_t>(w) * static_cast<size_t>(h));
+    std::vector<int> column(static_cast<size_t>(w));
+    for (int x = 0; x < w; ++x)
+        column[static_cast<size_t>(x)] = x * frame_w / w;
+    for (int y = 0; y < h; ++y) {
+        const int row = y * frame_h / h;
+        std::uint32_t* out = &pixels[static_cast<size_t>(y) * static_cast<size_t>(w)];
+        for (int x = 0; x < w; ++x)
+            out[x] = ((column[static_cast<size_t>(x)] + row) & 1) ? 0xFFFFFFFFu : 0u;
+    }
+    SDL_UpdateTexture(checker_.get(), nullptr, pixels.data(), w * static_cast<int>(sizeof(std::uint32_t)));
+    checker_w_ = w;
+    checker_h_ = h;
+    checker_fw_ = frame_w;
+    checker_fh_ = frame_h;
+    return checker_.get();
 }
 
 // The scene (and the mirror's) into the depth pass's target, `w` x `h` pixels for the whole frame: the
@@ -554,6 +613,8 @@ SDL_Texture* Presenter::draw_depth_tested(const enhanced::Scene& scene, const en
     SDL_PushGPUVertexUniformData(cmd, 0, transform, sizeof transform);
     // A viewport in frame coordinates, in target pixels (rounded as draw_triangles() clips).
     const float sx = static_cast<float>(w) / fw, sy = static_cast<float>(h) / fh;
+    const float cell[4] = {sx, sy, dither_ ? 1.0f : 0.0f, 0};  // the dither's cell: a frame pixel
+    SDL_PushGPUFragmentUniformData(cmd, 0, cell, sizeof cell);
     const auto rect = [&](int x0, int y0, int x1, int y1) {
         const int l = std::clamp(static_cast<int>(std::lround(static_cast<float>(x0) * sx)), 0, w);
         const int t = std::clamp(static_cast<int>(std::lround(static_cast<float>(y0) * sy)), 0, h);

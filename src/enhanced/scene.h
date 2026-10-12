@@ -33,6 +33,11 @@ struct SceneVertex {
     // a window on a wall, an outline on a face), else 0. The backdrop (ground, water, sky) is 0. At most
     // 1 + kMaxDepthLayer * kDepthStep.
     float depth = 0;
+    // A second colour, for faces the original draws in two colours as a checkerboard (SceneOptions::dither):
+    // with `dither` 1 the Presenter draws it on the odd cells of the race frame's pixel grid and the colour
+    // above on the even; 0 draws the colour above alone. a2 repeats a: the second pass is drawn from here.
+    float r2 = 0, g2 = 0, b2 = 0, a2 = 1;
+    float dither = 0;
 };
 inline constexpr float kDepthStep = 1.0f / 1536;
 inline constexpr int kMaxDepthLayer = 7;
@@ -116,6 +121,9 @@ struct SceneOptions {
     // SceneVertex::depth for a depth buffer. Off: every depth is 0 (drawn in painter's order; it saves the
     // layer bookkeeping).
     bool depth = true;
+    // Faces the original draws in two colours as a checkerboard (the shaded sides of buildings, the water):
+    // as that checkerboard, a cell a race-frame pixel, rather than the two colours blended to one.
+    bool dither = false;
     // The ground quad of every big tile in its ground colour (DS:8556), drawn first, over water that
     // extends beyond the map's edge to the horizon.
     bool ground = true;
@@ -180,8 +188,13 @@ public:
 // colours (0..1 floats). Screen-door model faces use the base colour at alpha 0.5.
 struct SceneColour {
     float r = 0, g = 0, b = 0;
+    // scene_colour(c, true) of a two-colour colour: the second colour, with dither 1 (see SceneVertex).
+    float r2 = 0, g2 = 0, b2 = 0;
+    float dither = 0;
 };
-SceneColour scene_colour(Colour c);
+// A face's colour: a two-colour one as the original's checkerboard with `dither` (its colours apart, for
+// the Presenter), else the two blended to one.
+SceneColour scene_colour(Colour c, bool dither = false);
 SceneColour ega_colour(int index);  // 0..15
 
 class SceneBuilder {

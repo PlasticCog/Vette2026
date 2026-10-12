@@ -35,7 +35,8 @@ public:
     // The car as last drawn, in the frame's coordinates (viewport: the box), if the opponent screen is on
     // and has drawn one lately. `line_width`: the outlines' width in frame pixels. `smooth`: turning
     // between the last two drawings, one drawing behind (the Smooth frame rate), not in its steps.
-    bool build(uint64_t now_ns, float line_width, bool smooth, Scene& out) const;
+    // `dither`: its two-colour faces as the original's checkerboard (SceneOptions::dither).
+    bool build(uint64_t now_ns, float line_width, bool smooth, bool dither, Scene& out) const;
 
 private:
     struct Capture;

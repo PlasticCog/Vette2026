@@ -47,6 +47,9 @@ struct Settings {
     // city's traffic and pedestrians are drawn. Off (or without a GPU that can): the original's
     // back-to-front order, with traffic and pedestrians only near the car, where the original has them.
     bool depth_buffer = true;
+    // Enhanced view: faces the original draws in two colours as a checkerboard (the shaded sides of
+    // buildings, the water) drawn so, a cell a race-frame pixel, rather than the two blended to one.
+    bool dither = false;
     // Driving (they change how the race plays, so they're off unless chosen; Classic turns them off).
     // Improved: the player's car drifts a little through fast corners and leaves the ground over crests
     // at speed. Lane centering: a slight steering assist toward the lane's direction and centre.

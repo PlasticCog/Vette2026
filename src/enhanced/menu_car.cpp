@@ -86,7 +86,7 @@ MenuCar::MenuCar(host::Machine& machine) : machine_(machine), capture_(std::make
 
 MenuCar::~MenuCar() = default;
 
-bool MenuCar::build(uint64_t now_ns, float line_width, bool smooth, Scene& out) const {
+bool MenuCar::build(uint64_t now_ns, float line_width, bool smooth, bool dither, Scene& out) const {
     const Capture::Shot& last = capture_->last;
     if (!capture_->on_screen || last.at_ns == 0 || now_ns - last.at_ns > kStaleNs) return false;
     // Smooth: from the drawing before the last towards the last over the time between them (the last's
@@ -134,6 +134,11 @@ bool MenuCar::build(uint64_t now_ns, float line_width, bool smooth, Scene& out) 
         sv.g = c.g;
         sv.b = c.b;
         sv.a = a;
+        sv.r2 = c.r2;
+        sv.g2 = c.g2;
+        sv.b2 = c.b2;
+        sv.a2 = a;
+        sv.dither = c.dither;
         sv.depth = 0;  // in the original's order (its faces back to front), as it paints them: no depth test
         out.indices.push_back(static_cast<int32_t>(out.vertices.size()));
         out.vertices.push_back(sv);
@@ -166,7 +171,7 @@ bool MenuCar::build(uint64_t now_ns, float line_width, bool smooth, Scene& out) 
         if (f.flags & 0x4000) continue;
         Colour colour;
         colour.raw = f.colour;
-        const SceneColour col = scene_colour(colour);
+        const SceneColour col = scene_colour(colour, dither);
         const float alpha = (f.flags & 0x8000) ? 0.5f : 1.0f;
         for (const auto& prim : f.prims) {
             bool near = true;
